@@ -72,7 +72,10 @@ export class PositionRefresher {
       return changed || trigger === 'reconcile';
     } catch (err) {
       rt.lastPollOk = false;
-      this.logger.warn({ err, address: rt.address, trigger }, 'refresh failed — keeping last good data');
+      this.logger.warn(
+        { err, address: rt.address, trigger },
+        'refresh failed — keeping last good data',
+      );
       return false;
     } finally {
       rt.refreshing = false;
@@ -133,7 +136,13 @@ export class PositionRefresher {
               { side: p.rangeStatus === 'out_up' ? 'up' : 'down', price: p.poolPrice },
             );
           } else if (isOutOfRange(prev.rangeStatus)) {
-            this.emitter.emitEvent('oor_return', p.wallet, p, `${p.tokenX}/${p.tokenY} back in range`, {});
+            this.emitter.emitEvent(
+              'oor_return',
+              p.wallet,
+              p,
+              `${p.tokenX}/${p.tokenY} back in range`,
+              {},
+            );
           }
         }
       }

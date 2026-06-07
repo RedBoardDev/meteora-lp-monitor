@@ -1,5 +1,7 @@
 import { WALLET_BALANCE_REFRESH_MS, type WalletState } from '@meteora/shared';
 import type { Logger } from 'pino';
+import type { EventBus } from '@/application/event-bus';
+import type { LpAgentEnricher } from '@/application/lpagent-enricher';
 import type { AppConfig } from '@/config/env';
 import type {
   BalanceGateway,
@@ -10,12 +12,10 @@ import type {
   RpcSubscriber,
 } from '@/domain/ports';
 import { classifyInstruction } from '@/infrastructure/solana/helius-subscriber';
-import type { EventBus } from '@/application/event-bus';
-import type { LpAgentEnricher } from '@/application/lpagent-enricher';
 import { refreshBalance } from './balance';
 import { StateEmitter } from './emitter';
-import { PositionRefresher } from './refresher';
 import { Reconciler } from './reconciler';
+import { PositionRefresher } from './refresher';
 import { makeRuntime, type WalletRuntime } from './runtime';
 import { clamp } from './utils';
 
@@ -32,7 +32,7 @@ export class Engine {
   private effectiveRps = 0;
 
   constructor(
-    private readonly gateway: PositionsGateway,
+    gateway: PositionsGateway,
     prices: PriceGateway,
     private readonly subscriber: RpcSubscriber,
     private readonly balances: BalanceGateway,
@@ -112,7 +112,8 @@ export class Engine {
 
       if (!rt.refreshing && Date.now() - rt.lastPollAt >= interval) void this.doRefresh(rt, 'poll');
       if (Date.now() - rt.lastBalanceAt >= WALLET_BALANCE_REFRESH_MS) void this.doBalance(rt);
-      if (Date.now() - rt.lastClosedSyncAt >= CLOSED_RESYNC_MS) void this.reconciler.resyncClosed(rt);
+      if (Date.now() - rt.lastClosedSyncAt >= CLOSED_RESYNC_MS)
+        void this.reconciler.resyncClosed(rt);
       if (hasOpen) rps += rt.pools.length / (interval / 1000);
     }
 

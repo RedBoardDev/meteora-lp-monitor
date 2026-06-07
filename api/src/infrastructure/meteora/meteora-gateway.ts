@@ -94,7 +94,9 @@ export class MeteoraGateway implements PositionsGateway {
     // Non-SOL token currently held (balanceTokenX/Y, confirmed from the live payload) — to revalue
     // at the market price in the engine. amount==0 means the position is fully on the SOL side.
     const yIsSol = (pool.tokenY || '').toUpperCase() === 'SOL';
-    const hold = (yIsSol ? u.balanceTokenX : u.balanceTokenY) as Record<string, unknown> | undefined;
+    const hold = (yIsSol ? u.balanceTokenX : u.balanceTokenY) as
+      | Record<string, unknown>
+      | undefined;
     const holdAmount = num(hold?.amount);
     return {
       positionAddress: String(p.positionAddress),

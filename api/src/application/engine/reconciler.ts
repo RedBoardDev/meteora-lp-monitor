@@ -1,7 +1,7 @@
 import type { Logger } from 'pino';
-import type { PoolRef, PositionRepository, PositionsGateway } from '@/domain/ports';
-import type { LpAgentEnricher } from '@/application/lpagent-enricher';
 import type { EventBus } from '@/application/event-bus';
+import type { LpAgentEnricher } from '@/application/lpagent-enricher';
+import type { PoolRef, PositionRepository, PositionsGateway } from '@/domain/ports';
 import type { WalletRuntime } from './runtime';
 import { chunked } from './utils';
 
@@ -39,7 +39,10 @@ export class Reconciler {
       rt.reconciled = true;
       this.logger.info({ address: rt.address, closed: closed.length }, 'reconciliation complete');
     } catch (err) {
-      this.logger.error({ err, address: rt.address }, 'reconciliation failed — will retry on next poll');
+      this.logger.error(
+        { err, address: rt.address },
+        'reconciliation failed — will retry on next poll',
+      );
     }
   }
 
@@ -76,7 +79,10 @@ export class Reconciler {
       // Resolve positions stuck in 'pending_close' — catches closes older than the window.
       const pendingPools = this.repo.pendingClosePools(rt.address);
       if (pendingPools.length > 0) {
-        this.logger.warn({ address: rt.address, pendingClose: pendingPools.length }, 'resolving pending_close');
+        this.logger.warn(
+          { address: rt.address, pendingClose: pendingPools.length },
+          'resolving pending_close',
+        );
         const stuck = await chunked(pendingPools, (p) =>
           this.gateway.fetchClosedPositions(rt.address, p).catch(() => []),
         );

@@ -1,11 +1,10 @@
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import Fastify from 'fastify';
-import type { Logger } from 'pino';
-import type { AppConfig } from '@/config/env';
 import type { Engine } from '@/application/engine';
-import type { NotificationManager } from '@/application/notification/manager';
 import type { EventBus } from '@/application/event-bus';
+import type { NotificationManager } from '@/application/notification/manager';
+import type { AppConfig } from '@/config/env';
 import type { ConfigRepository, PositionRepository } from '@/domain/ports';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
 import { registerRoutes } from './routes';
@@ -19,11 +18,10 @@ export type ServerDeps = {
   configRepo: ConfigRepository;
   notifications: NotificationManager;
   presence: PresenceTracker;
-  logger: Logger;
 };
 
 export async function buildServer(deps: ServerDeps) {
-  const app = Fastify({ loggerInstance: deps.logger });
+  const app = Fastify({ logger: { level: deps.config.LOG_LEVEL } });
 
   // Allowlist for browsers — Auth is the real boundary; this is defense-in-depth.
   await app.register(cors, {

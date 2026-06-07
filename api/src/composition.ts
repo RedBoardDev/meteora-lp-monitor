@@ -43,7 +43,7 @@ export function compose(config: AppConfig): App {
   const gateway = new MeteoraGateway(logger);
   const prices = new JupiterPriceGateway(logger, config.JUPITER_PRICE_URL);
   const lpAgentQueue = new RateLimitedQueue(config.LPAGENT_RPM);
-  const lpAgent = new LpAgentGateway(config.LPAGENT_BASE_URL, config.LPAGENT_API_KEY, lpAgentQueue, logger);
+  const lpAgent = new LpAgentGateway(config.LPAGENT_BASE_URL, config.LPAGENT_API_KEY, lpAgentQueue);
   const enricher = new LpAgentEnricher(lpAgent, positionRepo, bus, logger);
   const subscriber = new HeliusSubscriber(config.SOLANA_WS_URL, logger);
   const balances = new RpcBalanceGateway(config.solanaHttpUrl, logger);
@@ -80,7 +80,6 @@ export function compose(config: AppConfig): App {
         configRepo,
         notifications,
         presence,
-        logger,
       });
       // db closes last (after in-flight requests drain in app.close); engine stops first.
       server.addHook('onClose', async () => db.close());

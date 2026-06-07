@@ -1,7 +1,7 @@
 import type { LiveEvent, OpenPosition, WalletState } from '@meteora/shared';
-import type { RpcSubscriber } from '@/domain/ports';
 import type { EventBus } from '@/application/event-bus';
 import { buildWalletState } from '@/application/wallet-state';
+import type { RpcSubscriber } from '@/domain/ports';
 import { currentIdle } from './balance';
 import type { WalletRuntime } from './runtime';
 

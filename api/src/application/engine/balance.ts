@@ -16,7 +16,10 @@ export async function refreshBalance(
   rt.lastBalanceAt = Date.now();
   const fresh = await balances.getIdleSol(rt.address);
   // Once the RPC balance reflects the in-flight move, fold the delta in to avoid double-counting.
-  if (rt.pendingDelta !== 0 && Math.abs(fresh - rt.idleConfirmed) >= Math.abs(rt.pendingDelta) / 2) {
+  if (
+    rt.pendingDelta !== 0 &&
+    Math.abs(fresh - rt.idleConfirmed) >= Math.abs(rt.pendingDelta) / 2
+  ) {
     rt.pendingDelta = 0;
   }
   rt.idleConfirmed = fresh;

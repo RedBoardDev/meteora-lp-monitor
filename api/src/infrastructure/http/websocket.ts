@@ -1,9 +1,9 @@
-import type { FastifyInstance } from 'fastify';
 import { ClientMessageSchema } from '@meteora/shared';
+import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
-import type { AppConfig } from '@/config/env';
 import type { Engine } from '@/application/engine';
 import type { EventBus } from '@/application/event-bus';
+import type { AppConfig } from '@/config/env';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
 
 interface WsClient {
@@ -65,7 +65,8 @@ export function registerWebSocket(
   bus.on('state', (state) => {
     for (const c of clients) {
       if (c.scope === state.scope) send(c.socket, { type: 'state', payload: state });
-      else if (c.scope === 'all') send(c.socket, { type: 'state', payload: engine.getState('all') });
+      else if (c.scope === 'all')
+        send(c.socket, { type: 'state', payload: engine.getState('all') });
     }
   });
   // Raw live feed — drives history refetch on the client, never a banner (ungated).

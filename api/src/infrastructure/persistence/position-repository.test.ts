@@ -49,11 +49,15 @@ describe('SqlitePositionRepository — closed PnL', () => {
   it('setAuthoritativePnl (LPAgent) overrides even after freeze, and survives a later resync', () => {
     const repo = new SqlitePositionRepository(openDatabase(':memory:'));
     const closedAt = Date.now() - 300_000; // past the settle/freeze window
-    repo.upsertClosed([{ ...base, positionAddress: 'F', closedAt, pnlSol: -0.01, pnlSource: 'pool' }]);
+    repo.upsertClosed([
+      { ...base, positionAddress: 'F', closedAt, pnlSol: -0.01, pnlSource: 'pool' },
+    ]);
     repo.setAuthoritativePnl('F', -0.19174); // LPAgent's market-valued PnL
     expect(read(repo).pnlSol).toBeCloseTo(-0.19174);
     // The 90s pool-price resync must not clobber the LPAgent value.
-    repo.upsertClosed([{ ...base, positionAddress: 'F', closedAt, pnlSol: -0.02, pnlSource: 'pool' }]);
+    repo.upsertClosed([
+      { ...base, positionAddress: 'F', closedAt, pnlSol: -0.02, pnlSource: 'pool' },
+    ]);
     expect(read(repo).pnlSol).toBeCloseTo(-0.19174);
   });
 });
@@ -63,7 +67,9 @@ describe('SqlitePositionRepository — close PnL freeze', () => {
     const repo = new SqlitePositionRepository(openDatabase(':memory:'));
     const closedAt = Date.now(); // just closed — Meteora indexer may still be settling
     // Provisional capture right after close (the inflated value that wrongly alerted the user).
-    repo.upsertClosed([{ ...base, positionAddress: 'C', closedAt, pnlSol: 0.06, pnlSource: 'pool' }]);
+    repo.upsertClosed([
+      { ...base, positionAddress: 'C', closedAt, pnlSol: 0.06, pnlSource: 'pool' },
+    ]);
     // A resync moments later carries the settled figure — must overwrite while still in-window.
     repo.upsertClosed([
       { ...base, positionAddress: 'C', closedAt, pnlSol: -0.0146, pnlSource: 'pool' },

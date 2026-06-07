@@ -1,11 +1,17 @@
+import {
+  EventKindSchema,
+  type LiveEvent,
+  NotifRuleSchema,
+  RuntimeSettingsSchema,
+  WalletSchema,
+} from '@meteora/shared';
 import type { FastifyInstance } from 'fastify';
-import { EventKindSchema, NotifRuleSchema, RuntimeSettingsSchema, WalletSchema, type LiveEvent } from '@meteora/shared';
 import type { Engine } from '@/application/engine';
-import type { NotificationManager } from '@/application/notification/manager';
-import type { ConfigRepository, PositionRepository } from '@/domain/ports';
 import type { EventBus } from '@/application/event-bus';
-import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import type { NotificationManager } from '@/application/notification/manager';
 import { computeStats } from '@/application/stats';
+import type { ConfigRepository, PositionRepository } from '@/domain/ports';
+import type { PresenceTracker } from '@/infrastructure/notifications/presence';
 
 export type RouteDeps = {
   bus: EventBus;
@@ -23,7 +29,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   // Fires a fake event through the normal path — for verifying notifications end-to-end.
   app.post('/debug/notify', async (req) => {
-    const kind = EventKindSchema.safeParse((req.query as Record<string, string>).kind).data ?? 'position_close';
+    const kind =
+      EventKindSchema.safeParse((req.query as Record<string, string>).kind).data ??
+      'position_close';
     const ev: LiveEvent = {
       id: `test-${Date.now()}`,
       kind,
@@ -38,7 +46,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     bus.emit('event', ev);
     const activeDevices = presence.activeDevices();
     // A device only reports active when it'll show a native banner (foreground + notifs enabled).
-    return { ok: true, kind, activeDevices, willRoute: activeDevices.length > 0 ? 'native' : 'bark' };
+    return {
+      ok: true,
+      kind,
+      activeDevices,
+      willRoute: activeDevices.length > 0 ? 'native' : 'bark',
+    };
   });
 
   app.get('/wallets', async () => configRepo.listWallets());
@@ -46,7 +59,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post('/wallets', async (req, reply) => {
     const body = WalletSchema.partial({ createdAt: true, label: true }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: body.error.format() });
-    configRepo.addWallet({ address: body.data.address, label: body.data.label ?? '', color: body.data.color });
+    configRepo.addWallet({
+      address: body.data.address,
+      label: body.data.label ?? '',
+      color: body.data.color,
+    });
     engine.addWallet(body.data.address);
     return { ok: true };
   });
@@ -92,5 +109,4 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.format() });
     return configRepo.saveSettings(parsed.data);
   });
-
 }

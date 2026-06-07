@@ -1,8 +1,8 @@
 import type { ClosedPosition, EventKind, LiveEvent, NotifRule, WalletState } from '@meteora/shared';
 import type { Logger } from 'pino';
+import type { EventBus } from '@/application/event-bus';
 import type { ConfigRepository, NotificationChannel } from '@/domain/ports';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
-import type { EventBus } from '@/application/event-bus';
 import { BulkBuffer } from './buffer';
 
 const STARTUP_GRACE_MS = 10_000;
@@ -74,7 +74,14 @@ export class NotificationManager {
       if (pnlRule?.enabled && pnlRule.threshold != null) {
         if (Math.abs(p.pnlSol) >= pnlRule.threshold) {
           this.once(`pnl:${p.positionAddress}`, () =>
-            this.emitDerived('pnl_threshold', p.wallet, p.positionAddress, `${p.tokenX}/${p.tokenY}`, `PnL ${fmt(p.pnlSol)} SOL`, { pnlSol: p.pnlSol }),
+            this.emitDerived(
+              'pnl_threshold',
+              p.wallet,
+              p.positionAddress,
+              `${p.tokenX}/${p.tokenY}`,
+              `PnL ${fmt(p.pnlSol)} SOL`,
+              { pnlSol: p.pnlSol },
+            ),
           );
         } else {
           this.notifiedThreshold.delete(`pnl:${p.positionAddress}`);
@@ -84,7 +91,14 @@ export class NotificationManager {
       if (feeRule?.enabled && feeRule.threshold != null) {
         if (p.unclaimedFeesSol >= feeRule.threshold) {
           this.once(`fees:${p.positionAddress}`, () =>
-            this.emitDerived('fees_threshold', p.wallet, p.positionAddress, `${p.tokenX}/${p.tokenY}`, `${fmt(p.unclaimedFeesSol)} SOL fees to claim`, { feesSol: p.unclaimedFeesSol }),
+            this.emitDerived(
+              'fees_threshold',
+              p.wallet,
+              p.positionAddress,
+              `${p.tokenX}/${p.tokenY}`,
+              `${fmt(p.unclaimedFeesSol)} SOL fees to claim`,
+              { feesSol: p.unclaimedFeesSol },
+            ),
           );
         } else {
           this.notifiedThreshold.delete(`fees:${p.positionAddress}`);
@@ -95,7 +109,14 @@ export class NotificationManager {
         const minutes = (now - p.outOfRangeSince) / 60_000;
         if (minutes >= oorRule.oorMinutes) {
           this.once(`oord:${p.positionAddress}:${Math.floor(p.outOfRangeSince)}`, () =>
-            this.emitDerived('oor_duration', p.wallet, p.positionAddress, `${p.tokenX}/${p.tokenY}`, `out of range ${Math.floor(minutes)} min`, { minutes: Math.floor(minutes) }),
+            this.emitDerived(
+              'oor_duration',
+              p.wallet,
+              p.positionAddress,
+              `${p.tokenX}/${p.tokenY}`,
+              `out of range ${Math.floor(minutes)} min`,
+              { minutes: Math.floor(minutes) },
+            ),
           );
         }
       }

@@ -1,4 +1,3 @@
-import type { Logger } from 'pino';
 import type { RateLimitedQueue } from './rate-limited-queue';
 
 /** A closed position as LPAgent reports it — PnL with the residual valued at market price. */
@@ -45,7 +44,6 @@ export class LpAgentGateway {
     private readonly baseUrl: string,
     private readonly apiKey: string,
     private readonly queue: RateLimitedQueue,
-    private readonly logger: Logger,
   ) {}
 
   get enabled(): boolean {

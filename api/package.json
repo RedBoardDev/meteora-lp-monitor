@@ -23,6 +23,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.5",
+    "@types/ws": "^8",
     "pino-pretty": "^13.0.0",
     "tsup": "^8.5.1",
     "tsx": "^4.19.2",
