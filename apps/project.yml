@@ -1,0 +1,71 @@
+name: MeteoraLPMonitor
+options:
+  bundleIdPrefix: com.meteoralpmonitor
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  MeteoraLPMonitorKit:
+    path: MeteoraLPMonitorKit
+
+targets:
+  MeteoraLPMonitorMac:
+    type: application
+    platform: macOS
+    sources:
+      - MeteoraLPMonitorMac
+    dependencies:
+      - package: MeteoraLPMonitorKit
+    info:
+      path: MeteoraLPMonitorMac/Info.generated.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: LP Monitor
+        NSHumanReadableCopyright: ""
+        MLPMApiURL: "$(MLPM_API_URL)"
+        MLPMApiToken: "$(MLPM_API_TOKEN)"
+    settings:
+      base:
+        PRODUCT_NAME: MeteoraLPMonitor
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_BUNDLE_IDENTIFIER: com.meteoralpmonitor.mac
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        ENABLE_HARDENED_RUNTIME: NO
+        MLPM_API_URL: http://localhost:8787
+        MLPM_API_TOKEN: ""
+
+  MeteoraLPMonitoriOS:
+    type: application
+    platform: iOS
+    sources:
+      - MeteoraLPMonitoriOS
+    dependencies:
+      - package: MeteoraLPMonitorKit
+    info:
+      path: MeteoraLPMonitoriOS/Info.generated.plist
+      properties:
+        CFBundleDisplayName: LP Monitor
+        UILaunchScreen: {}
+        NSLocalNetworkUsageDescription: Connect to your Meteora LP Monitor API on the local network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        MLPMApiURL: "$(MLPM_API_URL)"
+        MLPMApiToken: "$(MLPM_API_TOKEN)"
+    settings:
+      base:
+        PRODUCT_NAME: MeteoraLPMonitor
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_BUNDLE_IDENTIFIER: com.meteoralpmonitor.ios
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        MLPM_API_URL: http://localhost:8787
+        MLPM_API_TOKEN: ""

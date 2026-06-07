@@ -1,0 +1,33 @@
+import UserNotifications
+
+public final class Notifier: NSObject, UNUserNotificationCenterDelegate {
+    public static let shared = Notifier()
+    override private init() { super.init() }
+
+    /// Call once at launch. Registers the delegate so notifications show even when the app is
+    /// active/foreground — the exact case where the backend routes to native instead of Bark —
+    /// and requests authorization.
+    public static func bootstrap() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = shared
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    public func userNotificationCenter(
+        _: UNUserNotificationCenter,
+        willPresent _: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void,
+    ) {
+        completionHandler([.banner, .sound, .list])
+    }
+
+    public static func show(_ event: LiveEvent) {
+        let content = UNMutableNotificationContent()
+        content.title = event.title
+        content.body = event.body
+        content.threadIdentifier = event.pair ?? "portfolio"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: event.id, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+}

@@ -1,0 +1,49 @@
+import Foundation
+
+/// Client configuration (API endpoint + token).
+/// Resolution order: user override (UserDefaults, set in Settings) → value baked at build
+/// time from the repo `.env` (Info.plist seed) → hardcoded fallback.
+/// P2: switch `defaults` to `UserDefaults(suiteName: appGroup)` once the App Group
+/// entitlement is provisioned, so widgets/Live Activity read the same config.
+public enum Config {
+    public static let appGroup = "group.com.meteoralpmonitor"
+
+    static var defaults: UserDefaults { .standard }
+
+    /// Non-empty Info.plist string baked at build time (see the Makefile's MLPM_* settings).
+    private static func seed(_ key: String) -> String? {
+        guard let s = Bundle.main.object(forInfoDictionaryKey: key) as? String, !s.isEmpty else {
+            return nil
+        }
+        return s
+    }
+
+    public static var apiURL: String {
+        get { defaults.string(forKey: "apiURL") ?? seed("MLPMApiURL") ?? "http://localhost:8787" }
+        set { defaults.set(newValue, forKey: "apiURL") }
+    }
+    /// Secret — stored in the Keychain (not UserDefaults). Falls back to the build-time seed.
+    public static var token: String {
+        get { Keychain.get("apiToken") ?? seed("MLPMApiToken") ?? "" }
+        set { Keychain.set("apiToken", newValue) }
+    }
+
+    /// Master switch: when off, the app shows no native notifications (default on).
+    public static var notificationsEnabled: Bool {
+        get { defaults.object(forKey: "notificationsEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "notificationsEnabled") }
+    }
+
+    /// Whether the app has the minimum config to connect (an API token).
+    public static var isConfigured: Bool { !token.isEmpty }
+}
+
+/// User-facing hint for a non-live connection state (nil when live/connecting normally).
+public func connectionHint(_ state: ConnectionState, apiURL: String) -> String? {
+    switch state {
+    case .unconfigured: "No API token set — open Settings to connect."
+    case .unauthorized: "Unauthorized — check your API token in Settings."
+    case .offline: "Can't reach the API at \(apiURL)."
+    case .connecting, .live: nil
+    }
+}

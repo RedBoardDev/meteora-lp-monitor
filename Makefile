@@ -72,9 +72,9 @@ APPS := apps
 ENV_FILE := .env
 # Pull defaults from the repo .env at build time → baked into the app (overridable in Settings).
 envval = $(shell [ -f $(ENV_FILE) ] && sed -n 's/^$(1)=//p' $(ENV_FILE) | tail -1 | tr -d '"')
-LPW_TOKEN := $(call envval,API_TOKEN)
-LPW_URL := $(or $(call envval,CLIENT_API_URL),http://localhost:8787)
-LPW_BAKE := LPW_API_URL="$(LPW_URL)" LPW_API_TOKEN="$(LPW_TOKEN)"
+MLPM_TOKEN := $(call envval,API_TOKEN)
+MLPM_URL := $(or $(call envval,CLIENT_API_URL),http://localhost:8787)
+MLPM_BAKE := MLPM_API_URL="$(MLPM_URL)" MLPM_API_TOKEN="$(MLPM_TOKEN)"
 # Sign with the first code-signing identity in your keychain (a FREE Apple ID's "Apple
 # Development" cert is enough — no $99 needed). A real signature is required for macOS
 # notifications; the app is non-sandboxed so no provisioning profile is needed. Ad-hoc fallback.
@@ -97,8 +97,8 @@ xcode: apps-gen ## Open the Meteora LP Monitor project in Xcode
 
 .PHONY: notify-test
 notify-test: ## Fire a test position_close notification. KIND=oor_enter to override.
-	@curl -s -X POST -H "Authorization: Bearer $(LPW_TOKEN)" \
-		"$(LPW_URL)/debug/notify?kind=$(or $(KIND),position_close)"; echo
+	@curl -s -X POST -H "Authorization: Bearer $(MLPM_TOKEN)" \
+		"$(MLPM_URL)/debug/notify?kind=$(or $(KIND),position_close)"; echo
 
 .PHONY: apps-test
 apps-test: ## Run the shared Swift package tests (MeteoraLPMonitorKit)
@@ -107,7 +107,7 @@ apps-test: ## Run the shared Swift package tests (MeteoraLPMonitorKit)
 .PHONY: install-mac
 install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to sign (needed for notifs)
 	cd $(APPS) && xcodebuild -scheme MeteoraLPMonitorMac -configuration Release \
-		-derivedDataPath $(BUILD_DIR)/mac $(MAC_SIGN) $(LPW_BAKE) build
+		-derivedDataPath $(BUILD_DIR)/mac $(MAC_SIGN) $(MLPM_BAKE) build
 	@killall MeteoraLPMonitor 2>/dev/null && sleep 1 || true
 	rm -rf /Applications/MeteoraLPMonitor.app
 	cp -R $(BUILD_DIR)/mac/Build/Products/Release/MeteoraLPMonitor.app /Applications/
@@ -118,7 +118,7 @@ install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to s
 run-ios: apps-gen ## iOS: build & launch on a simulator (no Apple ID needed)
 	cd $(APPS) && xcodebuild -scheme MeteoraLPMonitoriOS -configuration Debug \
 		-destination 'generic/platform=iOS Simulator' -derivedDataPath $(BUILD_DIR)/ios-sim \
-		CODE_SIGNING_ALLOWED=NO $(LPW_BAKE) build
+		CODE_SIGNING_ALLOWED=NO $(MLPM_BAKE) build
 	@UDID=$$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print $$2; exit}'); \
 		xcrun simctl boot $$UDID 2>/dev/null || true; open -a Simulator; \
 		xcrun simctl install $$UDID $(BUILD_DIR)/ios-sim/Build/Products/Debug-iphonesimulator/MeteoraLPMonitor.app; \
@@ -133,7 +133,7 @@ install-ios: apps-gen ## iPhone: build + install on a plugged-in device (auto-de
 		echo "→ signing iOS with team $$TEAM_ID"; \
 		cd $(APPS) && xcodebuild -scheme MeteoraLPMonitoriOS -configuration Debug \
 			-destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=$$TEAM_ID \
-			-derivedDataPath $(BUILD_DIR)/ios $(LPW_BAKE) build
+			-derivedDataPath $(BUILD_DIR)/ios $(MLPM_BAKE) build
 	@DEV=$$(xcrun devicectl list devices 2>/dev/null | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1); \
 		test -n "$$DEV" || { echo "No connected iPhone found. Unlock it & trust this Mac, or run 'make xcode' → ⌘R."; exit 1; }; \
 		xcrun devicectl device install app --device $$DEV $(BUILD_DIR)/ios/Build/Products/Debug-iphoneos/MeteoraLPMonitor.app
