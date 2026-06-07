@@ -1,0 +1,36 @@
+{
+  "name": "meteora-lp-monitor",
+  "version": "0.1.0",
+  "description": "Native macOS & iOS app for Meteora DLMM monitoring - live PnL, alerts, notifications.",
+  "private": true,
+  "license": "MIT",
+  "author": "RedBoardDev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RedBoardDev/meteora-lp-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RedBoardDev/meteora-lp-monitor/issues"
+  },
+  "homepage": "https://github.com/RedBoardDev/meteora-lp-monitor#readme",
+  "packageManager": "yarn@4.6.0",
+  "workspaces": [
+    "shared",
+    "api"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:shared": "yarn workspace @meteora/shared build",
+    "dev:api": "yarn workspace @meteora/api dev",
+    "build": "yarn workspaces foreach -At run build",
+    "check": "biome check .",
+    "check:fix": "biome check --write .",
+    "typecheck": "yarn workspaces foreach -At run typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.11",
+    "typescript": "^5.7.3"
+  }
+}

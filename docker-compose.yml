@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - '8787:8787'
+    volumes:
+      - api-data:/repo/data
+
+volumes:
+  api-data:
