@@ -1,14 +1,30 @@
-name: Setup Node + Yarn
-description: Install Node.js and Yarn workspace dependencies with caching
+name: Setup
+description: Enable Corepack, setup Node, cache Yarn 4, install dependencies
 
 runs:
   using: composite
   steps:
-    - uses: actions/setup-node@v4
+    - name: Enable Corepack
+      shell: bash
+      run: corepack enable
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
       with:
         node-version-file: .nvmrc
-        cache: yarn
-    - run: corepack enable
+
+    # Yarn 4 stores its cache in .yarn/cache (per-project), not in the global
+    # location that actions/setup-node's `cache: yarn` covers. Cache explicitly.
+    - name: Cache Yarn 4
+      uses: actions/cache@v4
+      with:
+        path: |
+          .yarn/cache
+          .yarn/install-state.gz
+        key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+        restore-keys: |
+          yarn-${{ runner.os }}-
+
+    - name: Install dependencies
       shell: bash
-    - run: yarn install --immutable
-      shell: bash
+      run: yarn install --immutable
