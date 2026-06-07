@@ -23,8 +23,8 @@ dev-api: build-shared ## Run the API in watch mode
 
 ## ─── Quality ─────────────────────────────────────────────────────────────
 .PHONY: typecheck
-typecheck: build-shared ## Typecheck every workspace
-	yarn workspaces foreach -At run typecheck
+typecheck: ## Typecheck every workspace (turbo resolves shared build automatically)
+	yarn turbo run typecheck
 
 .PHONY: lint
 lint: ## Lint with Biome
@@ -39,8 +39,8 @@ check: ## Biome check (lint + format) without writing
 	yarn biome check .
 
 .PHONY: test
-test: build-shared ## Run unit tests
-	yarn workspace @meteora/api test
+test: ## Run unit tests
+	yarn turbo run test
 
 .PHONY: verify
 verify: typecheck check test ## Full local gate: typecheck + biome + tests
@@ -48,7 +48,7 @@ verify: typecheck check test ## Full local gate: typecheck + biome + tests
 ## ─── Build / run ─────────────────────────────────────────────────────────
 .PHONY: build
 build: ## Build all workspaces
-	yarn workspaces foreach -At run build
+	yarn turbo run build
 
 .PHONY: start
 start: ## Start the built API

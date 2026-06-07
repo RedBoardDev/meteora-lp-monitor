@@ -22,15 +22,16 @@
     "node": ">=20"
   },
   "scripts": {
-    "build:shared": "yarn workspace @meteora/shared build",
-    "dev:api": "yarn workspace @meteora/api dev",
-    "build": "yarn workspaces foreach -At run build",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
     "check": "biome check .",
     "check:fix": "biome check --write .",
-    "typecheck": "yarn workspaces foreach -At run typecheck"
+    "dev:api": "yarn workspace @meteora/api dev"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",
+    "turbo": "^2",
     "typescript": "^5.7.3"
   }
 }
