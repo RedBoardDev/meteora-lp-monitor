@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PanelView: View {
     @Environment(PortfolioStore.self) private var store
+    @State private var showHealthDetail = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -34,18 +35,9 @@ struct PanelView: View {
     }
 
     private func tab(_ title: String, scope: String) -> some View {
-        let active = store.scope == scope
-        return Button {
+        TabChip(title: title, active: store.scope == scope) {
             NotificationCenter.default.post(name: .setScope, object: scope)
-        } label: {
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(active ? Color.accentColor.opacity(0.22) : .clear, in: Capsule())
-                .foregroundStyle(active ? Color.accentColor : .secondary)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: Header (portfolio totals)
@@ -78,10 +70,10 @@ struct PanelView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(signed(t.uPnlSol)) SOL")
-                    .font(.system(size: 28, weight: .semibold).monospacedDigit())
+                    .font(.data(28, weight: .semibold))
                     .foregroundStyle(pnlColor(t.uPnlPct))
                 Text(pct2(t.uPnlPct))
-                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .font(.data(15, weight: .semibold))
                     .foregroundStyle(pnlColor(t.uPnlPct))
             }
             Spacer()
@@ -89,7 +81,7 @@ struct PanelView: View {
                 Text("WALLET").font(.system(size: 10, weight: .semibold))
                     .tracking(0.5).foregroundStyle(.secondary)
                 Text("\(abs3(t.walletTotalSol)) SOL")
-                    .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                    .font(.data(15, weight: .semibold))
             }
         }
     }
@@ -98,7 +90,7 @@ struct PanelView: View {
         HStack(alignment: .top, spacing: 0) {
             statCol("Fees", value: "\(abs3(t.feesSol)) SOL") {
                 Text(pctOf(t.claimedFeesSol + t.unclaimedFeesSol, t.tvlSol))
-                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.data(11)).foregroundStyle(.secondary)
             }
             statCol("TVL", value: "\(abs3(t.tvlSol)) SOL") {
                 EmptyView()
@@ -111,14 +103,14 @@ struct PanelView: View {
     private var todayCol: some View {
         let today = store.stats?.todayPnlSol ?? 0
         let wallet = store.totals?.walletTotalSol ?? 0
-        let color: Color = today > 0.0001 ? .green : today < -0.0001 ? .red : .primary
+        let color = pnlTone(value: today, basis: 0)
         return VStack(alignment: .leading, spacing: 2) {
             Text("Today").font(.system(size: 11)).foregroundStyle(.secondary)
             Text("\(signed(today)) SOL")
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .font(.data(13, weight: .semibold))
                 .foregroundStyle(color)
             Text("\(pctOf(today, wallet)) of wallet")
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                .font(.data(11)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -128,7 +120,7 @@ struct PanelView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 13, weight: .semibold).monospacedDigit())
+            Text(value).font(.data(13, weight: .semibold))
             sub()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -168,9 +160,9 @@ struct PanelView: View {
             Text("CLOSED\(store.closedTotal > 0 ? " (\(store.closedTotal))" : "")")
                 .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             if let s = store.stats {
-                Text(signed(s.totalPnlSol)).font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(s.totalPnlSol >= 0 ? .green : .red)
-                Text("· win \(Int(s.winRate))%").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(signed(s.totalPnlSol)).font(.data(11))
+                    .foregroundStyle(s.totalPnlSol >= 0 ? Theme.profit : Theme.loss)
+                Text("· win \(Int(s.winRate))%").font(.data(11)).foregroundStyle(.secondary)
             }
             Spacer()
         }
@@ -199,20 +191,22 @@ struct PanelView: View {
                 .lineLimit(1)
             Spacer()
             Text(signed(c.pnlSol))
-                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .font(.data(12, weight: .semibold))
                 .foregroundStyle(pnlColor(c.pnlPctSol))
             HStack(spacing: 3) {
                 Image(systemName: "centsign.circle")
                 Text(abs3(c.feesSol))
             }
-            .font(.system(size: 11).monospacedDigit())
+            .font(.data(11))
             .foregroundStyle(.secondary)
             .fixedSize()
             Text(ageString(c.closedAt))
-                .font(.system(size: 11).monospacedDigit())
+                .font(.data(11))
                 .foregroundStyle(.tertiary)
                 .fixedSize()
-            PositionLinks(wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint)
+            PositionLinks(
+                wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
+                shareAddress: c.positionAddress)
         }
         .padding(.vertical, 3)
     }
@@ -246,26 +240,72 @@ struct PanelView: View {
 
     private var connectionDot: some View {
         let degraded = store.health.map { !$0.wsConnected || !$0.meteoraOk } ?? false
-        let (color, label): (Color, String) = switch store.connection {
-        case .live: degraded ? (.orange, "degraded") : (.green, "live")
-        case .connecting: (.orange, "connecting")
-        case .offline: (.red, "offline")
-        case .unauthorized: (.red, "unauthorized")
-        case .unconfigured: (.secondary, "setup")
+        let color = connectionColor(store.connection, degraded: degraded)
+        let label: String = switch store.connection {
+        case .live: degraded ? "degraded" : "live"
+        case .connecting: "connecting"
+        case .offline: "offline"
+        case .unauthorized: "unauthorized"
+        case .unconfigured: "setup"
         }
         return HStack(spacing: 4) {
             Circle().fill(color).frame(width: 7, height: 7)
             Text(label).font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
-        .onTapGesture { NotificationCenter.default.post(name: .reconnect, object: nil) }
+        // Tap opens the health popover with an explicit Reconnect button (parity with iOS) — a bare
+        // tap no longer reconnects accidentally.
+        .onTapGesture { showHealthDetail = true }
+        .onHover { hovering in
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .popover(isPresented: $showHealthDetail, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                HealthDetailView(health: store.health)
+                Button("Reconnect") {
+                    showHealthDetail = false
+                    NotificationCenter.default.post(name: .reconnect, object: nil)
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+            .padding(12)
+        }
     }
 
     private func sectionLabel(_ title: String, count: Int) -> some View {
         HStack {
             Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             Spacer()
-            Text("\(count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+            Text("\(count)").font(.data(11)).foregroundStyle(.secondary)
         }
+    }
+}
+
+/// Scope tab with a hover affordance (subtle bg on the inactive tab) + pointing-hand cursor.
+private struct TabChip: View {
+    let title: String
+    let active: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(background, in: Capsule())
+                .foregroundStyle(active ? Theme.accent : .secondary)
+        }
+        .buttonStyle(.plain)
+        .onHover { h in
+            hovering = h
+            if h { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+    }
+
+    private var background: Color {
+        if active { return Theme.accent.opacity(0.22) }
+        return hovering ? Color.primary.opacity(0.07) : .clear
     }
 }

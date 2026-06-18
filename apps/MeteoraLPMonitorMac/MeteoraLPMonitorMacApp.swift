@@ -26,6 +26,8 @@ struct MeteoraLPMonitorMacApp: App {
         MenuBarExtra {
             PanelView()
                 .environment(store)
+                .tint(Theme.accent) // emerald brand accent for controls/links
+                .preferredColorScheme(.dark) // premium-dark identity holds even in system light mode
                 .onAppear { client.start() }
                 .onReceive(NotificationCenter.default.publisher(for: .reconnect)) { _ in
                     client.stop()

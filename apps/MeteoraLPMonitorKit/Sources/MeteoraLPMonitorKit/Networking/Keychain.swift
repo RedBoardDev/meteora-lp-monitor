@@ -1,7 +1,8 @@
 import Foundation
 import Security
 
-/// Minimal Keychain store for secrets (the API token). Cross-platform (macOS + iOS).
+/// Minimal Keychain store for secrets (the auth password, exchanged for a short-lived JWT by
+/// `Auth`). Cross-platform (macOS + iOS).
 enum Keychain {
     private static let service = "com.meteoralpmonitor"
 

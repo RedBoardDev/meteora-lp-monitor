@@ -25,7 +25,6 @@ targets:
         CFBundleDisplayName: LP Monitor
         NSHumanReadableCopyright: ""
         MLPMApiURL: "$(MLPM_API_URL)"
-        MLPMApiToken: "$(MLPM_API_TOKEN)"
     settings:
       base:
         PRODUCT_NAME: MeteoraLPMonitor
@@ -37,7 +36,6 @@ targets:
         SWIFT_VERSION: "5.0"
         ENABLE_HARDENED_RUNTIME: NO
         MLPM_API_URL: http://localhost:8787
-        MLPM_API_TOKEN: ""
 
   MeteoraLPMonitoriOS:
     type: application
@@ -55,7 +53,6 @@ targets:
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         MLPMApiURL: "$(MLPM_API_URL)"
-        MLPMApiToken: "$(MLPM_API_TOKEN)"
     settings:
       base:
         PRODUCT_NAME: MeteoraLPMonitor
@@ -68,4 +65,3 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         MLPM_API_URL: http://localhost:8787
-        MLPM_API_TOKEN: ""

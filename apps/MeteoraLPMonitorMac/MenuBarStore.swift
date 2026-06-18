@@ -13,9 +13,7 @@ extension PortfolioStore {
 
     var menuBarColor: Color {
         guard let t = totals else { return .secondary }
-        if t.uPnlPct > 0.1 { return .green }
-        if t.uPnlPct < -0.1 { return .red }
-        return .primary
+        return pnlColor(t.uPnlPct)
     }
 
     // Connected with nothing open → show a playful glyph instead of "0.000 · 0".

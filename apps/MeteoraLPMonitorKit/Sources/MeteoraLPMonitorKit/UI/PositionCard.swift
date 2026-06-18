@@ -17,19 +17,18 @@ public struct PositionCard: View {
                 Spacer()
                 VStack(alignment: .trailing, spacing: 0) {
                     Text("\(signed(p.pnlSol)) SOL")
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .font(.data(13, weight: .semibold))
                         .foregroundStyle(pnlColor(p.pnlPctSol))
                     Text(pct2(p.pnlPctSol))
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .font(.data(11, weight: .semibold))
                         .foregroundStyle(pnlColor(p.pnlPctSol))
                 }
             }
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Size \(abs3(p.sizeSol)) SOL · \(ageString(p.openedAt))")
-                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
-                    Text("Fees \(feeStr(p)) (\(feeYield(p)))")
-                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                        .font(.data(11)).foregroundStyle(.secondary)
+                    FeesLabel(position: p)
                 }
                 Spacer()
                 RangeBar(position: p).frame(width: 96)
@@ -37,10 +36,7 @@ public struct PositionCard: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            Color.primary.opacity(hovering ? 0.08 : 0.05),
-            in: RoundedRectangle(cornerRadius: 10),
-        )
-        .onHover { hovering = $0 }
+        .cardSurface(elevated: hovering)
+        .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
     }
 }

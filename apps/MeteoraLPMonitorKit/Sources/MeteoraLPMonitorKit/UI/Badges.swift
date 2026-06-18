@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // Quick-link button sizing: larger touch targets on iOS, compact on macOS (pointer).
 #if os(iOS)
@@ -15,18 +16,47 @@ public struct RangeBadge: View {
     public init(status: RangeStatus) { self.status = status }
 
     public var body: some View {
-        let label = switch status {
-        case .out_up: "OUT ▲"
-        case .out_down: "OUT ▼"
-        case .in: "IN"
-        default: "?"
+        let color: Color = isOut(status) ? Theme.outRange : Theme.inRange
+        return HStack(spacing: 2) {
+            switch status {
+            case .out_up:
+                Text("OUT")
+                Image(systemName: "arrow.up")
+            case .out_down:
+                Text("OUT")
+                Image(systemName: "arrow.down")
+            case .in:
+                Text("IN")
+            default:
+                Image(systemName: "questionmark")
+            }
         }
-        let color: Color = isOut(status) ? .orange : .green
-        return Text(label)
-            .font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
-            .foregroundStyle(color)
+        // Prose status label (IN/OUT) stays on the system font — mono is reserved for data values.
+        .font(.system(size: 10, weight: .semibold))
+        .padding(.horizontal, 6).padding(.vertical, 2)
+        .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
+        .foregroundStyle(color)
+    }
+}
+
+/// Claimed (✓) + unclaimed (◷) fees rendered with SF Symbols instead of unicode glyphs, with the
+/// fee yield as a percent of position size. Shared by the open-position card on both platforms.
+public struct FeesLabel: View {
+    let position: OpenPosition
+
+    public init(position: OpenPosition) { self.position = position }
+
+    public var body: some View {
+        HStack(spacing: 5) {
+            Text("Fees")
+            Image(systemName: "checkmark.circle")
+            Text(abs3(position.claimedFeesSol))
+            Image(systemName: "clock")
+            Text(abs3(position.unclaimedFeesSol))
+            Text("(\(feeYield(position)))")
+        }
+        .font(.data(11))
+        .foregroundStyle(.secondary)
     }
 }
 
@@ -37,11 +67,14 @@ public struct PositionLinks: View {
     let wallet: String
     let positionAddress: String
     let mint: String
+    /// When set (closed positions only), appends a share button that exports the PnL card PNG.
+    let shareAddress: String?
 
-    public init(wallet: String, positionAddress: String, mint: String) {
+    public init(wallet: String, positionAddress: String, mint: String, shareAddress: String? = nil) {
         self.wallet = wallet
         self.positionAddress = positionAddress
         self.mint = mint
+        self.shareAddress = shareAddress
     }
 
     public var body: some View {
@@ -51,6 +84,21 @@ public struct PositionLinks: View {
                 "https://app.lpagent.io/portfolio?address=\(wallet)&positionId=\(positionAddress)",
             )
             link("chart.line.uptrend.xyaxis", "https://gmgn.ai/sol/token/\(mint)")
+            if let shareAddress {
+                ShareLink(
+                    item: PnlCardTransferable(address: shareAddress),
+                    preview: SharePreview("PnL card")
+                ) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: linkIconFont))
+                        .foregroundStyle(.secondary)
+                        .frame(width: linkButtonSize.width, height: linkButtonSize.height)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+            }
         }
     }
 
@@ -66,5 +114,30 @@ public struct PositionLinks: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .pointingHandCursor()
     }
 }
+
+/// A position's PnL share card, fetched from the backend on demand when the user invokes Share.
+///
+/// Modelling it as `Transferable` lets a single `ShareLink` drive the native share sheet on both
+/// iOS and macOS: the (authenticated) PNG is generated lazily — only when the user actually shares —
+/// which also sidesteps the macOS menu-bar popover dismissing while an imperative picker is shown.
+struct PnlCardTransferable: Transferable {
+    let address: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .png) { card in
+            let enc =
+                card.address.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+                ?? card.address
+            guard let data = await Backend.fetchData("/positions/\(enc)/card.png") else {
+                throw ShareCardError.unavailable
+            }
+            return data
+        }
+        .suggestedFileName("pnl-card.png")
+    }
+}
+
+private enum ShareCardError: Error { case unavailable }

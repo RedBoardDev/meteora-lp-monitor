@@ -1,6 +1,7 @@
 import { DLMM_PROGRAM_ID } from '@meteora/shared';
 import type { Logger } from 'pino';
 import { WebSocket } from 'undici';
+import { classifyInstruction } from '@/domain/dlmm';
 import type { RpcSubscriber } from '@/domain/ports';
 
 type ActivityCb = (signature: string, instruction: string) => void;
@@ -68,8 +69,16 @@ export class HeliusSubscriber implements RpcSubscriber {
   unwatch(wallet: string): void {
     this.watched.delete(wallet);
     for (const [subId, w] of this.subToWallet) {
-      if (w === wallet) this.subToWallet.delete(subId);
+      if (w === wallet) {
+        // Tell the server to stop streaming this subscription. Dropping only the local mapping (the
+        // old behaviour) leaked the subscription server-side: Helius kept pushing logs forever and the
+        // account's active-subscription count crept up across watch/unwatch churn.
+        this.sendUnsubscribe(subId);
+        this.subToWallet.delete(subId);
+      }
     }
+    // A subscribe whose confirmation is still in flight has no subId yet; the confirmation handler
+    // releases it (it checks `watched`) so it can't resurrect as a leaked subscription.
   }
 
   private connect(): void {
@@ -142,6 +151,20 @@ export class HeliusSubscriber implements RpcSubscriber {
     );
   }
 
+  /** Release a server-side subscription. No-op when the socket is down — a reconnect re-subscribes
+   *  only the still-watched wallets, so a dropped subscription can't survive the disconnect anyway. */
+  private sendUnsubscribe(subId: number): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: this.nextReqId++,
+        method: 'logsUnsubscribe',
+        params: [subId],
+      }),
+    );
+  }
+
   private handleMessage(raw: string): void {
     let msg: Record<string, unknown>;
     try {
@@ -152,9 +175,13 @@ export class HeliusSubscriber implements RpcSubscriber {
     // Subscription confirmation: { id, result: subscriptionId }
     if (typeof msg.id === 'number' && typeof msg.result === 'number') {
       const wallet = this.reqToWallet.get(msg.id);
-      if (wallet) {
+      this.reqToWallet.delete(msg.id);
+      if (wallet && this.watched.has(wallet)) {
         this.subToWallet.set(msg.result, wallet);
-        this.reqToWallet.delete(msg.id);
+      } else if (wallet) {
+        // Unwatched while this subscribe was in flight — release it immediately so the late
+        // confirmation doesn't leave a subscription the server streams to no one.
+        this.sendUnsubscribe(msg.result);
       }
       return;
     }
@@ -176,26 +203,32 @@ export class HeliusSubscriber implements RpcSubscriber {
   }
 }
 
-function parseInstruction(logs: string[]): string | null {
+const KIND_PRIORITY: Record<string, number> = { close: 5, open: 4, remove: 3, add: 2, claim: 1 };
+
+/**
+ * A single tx often carries several DLMM instructions (a close is
+ * `RemoveLiquidityByRange2 → ClaimFee2 → ClosePositionIfEmpty`). Returning only the FIRST one made
+ * closes look like plain removes and lost the ws:close fast-path. We now scan ALL DLMM instructions and
+ * return the highest-priority one (close > open > remove > add > claim); a partial close with no
+ * `ClosePosition*` correctly stays `remove`.
+ */
+export function parseInstruction(logs: string[]): string | null {
   let inDlmm = false;
+  let best: string | null = null;
+  let bestPriority = 0;
   for (const l of logs) {
     if (l.includes(`Program ${DLMM_PROGRAM_ID} invoke`)) inDlmm = true;
     else if (l.includes(`Program ${DLMM_PROGRAM_ID} success`)) inDlmm = false;
     else if (inDlmm && l.startsWith('Program log: Instruction:')) {
-      return l.replace('Program log: Instruction:', '').trim();
+      const ix = l.replace('Program log: Instruction:', '').trim();
+      if (best === null) best = ix; // keep the first as a fallback even if it doesn't classify
+      const kind = classifyInstruction(ix);
+      const priority = kind ? (KIND_PRIORITY[kind] ?? 0) : 0;
+      if (priority > bestPriority) {
+        best = ix;
+        bestPriority = priority;
+      }
     }
   }
-  return null;
-}
-
-export function classifyInstruction(
-  instr: string,
-): 'open' | 'close' | 'add' | 'remove' | 'claim' | null {
-  const i = instr.toLowerCase();
-  if (i.startsWith('initializeposition') || i.startsWith('openposition')) return 'open';
-  if (i.startsWith('closeposition')) return 'close';
-  if (i.startsWith('addliquidity')) return 'add';
-  if (i.startsWith('removeliquidity')) return 'remove';
-  if (i.startsWith('claimfee') || i.startsWith('claimreward')) return 'claim';
-  return null;
+  return best;
 }

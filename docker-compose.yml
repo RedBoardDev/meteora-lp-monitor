@@ -1,4 +1,27 @@
+# Self-hosted infrastructure for the Meteora LP Monitor.
+# Postgres is the durable store (see docs/scaling/SCALING-SPEC.md D2). Redis is deferred until a
+# multi-instance split is needed (D4). When running the api inside compose, point DATABASE_URL at
+# the `postgres` service host: postgres://meteora:meteora@postgres:5432/meteora
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: meteora-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: meteora
+      POSTGRES_PASSWORD: meteora
+      POSTGRES_DB: meteora
+    # 5435 on the host to avoid clashing with other local Postgres instances (5432/5433/5434).
+    ports:
+      - '5435:5432'
+    volumes:
+      - meteora-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U meteora -d meteora']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .
@@ -10,6 +33,10 @@ services:
       - '8787:8787'
     volumes:
       - api-data:/repo/data
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
+  meteora-pgdata:
   api-data:

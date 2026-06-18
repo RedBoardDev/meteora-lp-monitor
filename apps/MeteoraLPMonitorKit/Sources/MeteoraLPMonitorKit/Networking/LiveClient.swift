@@ -2,6 +2,12 @@ import Foundation
 
 public enum ClientDevice: String, Sendable { case mac, ios, web }
 
+/// @MainActor: the mutable connection state (socket/backoff/stopped/started/reconnecting/heartbeat)
+/// is touched from URLSession completion handlers and Tasks. Pinning the whole class to the main
+/// actor means every check-then-set guard (start's `started`, scheduleReconnect's `reconnecting`)
+/// runs on one actor — no data race. The class is already created on the main actor and already
+/// hopped to it for every store write.
+@MainActor
 public final class LiveClient {
     private let store: PortfolioStore
     private let device: ClientDevice
@@ -50,7 +56,6 @@ public final class LiveClient {
         scheduleReconnect()
     }
 
-    @MainActor
     public func setScope(_ scope: String) {
         store.scope = scope // set synchronously so applied states match (no race)
         subscribe(scope)
@@ -58,47 +63,58 @@ public final class LiveClient {
     }
 
     private func subscribe(_ scope: String) {
-        task?.send(.string(#"{"type":"subscribe","scope":"\#(scope)"}"#)) { _ in }
+        send(#"{"type":"subscribe","scope":"\#(scope)"}"#)
     }
 
-    private func wsURL() -> URL? {
+    private func wsURL(token: String) -> URL? {
         let base = Config.apiURL.replacingOccurrences(of: "http", with: "ws")
-        return URL(string: "\(base)/live?token=\(Config.token)")
+        return URL(string: "\(base)/live?token=\(token)")
     }
 
     private func connect() {
         reconnecting = false
         guard Config.isConfigured else {
-            Task { @MainActor in store.setConnection(.unconfigured) }
-            return // no token yet — wait for Settings → reconnect rather than failing in a loop
+            store.setConnection(.unconfigured)
+            return // no password yet — wait for Settings → reconnect rather than failing in a loop
         }
-        guard let url = wsURL() else { return }
-        Task { @MainActor in store.setConnection(.connecting) }
-        let t = URLSession.shared.webSocketTask(with: url)
-        task = t
-        t.resume()
-        sendPresence()
-        // Re-assert our scope on every (re)connect — the server defaults new connections to
-        // "all", so without this a wallet-scoped client would receive (and reject) "all" states.
-        Task { @MainActor in self.subscribe(self.store.scope) }
-        startHeartbeat()
-        receive()
-        onSync?() // pull closed history + stats over REST on (re)connect
+        store.setConnection(.connecting)
+        // Fetch a fresh JWT (re-logins from the stored password if needed) before opening the socket.
+        Task { [weak self] in
+            guard let self else { return }
+            guard let token = await Auth.shared.token(), let url = self.wsURL(token: token) else {
+                self.store.setConnection(.unauthorized)
+                self.scheduleReconnect()
+                return
+            }
+            if self.stopped { return }
+            let t = URLSession.shared.webSocketTask(with: url)
+            self.task = t
+            t.resume()
+            self.sendPresence()
+            // Re-assert our scope on every (re)connect — the server defaults new connections to
+            // "all", so without this a wallet-scoped client would receive (and reject) "all" states.
+            self.subscribe(self.store.scope)
+            self.startHeartbeat()
+            self.receive()
+            self.onSync?() // pull closed history + stats over REST on (re)connect
+        }
     }
 
     private func receive() {
         task?.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(let message):
-                Task { @MainActor in self.store.setConnection(.live) }
-                self.backoff = 1
-                if case .string(let text) = message, let data = text.data(using: .utf8) {
-                    self.handle(data)
+            Task { @MainActor in
+                guard let self else { return }
+                switch result {
+                case .success(let message):
+                    self.store.setConnection(.live)
+                    self.backoff = 1
+                    if case .string(let text) = message, let data = text.data(using: .utf8) {
+                        self.handle(data)
+                    }
+                    self.receive()
+                case .failure:
+                    self.scheduleReconnect()
                 }
-                self.receive()
-            case .failure:
-                self.scheduleReconnect()
             }
         }
     }
@@ -106,7 +122,7 @@ public final class LiveClient {
     private func handle(_ data: Data) {
         guard let msg = try? ServerMessage(from: data) else { return }
         switch msg {
-        case .state(let state): Task { @MainActor in self.store.apply(state) }
+        case .state(let state): store.apply(state)
         case .event:
             onSync?() // raw live feed: a transition (e.g. close) changes history → refresh, no banner
         case .notify(let event):
@@ -114,7 +130,7 @@ public final class LiveClient {
             if Config.notificationsEnabled { Notifier.show(event) }
         case .closedChanged:
             onSync?() // a close was just persisted → refresh history, no banner (the alert comes later)
-        case .health(let h): Task { @MainActor in self.store.setHealth(h) }
+        case .health(let h): store.setHealth(h)
         case .other: break
         }
     }
@@ -126,12 +142,15 @@ public final class LiveClient {
         let unauthorized = task?.closeCode == .policyViolation // server closed /live with 1008
         task?.cancel(with: .goingAway, reason: nil) // drop the stale/half-dead socket
         task = nil
-        Task { @MainActor in store.setConnection(unauthorized ? .unauthorized : .offline) }
+        // A rejected token may just be expired — drop the cache so the next connect re-logins.
+        if unauthorized { Task { await Auth.shared.invalidate() } }
+        store.setConnection(unauthorized ? .unauthorized : .offline)
         let delay = backoff
         backoff = min(backoff * 2, 15)
-        Task {
+        Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
-            if !stopped { connect() }
+            guard let self, !self.stopped else { return }
+            self.connect()
         }
     }
 
@@ -150,7 +169,7 @@ public final class LiveClient {
     /// (happens after the Mac sleeps — URLSession leaves the task hanging silently).
     private func ping() {
         task?.sendPing { [weak self] error in
-            if error != nil { self?.scheduleReconnect() }
+            if error != nil { Task { @MainActor in self?.scheduleReconnect() } }
         }
     }
 
@@ -160,7 +179,15 @@ public final class LiveClient {
         // Bark — a muted device would swallow the alert (black hole). Reporting inactive lets
         // routing fall through to another open app, or to Bark on the phone.
         let active = presenceActive() && Config.notificationsEnabled
-        let json = #"{"type":"presence","device":"\#(device.rawValue)","active":\#(active)}"#
-        task?.send(.string(json)) { _ in }
+        send(#"{"type":"presence","device":"\#(device.rawValue)","active":\#(active)}"#)
+    }
+
+    /// Send a control frame; if the socket is broken the send fails → drop it and reconnect
+    /// rather than silently losing the subscribe/presence and stalling on a dead connection.
+    private func send(_ json: String) {
+        guard let task else { return }
+        task.send(.string(json)) { [weak self] error in
+            if error != nil { Task { @MainActor in self?.scheduleReconnect() } }
+        }
     }
 }

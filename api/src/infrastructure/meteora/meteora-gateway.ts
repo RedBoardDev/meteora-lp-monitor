@@ -1,12 +1,13 @@
-import { type ClosedPosition, METEORA_API_BASE, type OpenPosition } from '@meteora/shared';
+import {
+  type ClosedPosition,
+  METEORA_API_BASE,
+  type OpenPosition,
+  SOL_MINT,
+} from '@meteora/shared';
 import type { Logger } from 'pino';
 import type { PoolRef, PositionsGateway } from '@/domain/ports';
 import { resolveRangeStatus } from '@/domain/position';
-
-const num = (x: unknown): number => {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : 0;
-};
+import { toFiniteNumber as num } from '@/util/number';
 
 /**
  * Meteora DLMM REST gateway. Every list endpoint paginates fully (the legacy tool's
@@ -20,7 +21,10 @@ export class MeteoraGateway implements PositionsGateway {
   ) {}
 
   private async getJson<T>(url: string): Promise<T> {
-    const res = await fetch(url);
+    // Hard timeout: Node's fetch has NO default timeout, so a single hung Cloudflare connection
+    // would stall the whole paginated history backfill (the reconcile awaits each page). Abort fast
+    // → the caller catches/retries and the backfill keeps going.
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!res.ok) throw new Error(`Meteora ${res.status} ${url}`);
     return (await res.json()) as T;
   }
@@ -46,6 +50,8 @@ export class MeteoraGateway implements PositionsGateway {
           tokenY: (p.tokenY as string) || 'SOL',
           tokenXMint: String(p.tokenXMint ?? ''),
           tokenYMint: String(p.tokenYMint ?? ''),
+          tokenXIcon: (p.tokenXIcon as string) || undefined,
+          tokenYIcon: (p.tokenYIcon as string) || undefined,
         });
       }
       if (!json.hasNext || pools.length === 0) break;
@@ -105,6 +111,9 @@ export class MeteoraGateway implements PositionsGateway {
       tokenX: pool.tokenX,
       tokenY: pool.tokenY,
       tokenXMint: pool.tokenXMint,
+      tokenXIcon: pool.tokenXIcon,
+      tokenYIcon: pool.tokenYIcon,
+      strategy: null, // resolved once from the on-chain open tx by the engine's StrategyService
       sizeSol: num((u.balancesSol as unknown) ?? 0),
       pnlSol: num(p.pnlSol),
       pnlPctSol: num(p.pnlSolPctChange),
@@ -130,9 +139,13 @@ export class MeteoraGateway implements PositionsGateway {
     const wd = withdrawals?.total?.sol;
     // Residual = the non-SOL side left at close (what the user must still sell). Its close
     // value is the only price-sensitive part of PnL — the engine may revalue it at market.
-    const yIsSol = (pool.tokenY || '').toUpperCase() === 'SOL';
-    const residualSide = yIsSol ? withdrawals?.tokenX : withdrawals?.tokenY;
-    const residualMint = yIsSol ? pool.tokenXMint : pool.tokenYMint;
+    // Identify the SOL leg by MINT (not the display symbol — 'WSOL'/missing labels misfire). The
+    // residual is the OTHER (non-SOL) leg. Pools with no SOL leg get no residual (left undefined).
+    const yIsSol = pool.tokenYMint === SOL_MINT;
+    const xIsSol = pool.tokenXMint === SOL_MINT;
+    const hasSol = xIsSol || yIsSol;
+    const residualSide = hasSol ? (yIsSol ? withdrawals?.tokenX : withdrawals?.tokenY) : undefined;
+    const residualMint = hasSol ? (yIsSol ? pool.tokenXMint : pool.tokenYMint) : undefined;
     const createdAt = p.createdAt != null ? num(p.createdAt) * 1000 : null;
     const closedAt = p.closedAt != null ? num(p.closedAt) * 1000 : null;
     const duration =
@@ -144,6 +157,9 @@ export class MeteoraGateway implements PositionsGateway {
       tokenX: pool.tokenX,
       tokenY: pool.tokenY,
       tokenXMint: pool.tokenXMint,
+      tokenXIcon: pool.tokenXIcon,
+      tokenYIcon: pool.tokenYIcon,
+      strategy: null, // filled from the DB (resolved while the position was open) on read
       pnlSol: num(p.pnlSol),
       pnlPctSol: num(p.pnlSolPctChange),
       feesSol: num(fees),

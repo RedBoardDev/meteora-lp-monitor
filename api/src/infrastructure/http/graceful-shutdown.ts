@@ -92,6 +92,11 @@ export function installGracefulShutdown(
   for (const signal of signals) {
     process.once(signal, () => void stop(signal, SIGNAL_EXIT_CODES[signal] ?? 0));
   }
+  // A truly uncaught synchronous exception may leave state corrupt → shut down cleanly (a restart
+  // is safer than running on). An unhandled promise rejection (e.g. a background RPC call that
+  // rejected) is operational and recoverable → log it loudly but KEEP the API serving.
   process.once('uncaughtException', (err) => void stop('uncaughtException', 1, err));
-  process.once('unhandledRejection', (reason) => void stop('unhandledRejection', 1, reason));
+  process.on('unhandledRejection', (reason) => {
+    app.log.error({ err: reason }, 'unhandled_rejection');
+  });
 }

@@ -1,7 +1,8 @@
+import { sleep } from '@/util/sleep';
+
 const CHUNK = 5;
 const CHUNK_GAP_MS = 100;
 
-export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
 
 export async function chunked<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {

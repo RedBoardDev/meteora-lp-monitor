@@ -13,7 +13,7 @@ public struct WalletsEditor: View {
 
     public init(onChange: @escaping () -> Void = {}) { self.onChange = onChange }
 
-    private var addressValid: Bool { Self.isSolanaAddress(newAddress) }
+    private var addressValid: Bool { SolanaAddress.isValid(newAddress) }
 
     public var body: some View {
         Group {
@@ -67,7 +67,7 @@ public struct WalletsEditor: View {
             await load()
             onChange()
         case .unauthorized:
-            error = "Unauthorized — check your API token in Settings."
+            error = "Unauthorized — check your password in Settings."
         case .failed:
             error = "Couldn't add the wallet — check the address."
         }
@@ -82,20 +82,13 @@ public struct WalletsEditor: View {
             await load()
             onChange()
         case .unauthorized:
-            error = "Unauthorized — check your API token in Settings."
+            error = "Unauthorized — check your password in Settings."
         case .failed:
             error = "Couldn't remove the wallet."
         }
         busy = false
     }
 
-    /// Base58, 32–44 chars — mirrors the server's WalletSchema (rejects 0x/EVM & junk).
-    static func isSolanaAddress(_ s: String) -> Bool {
-        let t = s.trimmingCharacters(in: .whitespaces)
-        guard (32...44).contains(t.count) else { return false }
-        let base58 = Set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
-        return t.allSatisfy(base58.contains)
-    }
 }
 
 extension View {

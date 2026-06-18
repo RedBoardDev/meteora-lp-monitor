@@ -3,20 +3,29 @@ import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { Engine } from '@/application/engine';
 import type { EventBus } from '@/application/event-bus';
-import type { AppConfig } from '@/config/env';
+import type { AccountRepository } from '@/domain/ports';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import { verifyJwt } from './auth';
 
 interface WsClient {
   socket: WebSocket;
-  scope: string;
+  userId: string;
+  /** Resolved once at connect — only the owner's heartbeats gate Bark (notifications are owner-only). */
+  isOwner: boolean;
+  watched: Set<string>;
+  /** What the client is viewing: 'all' (its whole watchlist) or one watched address. */
+  view: string;
 }
 
 function send(socket: WebSocket, data: unknown): void {
   if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(data));
 }
 
-function broadcast(clients: Set<WsClient>, data: unknown): void {
-  for (const c of clients) send(c.socket, data);
+// Broadcast a payload that is IDENTICAL for every recipient: serialize it ONCE and send the same
+// frame to all matching sockets, instead of re-JSON.stringify-ing per client. During trading bursts
+// (many event/notify across many wallets) this removes N-1 redundant serializations per broadcast.
+function sendRaw(socket: WebSocket, frame: string): void {
+  if (socket.readyState === socket.OPEN) socket.send(frame);
 }
 
 function safeJson(raw: string): unknown {
@@ -29,51 +38,126 @@ function safeJson(raw: string): unknown {
 
 export function registerWebSocket(
   app: FastifyInstance,
-  config: AppConfig,
+  secret: string,
   engine: Engine,
   bus: EventBus,
   presence: PresenceTracker,
+  accounts: AccountRepository,
+  allowedOrigins: string[],
 ): void {
   const clients = new Set<WsClient>();
+  const watchedOf = async (userId: string): Promise<Set<string>> =>
+    new Set(await accounts.watchedAddresses(userId));
+
+  // Recompute the wallets currently being viewed (an 'all'-scope client views its whole watchlist; a
+  // focused client views one) and hand them to the engine, which gates the recurring net-worth snapshot
+  // on this set — idle/unwatched wallets then cost no RPC.
+  const pushViewers = (): void => {
+    const viewed = new Set<string>();
+    for (const c of clients) {
+      if (c.view === 'all') for (const w of c.watched) viewed.add(w);
+      else viewed.add(c.view);
+    }
+    engine.setViewedWallets(viewed);
+  };
 
   // logLevel:silent — the upgrade URL carries ?token=, keep it out of request logs.
-  app.get('/live', { websocket: true, logLevel: 'silent' }, (socket: WebSocket, req) => {
-    if ((req.query as { token?: string }).token !== config.API_TOKEN) {
+  app.get('/live', { websocket: true, logLevel: 'silent' }, async (socket: WebSocket, req) => {
+    // Browsers send Origin on a WS upgrade; reject any that isn't allow-listed (defence-in-depth on top
+    // of the SameSite cookie that gates the ws-ticket). Native clients send no Origin → allowed.
+    const origin = req.headers.origin;
+    if (typeof origin === 'string' && !allowedOrigins.includes(origin)) {
+      socket.close(1008, 'forbidden origin');
+      return;
+    }
+    const token = (req.query as { token?: string }).token;
+    const payload = token ? verifyJwt(secret, token) : null;
+    if (!payload) {
       socket.close(1008, 'unauthorized');
       return;
     }
-    const client: WsClient = { socket, scope: 'all' };
+    const userId = payload.sub;
+    const me = await accounts.findById(userId);
+    const client: WsClient = {
+      socket,
+      userId,
+      isOwner: me?.isOwner ?? false,
+      watched: await watchedOf(userId),
+      view: 'all',
+    };
     clients.add(client);
-    send(socket, { type: 'state', payload: engine.getState('all') });
+    pushViewers();
+    send(socket, { type: 'state', payload: engine.getState([...client.watched], 'all') });
 
-    socket.on('message', (raw: Buffer) => {
+    socket.on('message', async (raw: Buffer) => {
       const parsed = ClientMessageSchema.safeParse(safeJson(raw.toString()));
       if (!parsed.success) return;
       const msg = parsed.data;
       if (msg.type === 'subscribe') {
-        client.scope = msg.scope;
-        send(socket, { type: 'state', payload: engine.getState(msg.scope) });
-      } else if (msg.type === 'presence') {
+        client.watched = await watchedOf(userId); // pick up watchlist changes
+        if (msg.scope === 'all') {
+          client.view = 'all';
+          send(socket, { type: 'state', payload: engine.getState([...client.watched], 'all') });
+        } else if (client.watched.has(msg.scope)) {
+          client.view = msg.scope;
+          send(socket, { type: 'state', payload: engine.getState([msg.scope], msg.scope) });
+        }
+        pushViewers();
+      } else if (msg.type === 'presence' && client.isOwner) {
+        // Notifications are owner-only, so ONLY the owner's devices gate Bark. Without this guard a
+        // public web viewer's heartbeat marks presence "active" and silently suppresses the owner's
+        // Bark push (cross-tenant alert loss).
         presence.heartbeat(msg.device, msg.active);
       }
     });
 
-    socket.on('close', () => clients.delete(client));
-    socket.on('error', () => clients.delete(client));
+    socket.on('close', () => {
+      clients.delete(client);
+      pushViewers();
+    });
+    socket.on('error', () => {
+      clients.delete(client);
+      pushViewers();
+    });
   });
 
+  // Per-wallet state emit (scope = the wallet address) → only clients watching that wallet.
   bus.on('state', (state) => {
     for (const c of clients) {
-      if (c.scope === state.scope) send(c.socket, { type: 'state', payload: state });
-      else if (c.scope === 'all')
-        send(c.socket, { type: 'state', payload: engine.getState('all') });
+      if (!c.watched.has(state.scope)) continue;
+      if (c.view === 'all') {
+        send(c.socket, { type: 'state', payload: engine.getState([...c.watched], 'all') });
+      } else if (c.view === state.scope) {
+        send(c.socket, { type: 'state', payload: state });
+      }
     }
   });
-  // Raw live feed — drives history refetch on the client, never a banner (ungated).
-  bus.on('event', (event) => broadcast(clients, { type: 'event', payload: event }));
-  // Rule-gated notifications — the client shows these as native banners.
-  bus.on('notify', (event) => broadcast(clients, { type: 'notify', payload: event }));
-  // Prompt clients to refetch closed history the instant a close lands (no banner).
-  bus.on('closedChanged', () => broadcast(clients, { type: 'closed_changed' }));
-  bus.on('health', (health) => broadcast(clients, { type: 'health', payload: health }));
+  // Raw live feed — drives history refetch on the client, never a banner. Scoped to the wallet.
+  bus.on('event', (event) => {
+    const frame = JSON.stringify({ type: 'event', payload: event });
+    for (const c of clients) {
+      if (event.wallet === null || c.watched.has(event.wallet)) sendRaw(c.socket, frame);
+    }
+  });
+  // Rule-gated notifications (owner-driven). Scoped to the wallet so they never leak across tenants.
+  bus.on('notify', (event) => {
+    const frame = JSON.stringify({ type: 'notify', payload: event });
+    for (const c of clients) {
+      if (event.wallet === null || c.watched.has(event.wallet)) sendRaw(c.socket, frame);
+    }
+  });
+  // Prompt clients to refetch closed history the instant a close lands on a wallet they watch.
+  bus.on('closedChanged', (e) => {
+    const frame = JSON.stringify({ type: 'closed_changed' });
+    for (const c of clients) if (c.watched.has(e.wallet)) sendRaw(c.socket, frame);
+  });
+  // Health — filter the per-wallet sync list to the client's watchlist (no global wallet leak).
+  bus.on('health', (health) => {
+    for (const c of clients) {
+      send(c.socket, {
+        type: 'health',
+        payload: { ...health, wallets: health.wallets.filter((w) => c.watched.has(w.wallet)) },
+      });
+    }
+  });
 }

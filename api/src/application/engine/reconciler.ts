@@ -1,6 +1,5 @@
 import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
-import type { LpAgentEnricher } from '@/application/lpagent-enricher';
 import type { PoolRef, PositionRepository, PositionsGateway } from '@/domain/ports';
 import type { WalletRuntime } from './runtime';
 import { chunked } from './utils';
@@ -16,7 +15,6 @@ export class Reconciler {
   constructor(
     private readonly gateway: PositionsGateway,
     private readonly repo: PositionRepository,
-    private readonly enricher: LpAgentEnricher,
     private readonly bus: EventBus,
     private readonly logger: Logger,
   ) {}
@@ -29,13 +27,16 @@ export class Reconciler {
         this.gateway.fetchClosedPositions(rt.address, p).catch(() => []),
       );
       const closed = closedLists.flat();
-      if (closed.length) this.repo.upsertClosed(closed);
+      if (closed.length) {
+        await this.repo.upsertClosed(closed);
+        // Notify clients watching this wallet so the closed-history view refetches once the
+        // initial backfill lands (otherwise it stays empty until a manual refresh).
+        this.bus.emit('closedChanged', { wallet: rt.address });
+      }
 
       await cb.doRefresh(rt);
       cb.doBalance(rt);
 
-      const lastClosedTs = closed.reduce((m, c) => Math.max(m, c.closedAt ?? 0), 0);
-      this.repo.setSyncState(rt.address, { lastFullSyncAt: Date.now(), lastClosedTs });
       rt.reconciled = true;
       this.logger.info({ address: rt.address, closed: closed.length }, 'reconciliation complete');
     } catch (err) {
@@ -53,10 +54,9 @@ export class Reconciler {
       );
       const closed = lists.flat();
       if (!closed.length) return;
-      this.repo.upsertClosed(closed);
-      // Show the close in history immediately; enricher corrects PnL once LPAgent has indexed it.
+      await this.repo.upsertClosed(closed);
+      // Show the close in history immediately; the on-chain DLMM engine sets the authoritative PnL.
       this.bus.emit('closedChanged', { wallet: address });
-      for (const c of closed) this.enricher.onClose(c);
     } catch (err) {
       this.logger.warn({ err, address }, 'captureClosed failed (poll will retry)');
     }
@@ -72,12 +72,11 @@ export class Reconciler {
       );
       const closed = lists.flat();
       if (closed.length) {
-        this.repo.upsertClosed(closed);
-        for (const c of closed) this.enricher.onClose(c);
+        await this.repo.upsertClosed(closed);
       }
 
       // Resolve positions stuck in 'pending_close' — catches closes older than the window.
-      const pendingPools = this.repo.pendingClosePools(rt.address);
+      const pendingPools = await this.repo.pendingClosePools(rt.address);
       if (pendingPools.length > 0) {
         this.logger.warn(
           { address: rt.address, pendingClose: pendingPools.length },
@@ -88,8 +87,7 @@ export class Reconciler {
         );
         const stuckClosed = stuck.flat();
         if (stuckClosed.length) {
-          this.repo.upsertClosed(stuckClosed);
-          for (const c of stuckClosed) this.enricher.onClose(c);
+          await this.repo.upsertClosed(stuckClosed);
         }
       }
     } catch (err) {

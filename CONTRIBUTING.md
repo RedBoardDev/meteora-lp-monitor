@@ -11,18 +11,19 @@
 ```
 api/         Fastify + TypeScript engine (DDD/hexagonal: domain / application / infrastructure)
 shared/      zod contract shared by the API (the Swift clients mirror it)
+web/         React web client (Vite)
 apps/        SwiftUI clients sharing the MeteoraLPMonitorKit Swift package (macOS + iOS)
 Makefile     one entrypoint: setup, dev-api, install-mac, run-ios, install-ios, verify…
 ```
 
 ## Workflow
 
-1. `make setup` (creates `.env`), then fill `API_TOKEN` + `SOLANA_WS_URL` (a Helius `wss://` URL).
+1. `make setup` (creates `.env`), then fill `AUTH_SECRET` (required, ≥32 chars — `openssl rand -hex 32`) + `SOLANA_WS_URL` (a Helius `wss://` URL).
 2. `make dev-api` to run the API; `make run-ios` / `make install-mac` for the clients.
 3. Before opening a PR: **`make verify`** (typecheck + Biome + tests) and `make apps-test`
    for the Swift package. Keep it green.
 4. **Conventional commits** (`feat:`, `fix:`, `refactor:`, `chore:`, `docs:`, `test:`).
-5. Keep files focused (<500 lines), comments explain *why*, no secrets in the repo.
+5. Keep files focused (<400 lines), comments explain *why*, no secrets in the repo.
 
 ## Conventions
 

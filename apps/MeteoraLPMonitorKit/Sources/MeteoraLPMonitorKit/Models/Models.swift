@@ -4,6 +4,16 @@ import Foundation
 
 public enum RangeStatus: String, Codable, Sendable { case `in`, out_up, out_down, unknown }
 
+/// Client-side Solana address validation, mirrors the server's WalletSchema (base58, 32–44 chars;
+/// rejects 0x/EVM & junk). A local guard so an obviously-malformed address never hits the network —
+/// the backend re-validates.
+public enum SolanaAddress {
+    public static func isValid(_ s: String) -> Bool {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: "^[1-9A-HJ-NP-Za-km-z]{32,44}$", options: .regularExpression) != nil
+    }
+}
+
 public struct PortfolioTotals: Codable, Sendable {
     public let uPnlSol: Double
     public let uPnlPct: Double
@@ -79,10 +89,24 @@ public struct Stats: Codable, Sendable {
 
 /// Engine health (subset). `wsConnected`/`meteoraOk` reflect the SERVER's data freshness —
 /// distinct from the client's own socket, so the UI can warn when the engine is blind.
+/// One external dependency's live status (rpc / meteora / jupiter / ws).
+public struct SourceHealth: Codable, Sendable, Identifiable {
+    public var id: String { name }
+    public let name: String
+    public let status: String          // "ok" | "lagging" | "down"
+    public let lastOkAt: Int?
+    public let lastErrorAt: Int?
+    public let consecutiveErrors: Int
+    public let detail: String?
+}
+
 public struct Health: Codable, Sendable {
     public let ok: Bool
     public let wsConnected: Bool
     public let meteoraOk: Bool
+    // Added by the backend's per-source health system; optional so older payloads still decode.
+    public let chainTipSlot: Int?
+    public let sources: [SourceHealth]?
 }
 
 public struct LiveEvent: Codable, Sendable {

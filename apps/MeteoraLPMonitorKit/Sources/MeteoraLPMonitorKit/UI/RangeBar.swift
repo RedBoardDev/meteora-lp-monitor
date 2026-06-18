@@ -2,6 +2,7 @@ import SwiftUI
 
 public struct RangeBar: View {
     let position: OpenPosition
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(position: OpenPosition) { self.position = position }
 
@@ -23,13 +24,14 @@ public struct RangeBar: View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill((out ? Color.orange : Color.green).opacity(0.18))
+                    .fill((out ? Theme.outRange : Theme.inRange).opacity(0.18))
                     .frame(height: 5)
                 Circle()
-                    .fill(out ? Color.orange : Color.green)
+                    .fill(out ? Theme.outRange : Theme.inRange)
                     .frame(width: 8, height: 8)
                     .position(x: geo.size.width * progress, y: geo.size.height / 2)
-                    .animation(.spring(duration: 0.35), value: progress)
+                    // Reduce-motion: snap instantly instead of springing the dot across the bar.
+                    .animation(dataAnimation(reduceMotion), value: progress)
             }
         }
         .frame(height: 8)

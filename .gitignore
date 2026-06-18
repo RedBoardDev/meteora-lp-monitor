@@ -1,17 +1,20 @@
 # deps
 node_modules/
+.pnp.*
 .yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
+!.yarn/sdks
 !.yarn/versions
-.pnp.*
+.yarn/install-state.gz
 
 # build
 dist/
 .next/
 out/
 *.tsbuildinfo
+.turbo/
 
 # data & logs
 data/
@@ -40,3 +43,12 @@ DerivedData/
 # agent / scratch (kept out of the public repo)
 .claude/
 .serena/
+**/AGENTS.md
+**/CLAUDE.md
+
+# internal docs & planning — kept local, not for the public repo
+docs/
+TODO.md
+
+# spike / validation scripts (scratch + local .secrets.env — NEVER committed)
+scripts/
