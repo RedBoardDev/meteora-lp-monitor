@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    "api": {
+      "entry": ["src/main.ts", "drizzle.config.ts", "src/**/*.test.ts"],
+      "project": "src/**/*.ts"
+    },
+    "web": {
+      "entry": ["src/**/*.test.{ts,tsx}"],
+      "project": "src/**/*.{ts,tsx}"
+    },
+    "shared": {
+      "entry": ["src/**/*.test.ts"],
+      "project": "src/**/*.ts"
+    }
+  }
+}
