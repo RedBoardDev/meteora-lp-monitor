@@ -4,6 +4,7 @@ import type { PoolRef, PositionRepository, PositionsGateway, PriceGateway } from
 import { isOutOfRange } from '@/domain/position';
 import type { StateEmitter } from './emitter';
 import type { WalletRuntime } from './runtime';
+import type { StrategyService } from './strategy-service';
 import { chunked, symmetricDiffSize } from './utils';
 
 export type RefreshCallbacks = {
@@ -18,6 +19,7 @@ export class PositionRefresher {
     private readonly repo: PositionRepository,
     private readonly emitter: StateEmitter,
     private readonly logger: Logger,
+    private readonly strategy: StrategyService,
   ) {}
 
   async refresh(rt: WalletRuntime, trigger: string, cb: RefreshCallbacks): Promise<boolean> {
@@ -35,14 +37,16 @@ export class PositionRefresher {
       const now = Date.now();
       const next = new Map<string, OpenPosition>();
       for (const p of lists.flat()) {
-        next.set(p.positionAddress, this.carryOorState(p, rt.open.get(p.positionAddress), now));
+        const carried = this.carryOorState(p, rt.open.get(p.positionAddress), now);
+        carried.strategy = this.strategy.get(p.positionAddress);
+        next.set(p.positionAddress, carried);
       }
 
       await this.repriceAtMarket([...next.values()]);
-      this.detectTransitions(rt, beforeKeys, beforeOpen, next);
+      this.detectTransitions(beforeKeys, beforeOpen, next);
 
       rt.open = next;
-      this.repo.replaceOpenForWallet(rt.address, [...next.values()]);
+      await this.repo.replaceOpenForWallet(rt.address, [...next.values()]);
 
       const closedNow = [...beforeKeys].filter((k) => !next.has(k));
       if (closedNow.length > 0 || trigger.startsWith('ws:close')) {
@@ -50,9 +54,6 @@ export class PositionRefresher {
         for (const k of closedNow) {
           const prev = beforeOpen.get(k);
           if (prev) {
-            // Capital is returning to idle; credit it now (RPC balance lags the withdrawal).
-            rt.pendingDelta += prev.sizeSol;
-            rt.pendingSince = Date.now();
             poolsToScan.set(prev.poolAddress, {
               poolAddress: prev.poolAddress,
               tokenX: prev.tokenX,
@@ -110,17 +111,12 @@ export class PositionRefresher {
   }
 
   private detectTransitions(
-    rt: WalletRuntime,
     beforeKeys: Set<string>,
     beforeOpen: Map<string, OpenPosition>,
     next: Map<string, OpenPosition>,
   ): void {
     for (const [addr, p] of next) {
       if (!beforeKeys.has(addr)) {
-        // Capital just moved idle → this position; reflect it immediately so the wallet total
-        // doesn't transiently double-count while the RPC balance catches up.
-        rt.pendingDelta -= p.sizeSol;
-        rt.pendingSince = Date.now();
         this.emitter.emitEvent('position_open', p.wallet, p, `${p.tokenX}/${p.tokenY} opened`, {
           sizeSol: p.sizeSol,
         });

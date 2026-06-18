@@ -2,17 +2,53 @@ import { z } from 'zod';
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8787),
-  API_TOKEN: z.string().min(1, 'API_TOKEN is required'),
+
+  /** The secret that signs every session JWT (HS256). REQUIRED — no default, no placeholder — so the
+   *  schema fails fast at boot if it is missing or too short. Generate a ≥32-char random value:
+   *  `openssl rand -hex 32`. Keep it STABLE: changing it invalidates every existing session. */
+  AUTH_SECRET: z
+    .string()
+    .min(32, 'AUTH_SECRET is required: a ≥32-char random secret (generate: openssl rand -hex 32)'),
+  /** The owner's Solana wallet address: auto-whitelisted on boot and flagged `isOwner` when it
+   *  registers (the bootstrap account). Empty = no owner seeded (populate the whitelist another way). */
+  OWNER_ADDRESS: z
+    .string()
+    .default('')
+    .refine(
+      (v) => v === '' || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v),
+      'OWNER_ADDRESS must be a base58 Solana address',
+    ),
 
   SOLANA_WS_URL: z.string().url(),
   SOLANA_HTTP_URL: z.string().url().optional(),
+
+  // RPC rate limits (requests/sec) enforced at the Connection — every Solana call shares this
+  // budget so the live engine and the history backfill never blow the provider's plan (429 storms).
+  // Defaults match the Helius free tier; raise them via env when on a higher plan.
+  SOLANA_RPS: z.coerce.number().positive().default(10),
+  SOLANA_GPA_RPS: z.coerce.number().positive().default(5),
+  SOLANA_DAS_RPS: z.coerce.number().positive().default(2),
+  SOLANA_SEND_RPS: z.coerce.number().positive().default(1),
+  /** Share of the overall RPC budget reserved for the LIVE path (snapshots/valuation); the remainder
+   *  goes to a SEPARATE backfill/projection lane so a history backfill can never starve live. */
+  SOLANA_LIVE_FRACTION: z.coerce.number().positive().lt(1).default(0.6),
+  /** Max wallets backfilling history concurrently (onboarding admission control). The binding cost is
+   *  the per-wallet history sweep; raise this only with the RPC tier's headroom (the backfill lane). */
+  BACKFILL_CONCURRENCY: z.coerce.number().int().positive().default(3),
 
   METEORA_TARGET_RPS: z.coerce.number().positive().default(15),
   POLL_MIN_MS: z.coerce.number().int().positive().default(1000),
   POLL_MAX_MS: z.coerce.number().int().positive().default(30_000),
   POLL_IDLE_MS: z.coerce.number().int().positive().default(300_000),
 
-  DB_PATH: z.string().default('./data/monitor.db'),
+  /** Positions table source: 'onchain' (the decoupled DLMM engine, default) or 'meteora' (datapi, legacy
+   *  escape hatch). 'onchain' makes the on-chain engine the single source — backfill on register, delta
+   *  ingest on WS activity, projection synced to the positions table; the Meteora open/closed reconcile is
+   *  bypassed. Verified live (62.27 SOL realized over 15 754 positions, symbols + economics correct). */
+  POSITIONS_SOURCE: z.enum(['meteora', 'onchain']).default('onchain'),
+
+  /** Postgres connection string (self-hosted via docker-compose). */
+  DATABASE_URL: z.string().default('postgres://meteora:meteora@localhost:5435/meteora'),
   // History depth: either a rolling window (HISTORY_DAYS) OR an absolute floor date
   // (HISTORY_SINCE, e.g. 2026-05-01) — when set, HISTORY_SINCE wins (everything after it).
   HISTORY_DAYS: z.coerce.number().int().min(1).max(365).default(365),
@@ -20,20 +56,20 @@ const EnvSchema = z.object({
     .string()
     .refine((v) => !Number.isNaN(Date.parse(v)), 'HISTORY_SINCE must be a date, e.g. 2026-05-01')
     .optional(),
-  SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(0).default(3600),
 
   BARK_KEY: z.string().default(''),
   BARK_BASE_URL: z.string().url().default('https://api.day.app'),
   PRESENCE_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(30),
 
+  // Web Push (browser/PWA notifications). Generate once with `npx web-push generate-vapid-keys` and
+  // put both keys in .env — they must stay STABLE (existing subscriptions are bound to the public key).
+  // Push is disabled when either key is empty.
+  VAPID_PUBLIC_KEY: z.string().default(''),
+  VAPID_PRIVATE_KEY: z.string().default(''),
+  VAPID_SUBJECT: z.string().default('mailto:admin@meteora-lp-monitor.local'),
+
   /** Browser origins allowed by CORS (comma-separated). Native clients send no Origin. */
   WEB_ORIGINS: z.string().default('http://localhost:3000,http://localhost:5173'),
-
-  /** LPAgent — authoritative closed-PnL source (residual valued at market). Empty key disables
-   *  enrichment (closed PnL falls back to Meteora's raw pnlSol). Rate-limited to LPAGENT_RPM/min. */
-  LPAGENT_API_KEY: z.string().default(''),
-  LPAGENT_BASE_URL: z.string().url().default('https://api.lpagent.io'),
-  LPAGENT_RPM: z.coerce.number().int().positive().default(5),
 
   /** Jupiter Price API v3 (free, no key) — live market price to revalue OPEN positions' token
    *  holdings (Meteora's pool-spot mark misprices illiquid/out-of-range tokens). */

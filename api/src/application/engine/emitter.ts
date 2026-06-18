@@ -1,8 +1,9 @@
 import type { LiveEvent, OpenPosition, WalletState } from '@meteora/shared';
 import type { EventBus } from '@/application/event-bus';
-import { buildWalletState } from '@/application/wallet-state';
+import type { HealthMonitor } from '@/application/health-monitor';
+import { buildWalletState, combineOnchain } from '@/application/wallet-state';
+import type { OnchainValued } from '@/domain/dlmm';
 import type { RpcSubscriber } from '@/domain/ports';
-import { currentIdle } from './balance';
 import type { WalletRuntime } from './runtime';
 
 export class StateEmitter {
@@ -12,6 +13,7 @@ export class StateEmitter {
     private readonly wallets: Map<string, WalletRuntime>,
     private readonly subscriber: RpcSubscriber,
     private readonly bus: EventBus,
+    private readonly health: HealthMonitor,
   ) {}
 
   emitEvent(
@@ -37,15 +39,19 @@ export class StateEmitter {
   emitState(address: string): void {
     const rt = this.wallets.get(address);
     if (!rt) return;
-    this.bus.emit('state', buildWalletState(address, [...rt.open.values()], currentIdle(rt)));
+    this.bus.emit('state', buildWalletState(address, [...rt.open.values()], rt.onchain));
   }
 
   emitHealth(effectiveRps: number): void {
+    const wsOk = this.subscriber.isConnected();
+    this.health.set('ws', wsOk ? 'ok' : 'down', wsOk ? undefined : 'disconnected');
     this.bus.emit('health', {
-      ok: this.subscriber.isConnected(),
-      wsConnected: this.subscriber.isConnected(),
-      meteoraOk: [...this.wallets.values()].every((w) => w.lastPollOk || w.lastPollAt === 0),
+      ok: this.health.ok,
+      wsConnected: wsOk,
+      meteoraOk: this.health.statusOf('meteora') !== 'down',
       effectiveRps,
+      chainTipSlot: this.health.chainTipSlot,
+      sources: this.health.list(),
       wallets: [...this.wallets.values()].map((w) => ({
         wallet: w.address,
         wsConnected: this.subscriber.isConnected(),
@@ -59,19 +65,16 @@ export class StateEmitter {
     });
   }
 
-  getState(scope: string): WalletState {
-    if (scope === 'all') return this.aggregateState();
-    const rt = this.wallets.get(scope);
-    return buildWalletState(scope, rt ? [...rt.open.values()] : [], rt ? currentIdle(rt) : 0);
-  }
-
-  private aggregateState(): WalletState {
+  /** Aggregate state across the given wallet addresses (the caller's watchlist), labelled `scope`. */
+  getState(wallets: string[], scope: string): WalletState {
     const all: OpenPosition[] = [];
-    let idle = 0;
-    for (const rt of this.wallets.values()) {
+    const onchains: OnchainValued[] = [];
+    for (const address of wallets) {
+      const rt = this.wallets.get(address);
+      if (!rt) continue;
       all.push(...rt.open.values());
-      idle += currentIdle(rt);
+      if (rt.onchain) onchains.push(rt.onchain);
     }
-    return buildWalletState('all', all, idle);
+    return buildWalletState(scope, all, combineOnchain(onchains));
   }
 }

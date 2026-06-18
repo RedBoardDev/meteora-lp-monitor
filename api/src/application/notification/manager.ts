@@ -20,7 +20,10 @@ export class NotificationManager {
     private readonly bus: EventBus,
     private readonly config: ConfigRepository,
     private readonly presence: PresenceTracker,
+    // Owner's external fallback (Bark) — fires only when no client is actively viewing.
     private readonly channel: NotificationChannel,
+    // Universal per-account channel (Web Push / PWA) — fires for every subscriber of the event's wallet.
+    private readonly pushChannel: NotificationChannel,
     private readonly logger: Logger,
   ) {
     this.buffer = new BulkBuffer((e) => this.deliver(e));
@@ -157,22 +160,23 @@ export class NotificationManager {
     return Date.now() - this.startAt < STARTUP_GRACE_MS;
   }
 
-  /** Presence-aware routing: Mac active → native (already via WS); else → Bark. */
+  /**
+   * Routing for the PWA-first world:
+   *  • Web Push — the UNIVERSAL channel. Per-account and wallet-routed, sent independently of any one
+   *    client's presence, so every PWA user is alerted about THEIR wallets whether or not someone else
+   *    is viewing. (The recipient briefly seeing both an in-app banner and a push is acceptable.)
+   *  • In-app WS banner — for a client that's actively viewing (the owner's macOS / an open tab).
+   *  • Bark — the owner's external fallback, only when no client is active.
+   */
   private async deliver(event: LiveEvent): Promise<void> {
     if (this.inStartupGrace()) {
-      this.logger.info({ kind: event.kind }, 'route: held (startup grace, awaiting presence)');
+      this.logger.info({ kind: event.kind }, 'route: held (startup grace)');
       return;
     }
+    await this.pushChannel.deliver(event);
     const active = this.presence.isAnyClientActive();
-    this.logger.info(
-      { kind: event.kind, clientActive: active },
-      active ? 'route: native (client active), skipping Bark' : 'route: Bark (no client active)',
-    );
-    if (active) {
-      // Native banner only for rules the user enabled — handle() gates this path.
-      this.bus.emit('notify', event);
-      return;
-    }
-    await this.channel.deliver(event);
+    this.logger.info({ kind: event.kind, clientActive: active }, 'route: web-push + native/bark');
+    if (active) this.bus.emit('notify', event);
+    else await this.channel.deliver(event);
   }
 }
