@@ -3,10 +3,10 @@ SHELL := /bin/bash
 
 ## ─── Setup ───────────────────────────────────────────────────────────────
 .PHONY: setup
-setup: ## First run: create .env from the template (then edit API_TOKEN + SOLANA_WS_URL)
+setup: ## First run: create .env from the template (then edit AUTH_SECRET + SOLANA_WS_URL)
 	@if [ -f .env ]; then echo ".env already present."; else \
 		cp .env.example .env && \
-		echo "✓ Created .env — now set API_TOKEN and SOLANA_WS_URL (a Helius wss URL) in it."; fi
+		echo "✓ Created .env — now set AUTH_SECRET (≥32 chars: openssl rand -hex 32) and SOLANA_WS_URL (a Helius wss URL) in it."; fi
 
 .PHONY: install
 install: setup ## Create .env if missing, then install all workspace dependencies (Yarn Berry)
@@ -72,9 +72,9 @@ APPS := apps
 ENV_FILE := .env
 # Pull defaults from the repo .env at build time → baked into the app (overridable in Settings).
 envval = $(shell [ -f $(ENV_FILE) ] && sed -n 's/^$(1)=//p' $(ENV_FILE) | tail -1 | tr -d '"')
-MLPM_TOKEN := $(call envval,API_TOKEN)
 MLPM_URL := $(or $(call envval,CLIENT_API_URL),http://localhost:8787)
-MLPM_BAKE := MLPM_API_URL="$(MLPM_URL)" MLPM_API_TOKEN="$(MLPM_TOKEN)"
+# Only the API URL is baked into the app; auth is address+password→JWT, entered in the app's Settings.
+MLPM_BAKE := MLPM_API_URL="$(MLPM_URL)"
 # Sign with the first code-signing identity in your keychain (a FREE Apple ID's "Apple
 # Development" cert is enough — no $99 needed). A real signature is required for macOS
 # notifications; the app is non-sandboxed so no provisioning profile is needed. Ad-hoc fallback.
@@ -96,8 +96,15 @@ xcode: apps-gen ## Open the Meteora LP Monitor project in Xcode
 	open $(APPS)/MeteoraLPMonitor.xcodeproj
 
 .PHONY: notify-test
-notify-test: ## Fire a test position_close notification. KIND=oor_enter to override.
-	@curl -s -X POST -H "Authorization: Bearer $(MLPM_TOKEN)" \
+notify-test: ## Fire a test notif. Needs MLPM_ADDRESS + MLPM_PASSWORD (a registered account). KIND=oor_enter to override.
+	@test -n "$(MLPM_ADDRESS)" && test -n "$(MLPM_PASSWORD)" || { \
+		echo "Set MLPM_ADDRESS and MLPM_PASSWORD to a registered account, e.g.:"; \
+		echo "  make notify-test MLPM_ADDRESS=<wallet> MLPM_PASSWORD=<password>"; exit 1; }
+	@TOKEN=$$(curl -s -X POST -H "Content-Type: application/json" \
+		-d '{"address":"$(MLPM_ADDRESS)","password":"$(MLPM_PASSWORD)"}' "$(MLPM_URL)/auth/login" \
+		| sed -n 's/.*"token":"\([^"]*\)".*/\1/p'); \
+	test -n "$$TOKEN" || { echo "Login failed — check MLPM_ADDRESS / MLPM_PASSWORD and that the API is running."; exit 1; }; \
+	curl -s -X POST -H "Authorization: Bearer $$TOKEN" \
 		"$(MLPM_URL)/debug/notify?kind=$(or $(KIND),position_close)"; echo
 
 .PHONY: apps-test
