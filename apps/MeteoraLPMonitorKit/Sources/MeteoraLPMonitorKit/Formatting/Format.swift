@@ -1,4 +1,13 @@
 import Foundation
+import SwiftUI
+
+public extension Font {
+    /// Monospaced-digit data font (SF Mono, ships with the OS — zero project change).
+    /// For numeric/tabular values so columns stay aligned as digits change.
+    static func data(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .monospaced).monospacedDigit()
+    }
+}
 
 public func signed(_ n: Double) -> String { (n >= 0 ? "+" : "") + String(format: "%.4f", n) }
 public func abs3(_ n: Double) -> String { String(format: "%.4f", abs(n)) }
@@ -15,10 +24,6 @@ public func ageString(_ openedAt: Double?) -> String {
     if secs < 3600 { return "\(Int(secs / 60))m" }
     if secs < 86_400 { return "\(Int(secs / 3600))h" }
     return "\(Int(secs / 86_400))d"
-}
-
-public func feeStr(_ p: OpenPosition) -> String {
-    "✓\(abs3(p.claimedFeesSol)) ◷\(abs3(p.unclaimedFeesSol))"
 }
 
 public func feeYield(_ p: OpenPosition) -> String {

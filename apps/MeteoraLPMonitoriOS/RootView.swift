@@ -5,6 +5,8 @@ struct RootView: View {
     @Environment(PortfolioStore.self) private var store
     let setScope: (String) -> Void
     let reconnect: () -> Void
+    let refresh: () -> Void
+    @State private var showHealthDetail = false
 
     var body: some View {
         NavigationStack {
@@ -26,8 +28,9 @@ struct RootView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .refreshable {
-                reconnect()
-                try? await Task.sleep(for: .seconds(1))
+                // REST refresh only — the live socket keeps streaming. A full reconnect is reserved
+                // for the explicit Reconnect action in the health popover.
+                refresh()
             }
             .navigationTitle("Meteora LP Monitor")
             .navigationBarTitleDisplayMode(.inline)
@@ -63,9 +66,9 @@ struct RootView: View {
             Text(title)
                 .font(.system(size: 15, weight: .medium))
                 .padding(.horizontal, 16).padding(.vertical, 9)
-                .background(active ? Color.accentColor.opacity(0.22) : Color.primary.opacity(0.06),
+                .background(active ? Theme.accent.opacity(0.22) : Color.primary.opacity(0.06),
                             in: Capsule())
-                .foregroundStyle(active ? Color.accentColor : .secondary)
+                .foregroundStyle(active ? Theme.accent : .secondary)
         }
         .buttonStyle(.plain)
     }
@@ -80,7 +83,7 @@ struct RootView: View {
             }
         }
         .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .cardSurface(radius: Radius.lg)
     }
 
     // MARK: Summary
@@ -90,10 +93,10 @@ struct RootView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("\(signed(t.uPnlSol)) SOL")
-                        .font(.system(size: 34, weight: .bold).monospacedDigit())
+                        .font(.data(34, weight: .bold))
                         .foregroundStyle(pnlColor(t.uPnlPct))
                     Text(pct2(t.uPnlPct))
-                        .font(.system(size: 16, weight: .semibold).monospacedDigit())
+                        .font(.data(16, weight: .semibold))
                         .foregroundStyle(pnlColor(t.uPnlPct))
                 }
                 Spacer()
@@ -101,7 +104,7 @@ struct RootView: View {
                     Text("WALLET").font(.system(size: 11, weight: .semibold))
                         .tracking(0.5).foregroundStyle(.secondary)
                     Text("\(abs3(t.walletTotalSol)) SOL")
-                        .font(.system(size: 18, weight: .semibold).monospacedDigit())
+                        .font(.data(18, weight: .semibold))
                 }
             }
             Divider()
@@ -113,7 +116,7 @@ struct RootView: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+        .cardSurface(radius: Radius.lg)
     }
 
     private func stat(_ label: String, _ value: String, _ sub: String? = nil, _ valueColor: Color = .secondary)
@@ -121,10 +124,10 @@ struct RootView: View {
     {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 15, weight: .semibold).monospacedDigit())
+            Text(value).font(.data(15, weight: .semibold))
                 .foregroundStyle(valueColor == .secondary ? .primary : valueColor)
             if let sub {
-                Text(sub).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                Text(sub).font(.data(11)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -133,13 +136,13 @@ struct RootView: View {
     /// Realized PnL since local midnight, as % of wallet size (parity with the Mac app).
     private func todayStat(_ t: PortfolioTotals) -> some View {
         let today = store.stats?.todayPnlSol ?? 0
-        let color: Color = today > 0.0001 ? .green : today < -0.0001 ? .red : .primary
+        let color = pnlTone(value: today, basis: 0)
         return VStack(alignment: .leading, spacing: 3) {
             Text("Today").font(.system(size: 12)).foregroundStyle(.secondary)
-            Text("\(signed(today)) SOL").font(.system(size: 15, weight: .semibold).monospacedDigit())
+            Text("\(signed(today)) SOL").font(.data(15, weight: .semibold))
                 .foregroundStyle(color)
             Text("\(pctOf(today, t.walletTotalSol)) of wallet")
-                .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                .font(.data(11)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -165,9 +168,9 @@ struct RootView: View {
                 sectionLabel("CLOSED", count: store.closedTotal)
                 Spacer()
                 if let s = store.stats {
-                    Text(signed(s.totalPnlSol)).font(.system(size: 13, weight: .medium).monospacedDigit())
-                        .foregroundStyle(s.totalPnlSol >= 0 ? .green : .red)
-                    Text("win \(Int(s.winRate))%").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(signed(s.totalPnlSol)).font(.data(13, weight: .medium))
+                        .foregroundStyle(s.totalPnlSol >= 0 ? Theme.profit : Theme.loss)
+                    Text("win \(Int(s.winRate))%").font(.data(12)).foregroundStyle(.secondary)
                 }
             }
             if store.closed.isEmpty {
@@ -179,7 +182,7 @@ struct RootView: View {
                         closedRow(c)
                     }
                 }
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                .cardSurface()
             }
         }
     }
@@ -190,18 +193,20 @@ struct RootView: View {
                 Text("\(c.tokenX)/\(c.tokenY)").font(.system(size: 14, weight: .medium))
                     .lineLimit(1)
                 Text("fees \(abs3(c.feesSol)) · \(ageString(c.closedAt))")
-                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                    .font(.data(11)).foregroundStyle(.secondary)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
                 Text(signed(c.pnlSol))
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .font(.data(13, weight: .semibold))
                     .foregroundStyle(pnlColor(c.pnlPctSol))
                 Text(pct2(c.pnlPctSol))
-                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .font(.data(11, weight: .semibold))
                     .foregroundStyle(pnlColor(c.pnlPctSol))
             }
-            PositionLinks(wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint)
+            PositionLinks(
+                wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
+                shareAddress: c.positionAddress)
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
     }
@@ -216,22 +221,29 @@ struct RootView: View {
 
     private var connectionDot: some View {
         let degraded = store.health.map { !$0.wsConnected || !$0.meteoraOk } ?? false
-        let color: Color = switch store.connection {
-        case .live: degraded ? .orange : .green
-        case .connecting: .orange
-        case .offline, .unauthorized: .red
-        case .unconfigured: .secondary
-        }
+        let color = connectionColor(store.connection, degraded: degraded)
         return Circle().fill(color).frame(width: 10, height: 10)
             .contentShape(Rectangle())
-            .onTapGesture { reconnect() }
+            .onTapGesture { showHealthDetail = true }
+            .popover(isPresented: $showHealthDetail) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HealthDetailView(health: store.health)
+                    Button("Reconnect") {
+                        showHealthDetail = false
+                        reconnect()
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                }
+                .padding(16)
+                .presentationCompactAdaptation(.popover)
+            }
     }
 
     private func sectionLabel(_ title: String, count: Int) -> some View {
         HStack(spacing: 6) {
             Text(title).font(.system(size: 12, weight: .semibold)).tracking(0.4)
                 .foregroundStyle(.secondary)
-            Text("\(count)").font(.system(size: 12).monospacedDigit()).foregroundStyle(.tertiary)
+            Text("\(count)").font(.data(12)).foregroundStyle(.tertiary)
         }
     }
 }

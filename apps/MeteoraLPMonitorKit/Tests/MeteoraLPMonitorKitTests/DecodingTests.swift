@@ -27,6 +27,23 @@ final class DecodingTests: XCTestCase {
         XCTAssertFalse(h.meteoraOk)
     }
 
+    func testHealthDecodesPerSourceDetail() throws {
+        let json = """
+        {"type":"health","payload":{"ok":false,"wsConnected":true,"meteoraOk":true,
+        "effectiveRps":1,"chainTipSlot":426199021,
+        "sources":[{"name":"rpc","status":"down","lastOkAt":1,"lastErrorAt":2,"consecutiveErrors":3,"detail":"RPC 429"},
+                   {"name":"jupiter","status":"ok","lastOkAt":5,"lastErrorAt":null,"consecutiveErrors":0,"detail":null}],
+        "wallets":[],"uptimeSeconds":10}}
+        """
+        let msg = try ServerMessage(from: Data(json.utf8))
+        guard case .health(let h) = msg else { return XCTFail("expected .health") }
+        XCTAssertEqual(h.chainTipSlot, 426199021)
+        XCTAssertEqual(h.sources?.count, 2)
+        XCTAssertEqual(h.sources?.first?.name, "rpc")
+        XCTAssertEqual(h.sources?.first?.status, "down")
+        XCTAssertEqual(h.sources?.first?.detail, "RPC 429")
+    }
+
     func testUnknownTypeIsOther() throws {
         let msg = try ServerMessage(from: Data(#"{"type":"ping","payload":{}}"#.utf8))
         guard case .other = msg else { return XCTFail("expected .other") }

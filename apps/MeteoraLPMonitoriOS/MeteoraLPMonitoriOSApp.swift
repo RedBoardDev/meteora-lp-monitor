@@ -30,8 +30,11 @@ struct MeteoraLPMonitoriOSApp: App {
             RootView(
                 setScope: { [client] in client.setScope($0) },
                 reconnect: { [client] in client.stop(); client.start() },
+                refresh: { [client] in client.refreshNow() },
             )
             .environment(store)
+            .tint(Theme.accent) // emerald brand accent for controls/links
+            .preferredColorScheme(.dark) // premium-dark identity holds even in system light mode
             .onAppear { client.start() }
             .onChange(of: scenePhase) { _, phase in
                 foreground.active = (phase == .active)

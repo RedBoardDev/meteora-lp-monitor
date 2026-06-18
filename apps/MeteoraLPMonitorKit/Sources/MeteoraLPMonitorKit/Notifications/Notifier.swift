@@ -5,12 +5,11 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     override private init() { super.init() }
 
     /// Call once at launch. Registers the delegate so notifications show even when the app is
-    /// active/foreground — the exact case where the backend routes to native instead of Bark —
-    /// and requests authorization.
+    /// active/foreground — the exact case where the backend routes to native instead of Bark.
+    /// Does NOT request authorization: that prompt is owned by the user-initiated master toggle
+    /// in `NotificationsEditor`, so we never ask twice.
     public static func bootstrap() {
-        let center = UNUserNotificationCenter.current()
-        center.delegate = shared
-        center.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        UNUserNotificationCenter.current().delegate = shared
     }
 
     public func userNotificationCenter(

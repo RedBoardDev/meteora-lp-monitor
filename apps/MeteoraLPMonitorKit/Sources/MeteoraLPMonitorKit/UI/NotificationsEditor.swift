@@ -1,13 +1,6 @@
 import SwiftUI
 import UserNotifications
 
-public extension Notification.Name {
-    /// Posted when the local "Enable notifications" master toggle changes, so the host app can
-    /// push a fresh presence heartbeat immediately (muting a device must route to Bark at once,
-    /// not after the next 10s heartbeat).
-    static let lpmPresenceShouldRefresh = Notification.Name("MeteoraLPMonitorPresenceShouldRefresh")
-}
-
 /// Shared notification settings for both Settings screens. A master toggle gates everything:
 /// when on it ensures OS permission (prompts, or points to System Settings if denied) and
 /// reveals the per-event rules; when off the rules are hidden and native notifs are muted.
@@ -85,7 +78,7 @@ public struct NotificationsEditor: View {
         switch status {
         case .authorized, .provisional:
             Label("Notifications allowed", systemImage: "checkmark.circle.fill")
-                .font(.system(size: 12)).foregroundStyle(.green)
+                .font(.system(size: 12)).foregroundStyle(Theme.profit)
         case .denied:
             VStack(alignment: .leading, spacing: 4) {
                 Text("Notifications are turned off for Meteora LP Monitor in System Settings.")

@@ -2,11 +2,11 @@ import Foundation
 import Observation
 
 public enum ConnectionState: Sendable {
-    case unconfigured // no API token set yet
+    case unconfigured // no auth password set yet
     case connecting
     case live
     case offline // can't reach the API
-    case unauthorized // API rejected the token (WS 1008)
+    case unauthorized // API rejected the credentials (WS 1008)
 }
 
 @Observable
