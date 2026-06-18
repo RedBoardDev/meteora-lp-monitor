@@ -327,10 +327,16 @@ export class Engine {
       //    re-write the (large, unchanged) closed history. Waits for `reconciled` so a tick before the
       //    first backfill can't wipe the open set with an empty projection.
       if (this.onchainSource && rt.needsSync) {
+        // Gate the close-notification on prior reconciliation: the FIRST sync is the historical backfill
+        // (can write ~15k closed rows) and must emit ZERO `closed` events. `sync` already returns only the
+        // genuinely newly-closed rows (open→closed transitions vs the persisted open set), so on every
+        // SUBSEQUENT sync each newly-closed position fires exactly one `closed` → one push.
+        const wasReconciled = rt.reconciled;
         const res = await this.positionSync.sync(rt.address, snap, valued);
         rt.needsSync = false;
         rt.lastSyncAt = Date.now();
         rt.reconciled = true;
+        if (wasReconciled) for (const row of res.closedRows) this.bus.emit('closed', row);
         if (res.closed !== rt.lastClosedCount) {
           rt.lastClosedCount = res.closed;
           this.bus.emit('closedChanged', { wallet: rt.address });
