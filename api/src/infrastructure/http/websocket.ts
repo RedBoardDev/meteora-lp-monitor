@@ -1,4 +1,4 @@
-import { ClientMessageSchema } from '@meteora/shared';
+import { ClientMessageSchema } from '@binsight/shared';
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import type { Engine } from '@/application/engine';

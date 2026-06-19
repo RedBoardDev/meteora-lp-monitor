@@ -1,4 +1,4 @@
-import type { ClosedPosition, Health, LiveEvent, WalletState } from '@meteora/shared';
+import type { ClosedPosition, Health, LiveEvent, WalletState } from '@binsight/shared';
 
 type Events = {
   state: WalletState;

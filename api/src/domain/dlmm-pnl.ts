@@ -1,4 +1,4 @@
-import { SOL_MINT } from '@meteora/shared';
+import { SOL_MINT } from '@binsight/shared';
 import type { DlmmLeg, PoolMeta, PositionEconomics } from './dlmm';
 
 /**

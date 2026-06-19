@@ -1,4 +1,4 @@
-import type { PositionBin, PositionBins } from '@meteora/shared';
+import type { PositionBin, PositionBins } from '@binsight/shared';
 import type { Connection } from '@solana/web3.js';
 import { PublicKey } from '@solana/web3.js';
 import {

@@ -1,6 +1,6 @@
 'use client';
 
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { type SelectedPosition, useUi } from '@/application/stores/ui-store';
 import { fmtAmount, fmtDate, fmtDuration, rangeLabel, shortAddr } from '@/domain/format';

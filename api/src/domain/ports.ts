@@ -10,7 +10,7 @@ import type {
   Stats,
   StrategyFamily,
   WalletOverview,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import type {
   DailyFlow,
   DlmmLeg,
@@ -169,7 +169,7 @@ export interface AccountSummary {
   wallets: string[];
 }
 
-// AccessEntry + WalletOverview are the api→web admin contract — canonical in @meteora/shared.
+// AccessEntry + WalletOverview are the api→web admin contract — canonical in @binsight/shared.
 // Re-exported here so existing `@/domain/ports` importers keep their import path.
 export type { AccessEntry, WalletOverview };
 

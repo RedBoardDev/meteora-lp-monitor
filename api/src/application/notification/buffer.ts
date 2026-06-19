@@ -1,4 +1,4 @@
-import type { EventKind, LiveEvent } from '@meteora/shared';
+import type { EventKind, LiveEvent } from '@binsight/shared';
 
 const BULK_WINDOW_MS = 8000;
 

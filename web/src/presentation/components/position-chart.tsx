@@ -1,6 +1,6 @@
 'use client';
 
-import type { PositionEvent, RangeStatus } from '@meteora/shared';
+import type { PositionEvent, RangeStatus } from '@binsight/shared';
 import { type Chart, dispose, init, LineType } from 'klinecharts';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/infrastructure/api/client';

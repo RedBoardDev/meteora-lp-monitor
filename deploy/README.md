@@ -17,7 +17,7 @@ Postgres stay on the internal Docker network. The containers bind to `127.0.0.1`
 
 - Docker Engine + the Compose plugin (`docker compose version`).
 - The existing host nginx + `certbot` (with the nginx or webroot plugin).
-- The repo cloned somewhere, e.g. `/opt/meteora-lp-monitor`.
+- The repo cloned somewhere, e.g. `/opt/binsight`.
 
 ## 2. DNS (you handle this in Route53)
 

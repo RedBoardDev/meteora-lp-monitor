@@ -1,4 +1,4 @@
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { create } from 'zustand';
 import type { Period } from '@/domain/period';
 

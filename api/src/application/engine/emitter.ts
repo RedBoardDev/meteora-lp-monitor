@@ -1,4 +1,4 @@
-import type { LiveEvent, OpenPosition, WalletState } from '@meteora/shared';
+import type { LiveEvent, OpenPosition, WalletState } from '@binsight/shared';
 import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
 import { buildWalletState, combineOnchain } from '@/application/wallet-state';

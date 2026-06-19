@@ -1,6 +1,6 @@
 'use client';
 
-import type { ClosedPosition, StrategyFamily } from '@meteora/shared';
+import type { ClosedPosition, StrategyFamily } from '@binsight/shared';
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useState } from 'react';
 import type { Tone } from '@/domain/position';
 import { useMoney } from '@/presentation/hooks/use-money';

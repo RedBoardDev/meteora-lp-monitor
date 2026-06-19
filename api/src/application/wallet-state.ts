@@ -1,4 +1,4 @@
-import type { OpenPosition, PortfolioTotals, WalletState } from '@meteora/shared';
+import type { OpenPosition, PortfolioTotals, WalletState } from '@binsight/shared';
 import type { OnchainValued } from '@/domain/dlmm';
 import { isOutOfRange } from '@/domain/position';
 

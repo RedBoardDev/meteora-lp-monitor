@@ -1,6 +1,6 @@
 'use client';
 
-import type { PositionBins } from '@meteora/shared';
+import type { PositionBins } from '@binsight/shared';
 import { fmtAmount } from '@/domain/format';
 import { cn, Tooltip } from '@/presentation/ui';
 

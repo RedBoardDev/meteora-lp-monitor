@@ -1,4 +1,4 @@
-import type { Health, LiveEvent, WalletState } from '@meteora/shared';
+import type { Health, LiveEvent, WalletState } from '@binsight/shared';
 import { authApi } from '@/infrastructure/api/client';
 
 export type LiveHandlers = {

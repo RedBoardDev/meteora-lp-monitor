@@ -1,4 +1,4 @@
-import type { LiveEvent } from '@meteora/shared';
+import type { LiveEvent } from '@binsight/shared';
 import type { Logger } from 'pino';
 import webpush from 'web-push';
 import type { NotificationChannel } from '@/domain/ports';
@@ -30,7 +30,7 @@ export class WebPushChannel implements NotificationChannel {
   async sendTest(subs: PushSub[]): Promise<number> {
     if (!this.enabled) return 0;
     await this.pushAll(subs, {
-      title: 'Meteora LP Monitor',
+      title: 'Binsight',
       body: 'Test alert — push notifications are working ✅',
       url: '/',
       tag: 'test',

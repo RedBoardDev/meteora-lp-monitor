@@ -1,4 +1,4 @@
-# Contributing to Meteora LP Monitor
+# Contributing to Binsight
 
 ## Prerequisites
 

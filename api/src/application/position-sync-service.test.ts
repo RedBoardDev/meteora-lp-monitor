@@ -1,4 +1,4 @@
-import { type ClosedPosition, type OpenPosition, SOL_MINT } from '@meteora/shared';
+import { type ClosedPosition, type OpenPosition, SOL_MINT } from '@binsight/shared';
 import { pino } from 'pino';
 import { describe, expect, it, vi } from 'vitest';
 import type { OnchainPositionValue, OnchainValued, OnchainWalletSnapshot } from '@/domain/dlmm';

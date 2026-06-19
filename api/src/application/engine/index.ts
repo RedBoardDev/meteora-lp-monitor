@@ -3,7 +3,7 @@ import {
   type PositionHistory,
   WALLET_BALANCE_REFRESH_MS,
   type WalletState,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';

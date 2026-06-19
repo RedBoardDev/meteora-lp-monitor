@@ -4,7 +4,7 @@ import type { MetadataRoute } from 'next';
  *  home screen and run standalone. Colours match the Graphite theme so the splash/chrome blend in. */
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: 'Meteora LP Monitor',
+    name: 'Binsight',
     short_name: 'LP Monitor',
     description: 'Real-time Meteora DLMM portfolio — live PnL, fees, ranges, on-chain.',
     start_url: '/',

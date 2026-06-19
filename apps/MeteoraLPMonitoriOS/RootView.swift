@@ -32,7 +32,7 @@ struct RootView: View {
                 // for the explicit Reconnect action in the health popover.
                 refresh()
             }
-            .navigationTitle("Meteora LP Monitor")
+            .navigationTitle("Binsight")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { connectionDot }

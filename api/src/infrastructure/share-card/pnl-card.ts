@@ -1,4 +1,4 @@
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import { shareCardAsset } from './assets';
 import { selectBackground } from './select-background';

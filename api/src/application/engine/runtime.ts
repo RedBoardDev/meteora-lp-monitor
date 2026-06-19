@@ -1,4 +1,4 @@
-import type { OpenPosition } from '@meteora/shared';
+import type { OpenPosition } from '@binsight/shared';
 import type { OnchainValued, SnapshotPlan } from '@/domain/dlmm';
 import type { PoolRef } from '@/domain/ports';
 

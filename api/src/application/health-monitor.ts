@@ -1,4 +1,4 @@
-import type { SourceHealth, SourceStatus } from '@meteora/shared';
+import type { SourceHealth, SourceStatus } from '@binsight/shared';
 import type { HealthReporter } from '@/domain/ports';
 
 const DOWN_THRESHOLD = 3; // consecutive failures before a source is reported "down"

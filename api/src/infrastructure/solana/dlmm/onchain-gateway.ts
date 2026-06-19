@@ -6,7 +6,7 @@ import {
   TOKEN_PROGRAM_ID,
   USDC_MINT,
   USDT_MINT,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import {
   type AccountInfo,
   type Connection,

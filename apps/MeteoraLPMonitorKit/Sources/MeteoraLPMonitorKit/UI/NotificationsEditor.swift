@@ -81,7 +81,7 @@ public struct NotificationsEditor: View {
                 .font(.system(size: 12)).foregroundStyle(Theme.profit)
         case .denied:
             VStack(alignment: .leading, spacing: 4) {
-                Text("Notifications are turned off for Meteora LP Monitor in System Settings.")
+                Text("Notifications are turned off for Binsight in System Settings.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                 Button("Open System Settings") { NotifPermission.openSystemSettings() }
             }

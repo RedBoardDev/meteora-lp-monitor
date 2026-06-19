@@ -1,6 +1,6 @@
 'use client';
 
-import type { Stats } from '@meteora/shared';
+import type { Stats } from '@binsight/shared';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
 import { fmtDuration } from '@/domain/format';

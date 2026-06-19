@@ -1,4 +1,4 @@
-import type { LiveEvent } from '@meteora/shared';
+import type { LiveEvent } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { NotificationChannel } from '@/domain/ports';
 

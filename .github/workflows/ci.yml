@@ -101,7 +101,7 @@ jobs:
       - uses: ./.github/actions/setup
       # Apply EVERY migration with the real drizzle-kit CLI against a real Postgres. The unit tests use
       # PGlite + the runtime migrator, so this job is the only check of the actual prod migration path.
-      - run: yarn workspace @meteora/api db:migrate
+      - run: yarn workspace @binsight/api db:migrate
 
   ci-status:
     name: CI Status

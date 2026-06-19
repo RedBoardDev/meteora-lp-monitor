@@ -1,6 +1,6 @@
 'use client';
 
-import type { Bucket } from '@meteora/shared';
+import type { Bucket } from '@binsight/shared';
 import { useState } from 'react';
 import { FilterBar } from './filter-bar';
 import { PerformanceCard } from './performance-card';

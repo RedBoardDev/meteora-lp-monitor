@@ -126,7 +126,7 @@ function AuthCard() {
           {/* biome-ignore lint/performance/noImgElement: tiny static brand mark, no layout cost */}
           <img src="/icon.svg" alt="" width={56} height={56} className="size-14 rounded-2xl" />
           <div className="flex flex-col gap-1">
-            <h1 className="font-semibold text-lg text-text tracking-tight">Meteora LP Monitor</h1>
+            <h1 className="font-semibold text-lg text-text tracking-tight">Binsight</h1>
             <p className="text-muted text-sm">
               {mode === 'signin' && 'Sign in to your portfolio.'}
               {mode === 'signup' && 'Connect your wallet to create an account.'}

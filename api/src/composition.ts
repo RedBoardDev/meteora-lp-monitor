@@ -1,4 +1,4 @@
-import type { RuntimeSettings } from '@meteora/shared';
+import type { RuntimeSettings } from '@binsight/shared';
 import { Connection } from '@solana/web3.js';
 import { pino } from 'pino';
 import { DlmmPositionPnl } from './application/dlmm-position-pnl';
@@ -225,7 +225,7 @@ export function compose(config: AppConfig): App {
         ],
       });
       await server.listen({ port: config.PORT, host: '0.0.0.0' });
-      logger.info({ port: config.PORT }, 'Meteora LP Monitor API listening');
+      logger.info({ port: config.PORT }, 'Binsight API listening');
 
       logRpcStats();
       statsTimer = setInterval(() => logRpcStats(), 600_000); // every 10 min

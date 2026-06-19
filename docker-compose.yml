@@ -1,4 +1,4 @@
-# Self-hosted infrastructure for the Meteora LP Monitor.
+# Self-hosted infrastructure for the Binsight.
 # Postgres is the durable store (see docs/scaling/SCALING-SPEC.md D2). Redis is deferred until a
 # multi-instance split is needed (D4). When running the api inside compose, point DATABASE_URL at
 # the `postgres` service host: postgres://meteora:meteora@postgres:5432/meteora

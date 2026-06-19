@@ -1,4 +1,4 @@
-import type { OpenPosition } from '@meteora/shared';
+import type { OpenPosition } from '@binsight/shared';
 import { describe, expect, it } from 'vitest';
 import type { OnchainValued } from '@/domain/dlmm';
 import { buildTotals, buildWalletState, combineOnchain } from './wallet-state';

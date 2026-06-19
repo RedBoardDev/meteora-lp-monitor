@@ -1,4 +1,4 @@
-import type { Bucket, ProfitBucket } from '@meteora/shared';
+import type { Bucket, ProfitBucket } from '@binsight/shared';
 
 export type { Bucket, ProfitBucket };
 

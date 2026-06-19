@@ -1,5 +1,5 @@
 import { PGlite } from '@electric-sql/pglite';
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { describe, expect, it } from 'vitest';

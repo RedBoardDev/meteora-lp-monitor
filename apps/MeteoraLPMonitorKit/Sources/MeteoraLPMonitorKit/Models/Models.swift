@@ -1,6 +1,6 @@
 import Foundation
 
-// Wire types mirroring @meteora/shared. Only the fields the clients render.
+// Wire types mirroring @binsight/shared. Only the fields the clients render.
 
 public enum RangeStatus: String, Codable, Sendable { case `in`, out_up, out_down, unknown }
 

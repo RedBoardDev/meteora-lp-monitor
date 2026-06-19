@@ -1,4 +1,4 @@
-import type { RangeStatus } from '@meteora/shared';
+import type { RangeStatus } from '@binsight/shared';
 
 /** Pure domain helpers for position math. No I/O. */
 

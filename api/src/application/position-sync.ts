@@ -4,7 +4,7 @@ import {
   type RangeStatus,
   SOL_MINT,
   type StrategyFamily,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import type { OnchainPositionValue, OnchainValued } from '@/domain/dlmm';
 import { binPriceRaw, openUnrealizedPnlSol } from '@/domain/dlmm-pnl';
 import type { TokenMeta } from '@/domain/ports';

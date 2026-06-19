@@ -66,7 +66,7 @@ const EnvSchema = z.object({
   // Push is disabled when either key is empty.
   VAPID_PUBLIC_KEY: z.string().default(''),
   VAPID_PRIVATE_KEY: z.string().default(''),
-  VAPID_SUBJECT: z.string().default('mailto:admin@meteora-lp-monitor.local'),
+  VAPID_SUBJECT: z.string().default('mailto:admin@binsight.local'),
 
   /** Browser origins allowed by CORS (comma-separated). Native clients send no Origin. */
   WEB_ORIGINS: z.string().default('http://localhost:3000,http://localhost:5173'),

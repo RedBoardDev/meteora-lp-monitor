@@ -1,4 +1,4 @@
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { describe, expect, it } from 'vitest';
 import type { EnhancedTxGateway, PositionRepository, PositionsGateway } from '@/domain/ports';

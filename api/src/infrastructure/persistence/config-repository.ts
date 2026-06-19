@@ -3,7 +3,7 @@ import {
   EventKindSchema,
   type NotifRule,
   type RuntimeSettings,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import { and, eq, isNull, notInArray, sql } from 'drizzle-orm';
 import type { ConfigRepository } from '@/domain/ports';
 import { toFiniteNumber as num } from '@/util/number';

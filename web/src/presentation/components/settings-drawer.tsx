@@ -1,6 +1,6 @@
 'use client';
 
-import type { Wallet } from '@meteora/shared';
+import type { Wallet } from '@binsight/shared';
 import Link from 'next/link';
 import { useEffect } from 'react';
 import { useIdentity } from '@/application/stores/identity-store';

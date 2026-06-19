@@ -86,7 +86,7 @@ export async function buildServer(deps: ServerDeps) {
     try {
       return new URL(primaryOrigin).host;
     } catch {
-      return 'meteora-lp-monitor';
+      return 'binsight';
     }
   })();
   const NONCE_TTL_MS = 5 * 60 * 1000; // 5 minutes — long enough to read a wallet prompt, short for replay

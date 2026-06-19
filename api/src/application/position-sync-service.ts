@@ -1,4 +1,4 @@
-import { type ClosedPosition, type OpenPosition, SOL_MINT } from '@meteora/shared';
+import { type ClosedPosition, type OpenPosition, SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { OnchainValued, OnchainWalletSnapshot } from '@/domain/dlmm';
 import type { PositionRepository, TokenMetadataGateway } from '@/domain/ports';

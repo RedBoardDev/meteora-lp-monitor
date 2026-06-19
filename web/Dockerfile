@@ -15,10 +15,10 @@ ENV NEXT_PUBLIC_API_WS_URL=${NEXT_PUBLIC_API_WS_URL}
 COPY package.json yarn.lock .yarnrc.yml tsconfig.base.json ./
 COPY shared/package.json shared/
 COPY web/package.json web/
-RUN yarn workspaces focus @meteora/web @meteora/shared
+RUN yarn workspaces focus @binsight/web @binsight/shared
 COPY shared/ shared/
 COPY web/ web/
-RUN yarn workspace @meteora/shared build && yarn workspace @meteora/web build
+RUN yarn workspace @binsight/shared build && yarn workspace @binsight/web build
 
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /repo

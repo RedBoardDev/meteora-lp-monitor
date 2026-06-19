@@ -105,7 +105,7 @@ export function buildSiwsMessage(p: {
     `${p.domain} wants you to sign in with your Solana account:`,
     p.address,
     '',
-    'Prove you own this wallet to create your Meteora LP Monitor account.',
+    'Prove you own this wallet to create your Binsight account.',
     'This is a signature only — it authorizes nothing on-chain and costs no gas.',
     '',
     `URI: ${p.uri}`,

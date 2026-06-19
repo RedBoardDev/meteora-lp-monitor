@@ -1,4 +1,4 @@
-import type { StrategyFamily } from '@meteora/shared';
+import type { StrategyFamily } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PositionRepository, StrategyResolver } from '@/domain/ports';
 import { sleep } from '@/util/sleep';

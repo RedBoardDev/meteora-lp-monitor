@@ -3,7 +3,7 @@ import {
   METEORA_API_BASE,
   type OpenPosition,
   SOL_MINT,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PoolRef, PositionsGateway } from '@/domain/ports';
 import { resolveRangeStatus } from '@/domain/position';

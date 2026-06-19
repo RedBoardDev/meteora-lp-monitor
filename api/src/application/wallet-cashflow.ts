@@ -11,10 +11,10 @@
  * NOT part of a swap or DLMM action) are NOT trading PnL and are tracked separately, never mixed in.
  */
 
-import type { WalletPnlDay } from '@meteora/shared';
+import type { WalletPnlDay } from '@binsight/shared';
 import type { WalletTxFlow } from '@/domain/cashflow';
 
-/** One day of the wallet PnL curve — the api→web contract type, canonical in @meteora/shared. */
+/** One day of the wallet PnL curve — the api→web contract type, canonical in @binsight/shared. */
 export type CashflowDay = WalletPnlDay;
 
 const dayOf = (tsSec: number): string => new Date(tsSec * 1000).toISOString().slice(0, 10);

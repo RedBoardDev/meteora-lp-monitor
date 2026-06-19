@@ -4,7 +4,7 @@ import type {
   RangeStatus,
   StrategyFamily,
   WalletState,
-} from '@meteora/shared';
+} from '@binsight/shared';
 
 export type Tone = 'profit' | 'loss' | 'neutral';
 

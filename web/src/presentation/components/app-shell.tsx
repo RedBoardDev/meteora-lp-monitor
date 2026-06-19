@@ -73,7 +73,7 @@ export function AppShell() {
             {/* biome-ignore lint/performance/noImgElement: tiny static brand mark (Apple-squircle app icon), no layout cost */}
             <img src="/icon.svg" alt="" width={24} height={24} className="size-6 shrink-0" />
             <h1 className="whitespace-nowrap font-semibold text-sm text-text tracking-tight">
-              Meteora LP Monitor
+              Binsight
             </h1>
           </div>
           <div className="flex min-w-0 items-center gap-1.5">

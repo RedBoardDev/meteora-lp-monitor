@@ -1,4 +1,4 @@
-import { type RangeStatus, SOL_MINT, type StrategyFamily } from '@meteora/shared';
+import { type RangeStatus, SOL_MINT, type StrategyFamily } from '@binsight/shared';
 import { describe, expect, it } from 'vitest';
 import type { OnchainPositionValue } from '@/domain/dlmm';
 import type { PositionPnl } from './dlmm-position-pnl';

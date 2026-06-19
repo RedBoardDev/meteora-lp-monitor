@@ -1,4 +1,4 @@
-import { type ClosedPosition, SOL_MINT } from '@meteora/shared';
+import { type ClosedPosition, SOL_MINT } from '@binsight/shared';
 import type { ResidualSell } from '@/domain/dlmm';
 
 export type { ResidualSell };

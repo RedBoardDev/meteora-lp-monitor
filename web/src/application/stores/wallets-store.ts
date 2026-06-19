@@ -1,4 +1,4 @@
-import type { Wallet } from '@meteora/shared';
+import type { Wallet } from '@binsight/shared';
 import { create } from 'zustand';
 import { api } from '@/infrastructure/api/client';
 

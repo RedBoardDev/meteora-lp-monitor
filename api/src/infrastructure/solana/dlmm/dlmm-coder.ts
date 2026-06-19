@@ -1,5 +1,5 @@
 import { BorshCoder } from '@coral-xyz/anchor';
-import { DLMM_PROGRAM_ID } from '@meteora/shared';
+import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import dlmmIdl from './dlmm-idl.json';
 
 /** The Meteora DLMM on-chain program. */
