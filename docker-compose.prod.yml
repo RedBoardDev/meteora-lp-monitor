@@ -51,7 +51,7 @@ services:
       dockerfile: web/Dockerfile
       args:
         # Baked into the client bundle — the browser opens the API WebSocket at this origin.
-        NEXT_PUBLIC_API_WS_URL: ${NEXT_PUBLIC_API_WS_URL:-wss://lpagent.thomasott.fr}
+        NEXT_PUBLIC_API_WS_URL: ${NEXT_PUBLIC_API_WS_URL:-wss://binsight.thomasott.fr}
     restart: unless-stopped
     environment:
       NODE_ENV: production

@@ -2,15 +2,14 @@
 
 /* ── Design tokens (Tailwind v4 @theme → utilities like bg-surface, text-muted, rounded-lg) ──────── */
 @theme {
-  /* ════════ THEME — "Graphite": softer charcoal-grey base, Jupiter lime accent. ════════
-     Drawn from jup.ag (lime/chartreuse primary + teal secondary) on a graphite-grey ramp. The accent
-     is RATIONED to the logo, active tab, chart line, focus ring + primary CTA — never on data values.
-     Meteora's warm orange is demoted to --color-warn. P&L stays semantic green/red. AA-verified.    */
-  --color-bg: #14161b;
-  --color-bg-elevated: #1a1d23;
-  --color-surface: #1e2129;
-  --color-surface-2: #282c36;
-  --color-hover: #333844;
+  /* ════════ THEME — "Binsight": deep-void base, cyan accent. ════════
+     A cool blue-black ramp; the accent is a bright CYAN ("insight"), RATIONED to the logo, active tab,
+     chart line, focus ring + primary CTA — never on data values. P&L stays semantic green/red. AA-verified. */
+  --color-bg: #0b0f14;
+  --color-bg-elevated: #11161d;
+  --color-surface: #161c26;
+  --color-surface-2: #1f2631;
+  --color-hover: #2a3340;
   --color-border: rgba(255, 255, 255, 0.08);
   --color-border-strong: rgba(255, 255, 255, 0.14);
   --color-highlight: rgba(255, 255, 255, 0.05);
@@ -18,12 +17,12 @@
 
   --color-text: #f1f3f6;
   --color-muted: #aeb4c0;
-  --color-faint: #9ca3af; /* AA on surface (6.3:1) and hover rows (4.6:1) */
+  --color-faint: #9ca3af; /* AA on the deeper surface (≈7:1) and hover rows */
 
-  --color-accent: #bef264; /* Jupiter chartreuse — logo, active tab, chart line, focus, CTA only */
-  --color-accent-soft: rgba(190, 242, 100, 0.13);
-  --color-accent-ink: #14161b; /* dark ink on a solid-lime CTA (13.7:1) */
-  --color-accent-2: #2dd4bf; /* teal secondary — links / secondary marks only */
+  --color-accent: #22d3ee; /* cyan — logo, active tab, chart line, focus, CTA only */
+  --color-accent-soft: rgba(34, 211, 238, 0.13);
+  --color-accent-ink: #08121a; /* near-black ink on a solid-cyan CTA (≈9:1) */
+  --color-accent-2: #818cf8; /* indigo secondary — links / secondary marks only */
   --color-profit: #34d399;
   --color-loss: #fb7185;
   --color-warn: #fbbf24; /* Meteora-orange-adjacent amber — warnings only */
@@ -53,6 +52,7 @@
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: var(--font-mono-font), ui-monospace, "SF Mono", monospace;
+  --font-display: var(--font-space-grotesk), var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 
   /* Motion — cinematic Expo.out + restrained durations (150–240ms). */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

@@ -1,7 +1,7 @@
 # Production deployment
 
 Single VPS, fronted by the host **nginx**. The app runs as three containers via
-`docker-compose.prod.yml`; nginx terminates TLS for `lpagent.thomasott.fr` and routes traffic.
+`docker-compose.prod.yml`; nginx terminates TLS for `binsight.thomasott.fr` and routes traffic.
 
 ```
                        ┌──────────────── VPS ────────────────┐
@@ -21,7 +21,7 @@ Postgres stay on the internal Docker network. The containers bind to `127.0.0.1`
 
 ## 2. DNS (you handle this in Route53)
 
-An `A` record `lpagent.thomasott.fr` → the VPS public IP.
+An `A` record `binsight.thomasott.fr` → the VPS public IP.
 
 ## 3. `.env.prod` (create on the VPS — never commit it)
 
@@ -32,7 +32,7 @@ Create `.env.prod` next to `docker-compose.prod.yml`. `DATABASE_URL` is injected
 |-----|----------|-------|
 | `AUTH_SECRET` | ✅ | JWT signing key, ≥32 chars. Generate once, keep STABLE: `openssl rand -hex 32`. Changing it logs everyone out. |
 | `SOLANA_WS_URL` | ✅ | `wss://mainnet.helius-rpc.com/?api-key=…` (Helius). |
-| `WEB_ORIGINS` | ✅ | `https://lpagent.thomasott.fr` — also binds the wallet sign-in (SIWS) origin and the WS origin allow-list. |
+| `WEB_ORIGINS` | ✅ | `https://binsight.thomasott.fr` — also binds the wallet sign-in (SIWS) origin and the WS origin allow-list. |
 | `OWNER_ADDRESS` | recommended | Your wallet address: auto-whitelisted + flagged owner when it registers. |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | optional | Web Push. Generate once: `npx web-push generate-vapid-keys`. Must stay STABLE. |
 | `SOLANA_RPS`, `SOLANA_GPA_RPS`, … | optional | RPC budget; defaults are the Helius free tier. |
@@ -40,23 +40,23 @@ Create `.env.prod` next to `docker-compose.prod.yml`. `DATABASE_URL` is injected
 | `BARK_KEY` | optional | Owner iPhone push fallback. |
 
 `NEXT_PUBLIC_API_WS_URL` is **baked at build time** (the browser needs it). It defaults to
-`wss://lpagent.thomasott.fr` in compose — override only if your hostname differs:
+`wss://binsight.thomasott.fr` in compose — override only if your hostname differs:
 `NEXT_PUBLIC_API_WS_URL=wss://other.host docker compose -f docker-compose.prod.yml build web`.
 
 ## 4. TLS certificate (certbot)
 
 ```bash
 sudo mkdir -p /var/www/certbot
-sudo certbot certonly --webroot -w /var/www/certbot -d lpagent.thomasott.fr
+sudo certbot certonly --webroot -w /var/www/certbot -d binsight.thomasott.fr
 ```
-(or `sudo certbot --nginx -d lpagent.thomasott.fr` to let certbot edit nginx directly). Renewal is
+(or `sudo certbot --nginx -d binsight.thomasott.fr` to let certbot edit nginx directly). Renewal is
 handled by the certbot systemd timer.
 
 ## 5. nginx vhost
 
 ```bash
-sudo cp deploy/nginx/lpagent.thomasott.fr.conf /etc/nginx/sites-available/
-sudo ln -s /etc/nginx/sites-available/lpagent.thomasott.fr.conf /etc/nginx/sites-enabled/
+sudo cp deploy/nginx/binsight.thomasott.fr.conf /etc/nginx/sites-available/
+sudo ln -s /etc/nginx/sites-available/binsight.thomasott.fr.conf /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -67,7 +67,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml logs -f api    # watch "migrations applied" then the engine start
 ```
 
-The database starts EMPTY. To create the owner account, open `https://lpagent.thomasott.fr`, choose
+The database starts EMPTY. To create the owner account, open `https://binsight.thomasott.fr`, choose
 **Create one with your wallet**, connect the `OWNER_ADDRESS` wallet, sign the one-time message and set
 a password. After that, sign in everywhere with that address + password.
 

@@ -70,9 +70,9 @@ export function AppShell() {
       <header className="sticky top-0 z-20 border-border border-b bg-bg/70 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl flex-col gap-3 px-6 py-3.5 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2.5">
-            {/* biome-ignore lint/performance/noImgElement: tiny static brand mark (Apple-squircle app icon), no layout cost */}
-            <img src="/icon.svg" alt="" width={24} height={24} className="size-6 shrink-0" />
-            <h1 className="whitespace-nowrap font-semibold text-sm text-text tracking-tight">
+            {/* biome-ignore lint/performance/noImgElement: tiny static brand mark, no layout cost */}
+            <img src="/icon.svg" alt="" width={22} height={22} className="size-[22px] shrink-0" />
+            <h1 className="whitespace-nowrap font-display font-semibold text-[15px] text-text tracking-tight">
               Binsight
             </h1>
           </div>
