@@ -1,10 +1,17 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter, JetBrains_Mono } from 'next/font/google';
+import { Inter, JetBrains_Mono, Space_Grotesk } from 'next/font/google';
 import { ServiceWorkerRegistrar } from '@/presentation/components/sw-registrar';
 import './globals.css';
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap' });
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono-font', display: 'swap' });
+// Display face for the wordmark + headings (geometric, premium — matches the icon).
+const display = Space_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-space-grotesk',
+  weight: ['500', '600', '700'],
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: 'Binsight',
@@ -19,13 +26,13 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  themeColor: '#14161b', // matches --color-bg so the mobile browser chrome blends in
+  themeColor: '#0b0f14', // matches --color-bg so the mobile browser chrome blends in
   viewportFit: 'cover', // draw under notch / home indicator; safe-area insets handle padding
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${inter.variable} ${mono.variable}`}>
+    <html lang="en" className={`${inter.variable} ${mono.variable} ${display.variable}`}>
       <body className="min-h-dvh">
         <ServiceWorkerRegistrar />
         {children}
