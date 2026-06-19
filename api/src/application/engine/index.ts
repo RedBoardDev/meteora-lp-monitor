@@ -1,4 +1,5 @@
 import {
+  type OpenPosition,
   type PositionBins,
   type PositionHistory,
   WALLET_BALANCE_REFRESH_MS,
@@ -336,6 +337,7 @@ export class Engine {
         rt.needsSync = false;
         rt.lastSyncAt = Date.now();
         rt.reconciled = true;
+        this.applyOpenPositions(rt, res.openPositions);
         if (wasReconciled) for (const row of res.closedRows) this.bus.emit('closed', row);
         if (res.closed !== rt.lastClosedCount) {
           rt.lastClosedCount = res.closed;
@@ -346,8 +348,9 @@ export class Engine {
         rt.reconciled &&
         Date.now() - rt.lastSyncAt >= SYNC_INTERVAL_MS
       ) {
-        await this.positionSync.refreshOpen(rt.address, snap, valued);
+        const open = await this.positionSync.refreshOpen(rt.address, snap, valued);
         rt.lastSyncAt = Date.now();
+        this.applyOpenPositions(rt, open);
       }
     } catch (err) {
       this.health.record('rpc', false, err instanceof Error ? err.message : String(err));
@@ -358,6 +361,14 @@ export class Engine {
     } finally {
       rt.snapshotting = false;
     }
+  }
+
+  /** On-chain source: refresh the in-memory open set from the freshly persisted projection and push it
+   *  to viewers. `rt.open` is otherwise seeded only at registration, so without this a position opened
+   *  after the wallet was registered never appears in the live state until the next process restart. */
+  private applyOpenPositions(rt: WalletRuntime, positions: OpenPosition[]): void {
+    rt.open = new Map(positions.map((p) => [p.positionAddress, p]));
+    this.emitter.emitState(rt.address);
   }
 
   private doReconcile(rt: WalletRuntime): Promise<void> {

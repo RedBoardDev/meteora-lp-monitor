@@ -101,7 +101,12 @@ describe('PositionSync — chain → positions table', () => {
 
     // No prior persisted open row for CLOSED (getOpen → []), so it's NOT a newly-closed transition:
     // closedRows is empty even though the closed COUNT is 1 (this is the backfill-safety property).
-    expect(res).toEqual({ open: 1, closed: 1, closedRows: [] });
+    expect(res.open).toBe(1);
+    expect(res.closed).toBe(1);
+    expect(res.closedRows).toEqual([]);
+    // The open rows are returned so the engine can refresh its in-memory open set (the live /state).
+    expect(res.openPositions).toHaveLength(1);
+    expect(res.openPositions[0]!.positionAddress).toBe('OPEN');
 
     expect(replaceOpenForWallet).toHaveBeenCalledTimes(1);
     const [openWallet, openRows] = replaceOpenForWallet.mock.calls[0]!;
@@ -177,14 +182,16 @@ describe('PositionSync — chain → positions table', () => {
       idleTokens: [],
       positions: [opv('OPEN')],
     };
-    const count = await new PositionSync(
+    const open = await new PositionSync(
       legPnl,
       metadata,
       // biome-ignore lint/suspicious/noExplicitAny: partial repo stub for a focused unit test
       repo as any,
       silent,
     ).refreshOpen('W', snapshot, valued());
-    expect(count).toBe(1);
+    // refreshOpen returns the open rows so the engine can refresh its in-memory open set.
+    expect(open).toHaveLength(1);
+    expect(open[0]!.positionAddress).toBe('OPEN');
     expect(legPnl.pnlForPositions).toHaveBeenCalledWith(['OPEN']); // only the open subset's legs
     expect(replaceOpenForWallet).toHaveBeenCalledTimes(1);
     expect(upsertClosed).not.toHaveBeenCalled(); // the cadence NEVER re-writes the closed history
