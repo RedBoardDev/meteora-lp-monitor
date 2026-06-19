@@ -4,7 +4,7 @@ import type {
   RangeStatus,
   Stats,
   StrategyFamily,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import {
   and,
   asc,

@@ -1,6 +1,6 @@
 'use client';
 
-import type { Bucket, ProfitBucket } from '@meteora/shared';
+import type { Bucket, ProfitBucket } from '@binsight/shared';
 import { useRef, useState } from 'react';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { AMOUNT_MASK, usePrefs } from '@/application/stores/prefs-store';

@@ -49,7 +49,7 @@ targets:
       properties:
         CFBundleDisplayName: LP Monitor
         UILaunchScreen: {}
-        NSLocalNetworkUsageDescription: Connect to your Meteora LP Monitor API on the local network.
+        NSLocalNetworkUsageDescription: Connect to your Binsight API on the local network.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         MLPMApiURL: "$(MLPM_API_URL)"

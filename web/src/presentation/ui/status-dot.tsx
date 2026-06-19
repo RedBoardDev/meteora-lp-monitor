@@ -1,4 +1,4 @@
-import type { SourceStatus } from '@meteora/shared';
+import type { SourceStatus } from '@binsight/shared';
 import { cn } from './cn';
 
 const COLOR: Record<SourceStatus, string> = {

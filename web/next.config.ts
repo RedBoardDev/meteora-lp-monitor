@@ -7,7 +7,7 @@ const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nextConfig: NextConfig = {
   // Self-contained server for the Docker image.
   output: 'standalone',
-  // Monorepo: trace the workspace dependency (@meteora/shared) from the repo root into the bundle.
+  // Monorepo: trace the workspace dependency (@binsight/shared) from the repo root into the bundle.
   outputFileTracingRoot: repoRoot,
 };
 

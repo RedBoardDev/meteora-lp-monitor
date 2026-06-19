@@ -14,12 +14,12 @@ install: setup ## Create .env if missing, then install all workspace dependencie
 
 .PHONY: build-shared
 build-shared: ## Build the shared types package (required before api typecheck)
-	yarn workspace @meteora/shared build
+	yarn workspace @binsight/shared build
 
 ## ─── Dev ─────────────────────────────────────────────────────────────────
 .PHONY: dev-api
 dev-api: build-shared ## Run the API in watch mode
-	yarn workspace @meteora/api dev
+	yarn workspace @binsight/api dev
 
 ## ─── Quality ─────────────────────────────────────────────────────────────
 .PHONY: typecheck
@@ -52,7 +52,7 @@ build: ## Build all workspaces
 
 .PHONY: start
 start: ## Start the built API
-	yarn workspace @meteora/api start
+	yarn workspace @binsight/api start
 
 ## ─── Docker ──────────────────────────────────────────────────────────────
 .PHONY: up
@@ -67,7 +67,7 @@ down: ## Stop the Docker stack
 logs: ## Tail Docker logs
 	docker compose logs -f
 
-## ─── Swift clients (Meteora LP Monitor: macOS menu-bar + iOS app) ─────────────────
+## ─── Swift clients (Binsight: macOS menu-bar + iOS app) ─────────────────
 APPS := apps
 ENV_FILE := .env
 # Pull defaults from the repo .env at build time → baked into the app (overridable in Settings).
@@ -81,7 +81,7 @@ MLPM_BAKE := MLPM_API_URL="$(MLPM_URL)"
 SIGN_ID := $(shell security find-identity -v -p codesigning 2>/dev/null | grep -oE '[0-9A-F]{40}' | head -1)
 MAC_SIGN := $(if $(SIGN_ID),CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=$(SIGN_ID) PROVISIONING_PROFILE_SPECIFIER=,CODE_SIGNING_ALLOWED=NO)
 # Build artifacts go to /tmp (kept out of the repo entirely — nothing to .gitignore or clean here).
-BUILD_DIR := /tmp/meteora-lp-monitor-build
+BUILD_DIR := /tmp/binsight-build
 
 .PHONY: apps-tools
 apps-tools: ## Install XcodeGen (one-off, needs Homebrew)
@@ -92,7 +92,7 @@ apps-gen: apps-tools ## Generate MeteoraLPMonitor.xcodeproj from project.yml
 	cd $(APPS) && xcodegen generate
 
 .PHONY: xcode
-xcode: apps-gen ## Open the Meteora LP Monitor project in Xcode
+xcode: apps-gen ## Open the Binsight project in Xcode
 	open $(APPS)/MeteoraLPMonitor.xcodeproj
 
 .PHONY: notify-test
@@ -119,7 +119,7 @@ install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to s
 	rm -rf /Applications/MeteoraLPMonitor.app
 	cp -R $(BUILD_DIR)/mac/Build/Products/Release/MeteoraLPMonitor.app /Applications/
 	open /Applications/MeteoraLPMonitor.app
-	@echo "✓ Meteora LP Monitor is in the menu bar (API URL + token baked from .env)."
+	@echo "✓ Binsight is in the menu bar (API URL + token baked from .env)."
 
 .PHONY: run-ios
 run-ios: apps-gen ## iOS: build & launch on a simulator (no Apple ID needed)
@@ -130,7 +130,7 @@ run-ios: apps-gen ## iOS: build & launch on a simulator (no Apple ID needed)
 		xcrun simctl boot $$UDID 2>/dev/null || true; open -a Simulator; \
 		xcrun simctl install $$UDID $(BUILD_DIR)/ios-sim/Build/Products/Debug-iphonesimulator/MeteoraLPMonitor.app; \
 		xcrun simctl launch $$UDID com.meteoralpmonitor.ios
-	@echo "✓ Meteora LP Monitor running in the Simulator (reaches the Mac API on localhost)."
+	@echo "✓ Binsight running in the Simulator (reaches the Mac API on localhost)."
 
 .PHONY: install-ios
 install-ios: apps-gen ## iPhone: build + install on a plugged-in device (auto-detects your Team)

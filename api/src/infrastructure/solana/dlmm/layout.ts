@@ -1,4 +1,7 @@
-import { DLMM_PROGRAM_ID as DLMM_PROGRAM_ID_STR, POSITION_V2_DISCRIMINATOR } from '@meteora/shared';
+import {
+  DLMM_PROGRAM_ID as DLMM_PROGRAM_ID_STR,
+  POSITION_V2_DISCRIMINATOR,
+} from '@binsight/shared';
 import { PublicKey } from '@solana/web3.js';
 
 /**

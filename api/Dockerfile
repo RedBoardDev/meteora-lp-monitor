@@ -12,7 +12,7 @@ RUN corepack enable
 COPY package.json yarn.lock .yarnrc.yml ./
 COPY shared/package.json shared/
 COPY api/package.json api/
-RUN yarn workspaces focus @meteora/api @meteora/shared --production
+RUN yarn workspaces focus @binsight/api @binsight/shared --production
 
 FROM ${NODE_IMAGE} AS build
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
@@ -21,10 +21,10 @@ RUN corepack enable
 COPY package.json yarn.lock .yarnrc.yml tsconfig.base.json ./
 COPY shared/package.json shared/
 COPY api/package.json api/
-RUN yarn workspaces focus @meteora/api @meteora/shared
+RUN yarn workspaces focus @binsight/api @binsight/shared
 COPY shared/ shared/
 COPY api/ api/
-RUN yarn workspace @meteora/shared build && yarn workspace @meteora/api build
+RUN yarn workspace @binsight/shared build && yarn workspace @binsight/api build
 
 FROM ${NODE_IMAGE} AS runtime
 WORKDIR /repo

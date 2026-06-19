@@ -1,6 +1,6 @@
 'use client';
 
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fmtDuration } from '@/domain/format';
 import { toneOf } from '@/domain/position';

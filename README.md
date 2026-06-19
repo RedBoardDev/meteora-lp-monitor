@@ -1,4 +1,4 @@
-# Meteora LP Monitor
+# Binsight
 
 Real-time, self-hosted monitor for your **Meteora DLMM liquidity positions** on Solana —
 a menu-bar app on **macOS**, a native **iOS** app, and the API that feeds them.
@@ -8,7 +8,7 @@ PnL is faithful to on-chain (`pnlSol`, validated). Free to run (no paid Apple ac
 
 You open LP positions on Meteora and want to know — at a glance and via notifications — your
 live PnL, what's in/out of range, your fees, your wallet total, and your realized PnL today,
-across multiple wallets. Meteora LP Monitor does that without a dashboard to babysit.
+across multiple wallets. Binsight does that without a dashboard to babysit.
 
 ## What you get
 

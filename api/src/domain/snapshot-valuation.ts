@@ -1,4 +1,4 @@
-import { SOL_MINT } from '@meteora/shared';
+import { SOL_MINT } from '@binsight/shared';
 import type { OnchainPositionValue, OnchainValued, OnchainWalletSnapshot } from './dlmm';
 
 const ui = (amount: bigint, decimals: number): number => Number(amount) / 10 ** decimals;

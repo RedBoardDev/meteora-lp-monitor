@@ -1,4 +1,4 @@
-import type { Health, WalletState } from '@meteora/shared';
+import type { Health, WalletState } from '@binsight/shared';
 import { create } from 'zustand';
 import { Portfolio } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';

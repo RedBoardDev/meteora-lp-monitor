@@ -1,6 +1,6 @@
 'use client';
 
-import type { Bucket } from '@meteora/shared';
+import type { Bucket } from '@binsight/shared';
 import { useUi } from '@/application/stores/ui-store';
 import { PERIOD_OPTIONS } from '@/domain/period';
 import { Segmented } from '@/presentation/ui';

@@ -1,7 +1,7 @@
 {
-  "name": "meteora-lp-monitor",
+  "name": "binsight",
   "version": "0.1.0",
-  "description": "Native macOS & iOS app for Meteora DLMM monitoring - live PnL, alerts, notifications.",
+  "description": "Binsight - live PnL, positions and analytics for Meteora DLMM liquidity on Solana (web app + API + native clients).",
   "private": true,
   "license": "MIT",
   "author": "RedBoardDev",
@@ -28,7 +28,7 @@
     "test": "turbo run test",
     "check": "biome check .",
     "check:fix": "biome check --write .",
-    "dev:api": "yarn workspace @meteora/api dev"
+    "dev:api": "yarn workspace @binsight/api dev"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.11",

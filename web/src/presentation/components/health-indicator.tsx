@@ -1,6 +1,6 @@
 'use client';
 
-import type { Health, SourceStatus } from '@meteora/shared';
+import type { Health, SourceStatus } from '@binsight/shared';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { fmtRelative } from '@/domain/format';
 import { StatusDot, Tooltip } from '@/presentation/ui';

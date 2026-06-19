@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
+import type { PositionEvent, PositionEventKind, PositionHistory } from '@binsight/shared';
 import { utils } from '@coral-xyz/anchor';
-import type { PositionEvent, PositionEventKind, PositionHistory } from '@meteora/shared';
 import type {
   Connection,
   ParsedTransactionWithMeta,

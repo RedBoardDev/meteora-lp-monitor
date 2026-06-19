@@ -4,7 +4,7 @@ import {
   NotifRuleSchema,
   RuntimeSettingsSchema,
   WalletSchema,
-} from '@meteora/shared';
+} from '@binsight/shared';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Engine } from '@/application/engine';
 import type { EventBus } from '@/application/event-bus';

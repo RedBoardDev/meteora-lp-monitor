@@ -1,6 +1,6 @@
 'use client';
 
-import type { Wallet } from '@meteora/shared';
+import type { Wallet } from '@binsight/shared';
 import { type FormEvent, useState } from 'react';
 import { shortAddr } from '@/domain/format';
 import { api } from '@/infrastructure/api/client';

@@ -1,6 +1,6 @@
 'use client';
 
-import type { PositionEvent, PositionEventKind } from '@meteora/shared';
+import type { PositionEvent, PositionEventKind } from '@binsight/shared';
 import { fmtAmount, fmtDateTime } from '@/domain/format';
 import { cn } from '@/presentation/ui';
 

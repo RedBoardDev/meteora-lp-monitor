@@ -1,6 +1,6 @@
 'use client';
 
-import type { AccessEntry, WalletOverview } from '@meteora/shared';
+import type { AccessEntry, WalletOverview } from '@binsight/shared';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';

@@ -1,6 +1,6 @@
 'use client';
 
-import type { ClosedPosition } from '@meteora/shared';
+import type { ClosedPosition } from '@binsight/shared';
 import { type MouseEvent, useState } from 'react';
 import { cn, IconShare } from '@/presentation/ui';
 import { ShareCardModal } from './share-card-modal';

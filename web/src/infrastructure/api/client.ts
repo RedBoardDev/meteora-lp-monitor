@@ -11,7 +11,7 @@ import type {
   WalletOverview,
   WalletPnlCurve,
   WalletState,
-} from '@meteora/shared';
+} from '@binsight/shared';
 
 export type ClosedQuery = {
   q?: string;

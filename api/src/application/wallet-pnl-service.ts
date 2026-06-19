@@ -1,4 +1,4 @@
-import type { WalletPnlCurve } from '@meteora/shared';
+import type { WalletPnlCurve } from '@binsight/shared';
 import type { WalletFlowRepository } from '@/domain/ports';
 import { buildCashflowCurveFromDaily } from './wallet-cashflow';
 

@@ -1,4 +1,4 @@
-import { SOL_MINT } from '@meteora/shared';
+import { SOL_MINT } from '@binsight/shared';
 import { describe, expect, it } from 'vitest';
 import { accumulatePositionFlow, type EnhancedTx, parseSwapSell } from './helius-enhanced';
 

@@ -1,4 +1,4 @@
-import { SOL_MINT } from '@meteora/shared';
+import { SOL_MINT } from '@binsight/shared';
 import { pino } from 'pino';
 import { describe, expect, it, vi } from 'vitest';
 import { type DasTransport, HeliusTokenMetadataGateway } from './token-metadata-gateway';

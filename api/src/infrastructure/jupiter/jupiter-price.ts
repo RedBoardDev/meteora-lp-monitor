@@ -1,4 +1,4 @@
-import { SOL_MINT } from '@meteora/shared';
+import { SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { HealthReporter, PriceGateway } from '@/domain/ports';
 

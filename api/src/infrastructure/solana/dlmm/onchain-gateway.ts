@@ -1,4 +1,3 @@
-import { utils } from '@coral-xyz/anchor';
 import {
   type PositionBins,
   type PositionHistory,
@@ -6,7 +5,8 @@ import {
   TOKEN_PROGRAM_ID,
   USDC_MINT,
   USDT_MINT,
-} from '@meteora/shared';
+} from '@binsight/shared';
+import { utils } from '@coral-xyz/anchor';
 import {
   type AccountInfo,
   type Connection,

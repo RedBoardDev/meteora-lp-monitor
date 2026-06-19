@@ -1,6 +1,6 @@
-# Meteora LP Monitor — macOS + iOS clients
+# Binsight — macOS + iOS clients
 
-SwiftUI clients for the Meteora LP Monitor API. macOS is a menu-bar agent; iOS is a
+SwiftUI clients for the Binsight API. macOS is a menu-bar agent; iOS is a
 full app. Both share **MeteoraLPMonitorKit**. Design: `DESIGN.md`.
 
 ## Structure

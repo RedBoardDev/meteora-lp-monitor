@@ -1,5 +1,5 @@
 {
-  "name": "@meteora/web",
+  "name": "@binsight/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@meteora/shared": "workspace:*",
+    "@binsight/shared": "workspace:*",
     "@solana/wallet-adapter-base": "0.9.27",
     "@solana/wallet-adapter-phantom": "0.9.29",
     "@solana/wallet-adapter-react": "0.15.39",

@@ -1,4 +1,4 @@
-import { DLMM_PROGRAM_ID, SOL_MINT } from '@meteora/shared';
+import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { classifyTradingByType, type WalletTxFlow } from '@/domain/cashflow';
 import type { ResidualSell, WalletFlowRow } from '@/domain/dlmm';
@@ -274,7 +274,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await this.bucket.acquire();
-        const res = await fetch(url, { headers: { 'User-Agent': 'meteora-lp-monitor/1.0' } });
+        const res = await fetch(url, { headers: { 'User-Agent': 'binsight/1.0' } });
         if (res.ok) return (await res.json()) as EnhancedTx[];
         // Retry EVERY non-200 (Helius intermittently returns 5xx/4xx mid-pagination on deep history);
         // giving up on the first blip would drop the whole tail of older sells. Only an auth 401/403

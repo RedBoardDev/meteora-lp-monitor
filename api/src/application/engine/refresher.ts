@@ -1,4 +1,4 @@
-import type { OpenPosition } from '@meteora/shared';
+import type { OpenPosition } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PoolRef, PositionRepository, PositionsGateway, PriceGateway } from '@/domain/ports';
 import { isOutOfRange } from '@/domain/position';

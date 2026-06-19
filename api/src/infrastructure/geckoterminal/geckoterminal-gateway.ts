@@ -1,4 +1,4 @@
-import type { Candle } from '@meteora/shared';
+import type { Candle } from '@binsight/shared';
 import type { Logger } from 'pino';
 
 export type { Candle };

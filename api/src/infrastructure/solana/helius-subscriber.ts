@@ -1,4 +1,4 @@
-import { DLMM_PROGRAM_ID } from '@meteora/shared';
+import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { WebSocket } from 'undici';
 import { classifyInstruction } from '@/domain/dlmm';

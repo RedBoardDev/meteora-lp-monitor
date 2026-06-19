@@ -1,4 +1,4 @@
-// Meteora LP Monitor — service worker.
+// Binsight — service worker.
 //
 // Caching philosophy (deliberately conservative to avoid the classic "stuck on a stale version" PWA
 // trap): cache ONLY immutable, content-hashed build assets + static icons/fonts. NEVER cache /api
@@ -59,10 +59,10 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {};
   } catch {
-    data = { title: 'Meteora LP Monitor', body: event.data ? event.data.text() : '' };
+    data = { title: 'Binsight', body: event.data ? event.data.text() : '' };
   }
   event.waitUntil(
-    self.registration.showNotification(data.title || 'Meteora LP Monitor', {
+    self.registration.showNotification(data.title || 'Binsight', {
       body: data.body || '',
       icon: '/icon-192.png',
       badge: '/icon-192.png',

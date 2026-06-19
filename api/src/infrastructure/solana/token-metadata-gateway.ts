@@ -1,4 +1,4 @@
-import { SOL_MINT, USDC_MINT, USDT_MINT } from '@meteora/shared';
+import { SOL_MINT, USDC_MINT, USDT_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { TokenMeta, TokenMetadataGateway } from '@/domain/ports';
 import { singleFlight, TokenBucket, TtlCache } from '@/util/cache';
