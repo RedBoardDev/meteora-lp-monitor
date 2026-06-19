@@ -18,7 +18,6 @@ import {
   Skeleton,
   SolAmount,
   Stat,
-  toneText,
 } from '@/presentation/ui';
 import { PnlBridge } from './pnl-bridge';
 
@@ -56,9 +55,9 @@ export function PerformanceCard() {
 
 function PerformanceBody({ stats }: { stats: Stats }) {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col">
       <PnlBridge positionsPnl={stats.totalPnlSol} />
-      <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
+      <div className="mt-6 grid grid-cols-2 gap-x-6 gap-y-5 border-border border-t pt-6 sm:grid-cols-3 lg:grid-cols-4">
         <Stat
           label="Win rate"
           value={`${stats.winRate.toFixed(0)}%`}
@@ -85,55 +84,6 @@ function PerformanceBody({ stats }: { stats: Stats }) {
         <Stat label="Avg hold" value={fmtDuration(stats.avgDurationSeconds)} />
         <Stat label="Fees earned" value={<SolAmount n={stats.totalFeesSol} />} sub="all-time" />
         <Stat label="Volume" value={<SolAmount n={stats.totalVolumeSol} />} sub="deposited" />
-      </div>
-
-      {stats.byPair.length > 0 && <ByPair pairs={stats.byPair} />}
-    </div>
-  );
-}
-
-function ByPair({ pairs }: { pairs: Stats['byPair'] }) {
-  const top = pairs.filter((p) => p.pnlSol > 0).slice(0, 4);
-  const worst = pairs
-    .filter((p) => p.pnlSol < 0)
-    .slice(-4)
-    .reverse();
-  return (
-    <div className="grid grid-cols-1 gap-x-8 gap-y-4 border-border border-t pt-5 sm:grid-cols-2">
-      <PairColumn title="Top pairs" pairs={top} />
-      <PairColumn title="Worst pairs" pairs={worst} />
-    </div>
-  );
-}
-
-function PairColumn({ title, pairs }: { title: string; pairs: Stats['byPair'] }) {
-  const filterByToken = useUi((s) => s.filterByToken);
-  return (
-    <div>
-      <p className="mb-2 font-medium text-faint text-xs uppercase tracking-wide">{title}</p>
-      <div className="flex flex-col gap-0.5">
-        {pairs.length === 0 && <p className="text-faint text-sm">—</p>}
-        {pairs.map((p) => {
-          const [x = '', y = ''] = p.pair.split('/');
-          const token = y === 'SOL' ? x : p.pair;
-          return (
-            <button
-              type="button"
-              key={p.pair}
-              onClick={() => filterByToken(token)}
-              title={`Filter history by ${token}`}
-              className="-mx-2 flex items-center justify-between gap-3 rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-hover"
-            >
-              <span className="flex items-center gap-2 text-text">
-                {p.pair}
-                <span className="tabular text-faint text-xs">×{p.count}</span>
-              </span>
-              <span className={cn('tabular font-medium', toneText[toneOf(p.pnlSol)])}>
-                <SolAmount n={p.pnlSol} signed />
-              </span>
-            </button>
-          );
-        })}
       </div>
     </div>
   );
