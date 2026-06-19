@@ -17,13 +17,14 @@ import {
   CardTitle,
   cn,
   EmptyState,
-  IconDownload,
+  IconShare,
   Segmented,
   Skeleton,
   SolAmount,
   Tooltip,
   toneText,
 } from '@/presentation/ui';
+import { ImageShareModal } from './image-share-modal';
 
 /** Which PnL: the wallet's true on-chain cash-flow, or per-position close PnL (Meteora, LPAgent-style). */
 type Source = 'wallet' | 'positions';
@@ -87,78 +88,90 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
   // Headline = the cumulative line's end (the realized PnL over the window for the chosen view).
   const total = data && data.length > 0 ? (data[data.length - 1]?.cumulative ?? null) : null;
   const svgRef = useRef<SVGSVGElement>(null);
+  const [shareOpen, setShareOpen] = useState(false);
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-baseline gap-3">
-            <CardTitle>{source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}</CardTitle>
-            {total != null && (
-              <span className={cn('tabular font-semibold text-sm', toneText[toneOf(total)])}>
-                <SolAmount n={total} signed />
-              </span>
-            )}
+    <>
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-baseline gap-3">
+              <CardTitle>{source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}</CardTitle>
+              {total != null && (
+                <span className={cn('tabular font-semibold text-sm', toneText[toneOf(total)])}>
+                  <SolAmount n={total} signed />
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {data && data.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShareOpen(true)}
+                  aria-label="Share chart"
+                  title="Share chart"
+                  className="rounded-md bg-surface-2 p-1.5 text-muted transition-colors hover:bg-hover hover:text-text"
+                >
+                  <IconShare />
+                </button>
+              )}
+              <Segmented<Source>
+                value={source}
+                onChange={setSource}
+                options={[
+                  { label: 'Wallet', value: 'wallet' },
+                  { label: 'Positions', value: 'positions' },
+                ]}
+              />
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            {data && data.length > 0 && (
-              <button
-                type="button"
-                onClick={() => exportChartPng(svgRef.current, source)}
-                aria-label="Download chart as PNG"
-                title="Download chart as PNG"
-                className="rounded-md bg-surface-2 p-1.5 text-muted transition-colors hover:bg-hover hover:text-text"
-              >
-                <IconDownload />
-              </button>
-            )}
-            <Segmented<Source>
-              value={source}
-              onChange={setSource}
-              options={[
-                { label: 'Wallet', value: 'wallet' },
-                { label: 'Positions', value: 'positions' },
-              ]}
+        </CardHeader>
+        <div className="p-5">
+          {error && !data ? (
+            <EmptyState
+              variant="error"
+              title="Couldn't load PnL"
+              hint="Check the connection."
+              onRetry={refetch}
             />
-          </div>
+          ) : loading && !data ? (
+            <Skeleton className="h-[300px] w-full" />
+          ) : !data || data.length === 0 ? (
+            <EmptyState
+              title={source === 'wallet' ? 'No wallet activity yet' : 'No realized PnL yet'}
+              hint={
+                source === 'wallet'
+                  ? 'On-chain SOL cash-flow will chart here.'
+                  : 'Closed positions will chart here.'
+              }
+            />
+          ) : (
+            <div className={cn('transition-opacity', stale && 'opacity-60')} aria-busy={stale}>
+              <ProfitGraph
+                buckets={data}
+                netWorth={netWorth}
+                showBars={source === 'positions'}
+                svgRef={svgRef}
+              />
+              <p className="mt-3 text-[11px] text-faint leading-relaxed">
+                {source === 'wallet'
+                  ? "The wallet's TRUE realized PnL from on-chain SOL — it books the loss when leftover tokens are dumped after a close (rugs / slippage), which the per-position view misses. Verified on-chain."
+                  : 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.'}
+              </p>
+            </div>
+          )}
         </div>
-      </CardHeader>
-      <div className="p-5">
-        {error && !data ? (
-          <EmptyState
-            variant="error"
-            title="Couldn't load PnL"
-            hint="Check the connection."
-            onRetry={refetch}
-          />
-        ) : loading && !data ? (
-          <Skeleton className="h-[300px] w-full" />
-        ) : !data || data.length === 0 ? (
-          <EmptyState
-            title={source === 'wallet' ? 'No wallet activity yet' : 'No realized PnL yet'}
-            hint={
-              source === 'wallet'
-                ? 'On-chain SOL cash-flow will chart here.'
-                : 'Closed positions will chart here.'
-            }
-          />
-        ) : (
-          <div className={cn('transition-opacity', stale && 'opacity-60')} aria-busy={stale}>
-            <ProfitGraph
-              buckets={data}
-              netWorth={netWorth}
-              showBars={source === 'positions'}
-              svgRef={svgRef}
-            />
-            <p className="mt-3 text-[11px] text-faint leading-relaxed">
-              {source === 'wallet'
-                ? "The wallet's TRUE realized PnL from on-chain SOL — it books the loss when leftover tokens are dumped after a close (rugs / slippage), which the per-position view misses. Verified on-chain."
-                : 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.'}
-            </p>
-          </div>
-        )}
-      </div>
-    </Card>
+      </Card>
+      <ImageShareModal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        title={source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}
+        filename={`binsight-${source}-pnl.png`}
+        shareTitle={source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}
+        aspect="10 / 3"
+        getImage={() => renderChartPng(svgRef.current)}
+      />
+    </>
   );
 }
 
@@ -395,43 +408,80 @@ function TipRow({ label, value, tone }: { label: string; value: string; tone: To
 /** Export the chart SVG as a PNG: resolve the CSS-var colours to concrete values, lay it on an opaque
  *  surface, rasterise at 2×. Axis labels are HTML overlays (omitted) — the curve shape is the artifact,
  *  and amounts are hidden anyway when sharing the curve. */
-function exportChartPng(svg: SVGSVGElement | null, source: Source) {
-  if (!svg) return;
-  const cs = getComputedStyle(document.documentElement);
-  const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
-  let inner = new XMLSerializer().serializeToString(svg);
-  // border-strong BEFORE border (substring), so the plain-border pass doesn't touch it.
-  const subs: [string, string][] = [
-    ['var(--color-accent)', v('--color-accent', '#bef264')],
-    ['var(--color-border-strong)', v('--color-border-strong', '#3a3f4b')],
-    ['var(--color-border)', v('--color-border', '#2a2e38')],
-    ['var(--color-profit)', v('--color-profit', '#34d399')],
-    ['var(--color-loss)', v('--color-loss', '#fb7185')],
+/** Rasterise the chart SVG to a PNG Blob: resolve the CSS-var colours, lay it on an opaque surface at
+ *  2×, then stamp the Binsight watermark bottom-left. Returns a Blob so the share dialog can preview /
+ *  copy / download it (instead of forcing an immediate download). */
+function renderChartPng(svg: SVGSVGElement | null): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    if (!svg) {
+      reject(new Error('chart not ready'));
+      return;
+    }
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name: string, fallback: string) => cs.getPropertyValue(name).trim() || fallback;
+    let inner = new XMLSerializer().serializeToString(svg);
+    // border-strong BEFORE border (substring), so the plain-border pass doesn't touch it.
+    const subs: [string, string][] = [
+      ['var(--color-accent)', v('--color-accent', '#22d3ee')],
+      ['var(--color-border-strong)', v('--color-border-strong', '#3a3f4b')],
+      ['var(--color-border)', v('--color-border', '#2a2e38')],
+      ['var(--color-profit)', v('--color-profit', '#34d399')],
+      ['var(--color-loss)', v('--color-loss', '#fb7185')],
+    ];
+    for (const [from, to] of subs) inner = inner.replaceAll(from, to);
+    const body = inner.replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
+    const svgStr =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+      `<rect width="100%" height="100%" fill="${v('--color-surface', '#1e2129')}"/>${body}</svg>`;
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2;
+      const c = document.createElement('canvas');
+      c.width = W * scale;
+      c.height = H * scale;
+      const ctx = c.getContext('2d');
+      if (!ctx) {
+        reject(new Error('no 2d context'));
+        return;
+      }
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      drawWatermark(ctx, v('--color-accent', '#22d3ee'));
+      c.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('toBlob failed'))), 'image/png');
+    };
+    img.onerror = () => reject(new Error('chart image failed to load'));
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgStr)}`;
+  });
+}
+
+/** The Binsight mark (concentrated-liquidity bins, active bin brightest), bottom-left. */
+function drawWatermark(ctx: CanvasRenderingContext2D, accent: string) {
+  const ox = 18;
+  const baseY = H - 16;
+  const s = 0.07;
+  const bars: [number, number][] = [
+    [68, 135],
+    [148, 216],
+    [228, 300],
+    [308, 216],
+    [388, 135],
   ];
-  for (const [from, to] of subs) inner = inner.replaceAll(from, to);
-  const body = inner.replace(/^<svg[^>]*>/, '').replace(/<\/svg>\s*$/, '');
-  const svgStr =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
-    `<rect width="100%" height="100%" fill="${v('--color-surface', '#1e2129')}"/>${body}</svg>`;
-  const img = new Image();
-  img.onload = () => {
-    const scale = 2;
-    const c = document.createElement('canvas');
-    c.width = W * scale;
-    c.height = H * scale;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    ctx.scale(scale, scale);
-    ctx.drawImage(img, 0, 0);
-    c.toBlob((blob) => {
-      if (!blob) return;
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${source}-pnl-curve.png`;
-      a.click();
-      URL.revokeObjectURL(url);
-    });
+  const roundRect = (x: number, y: number, w: number, h: number, r: number) => {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
   };
-  img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgStr)}`;
+  ctx.save();
+  ctx.fillStyle = accent;
+  bars.forEach(([bx, bh], i) => {
+    const h = bh * s;
+    ctx.globalAlpha = i === 2 ? 0.95 : 0.55;
+    roundRect(ox + (bx - 68) * s, baseY - h, 56 * s, h, 28 * s);
+    ctx.fill();
+  });
+  ctx.restore();
 }

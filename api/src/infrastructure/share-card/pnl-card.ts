@@ -152,5 +152,37 @@ export async function renderClosedPnlCard(
   setGlow(GOLD, 10);
   ctx.fillText(tvlValue, startXTvl + wTvlLabel, bottomY + LINE_GAP);
 
+  // --- 5) Binsight watermark, bottom-left: the bins mark (active bin brightest) ---
+  ctx.save();
+  ctx.shadowBlur = 0;
+  const bs = 0.22;
+  const bx0 = MARGIN;
+  const bBase = HEIGHT - MARGIN;
+  ctx.fillStyle = '#22d3ee';
+  const marks: [number, number, number][] = [
+    [68, 135, 0],
+    [148, 216, 1],
+    [228, 300, 2],
+    [308, 216, 3],
+    [388, 135, 4],
+  ];
+  for (const [bx, bh, idx] of marks) {
+    const h = bh * bs;
+    const x = bx0 + (bx - 68) * bs;
+    const y = bBase - h;
+    const w = 56 * bs;
+    const r = 28 * bs;
+    ctx.globalAlpha = idx === 2 ? 1 : 0.6;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
   return canvas.encode('png');
 }
