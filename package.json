@@ -7,12 +7,12 @@
   "author": "RedBoardDev",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RedBoardDev/meteora-lp-monitor.git"
+    "url": "git+https://github.com/RedBoardDev/binsight.git"
   },
   "bugs": {
-    "url": "https://github.com/RedBoardDev/meteora-lp-monitor/issues"
+    "url": "https://github.com/RedBoardDev/binsight/issues"
   },
-  "homepage": "https://github.com/RedBoardDev/meteora-lp-monitor#readme",
+  "homepage": "https://github.com/RedBoardDev/binsight#readme",
   "packageManager": "yarn@4.15.0",
   "workspaces": [
     "shared",

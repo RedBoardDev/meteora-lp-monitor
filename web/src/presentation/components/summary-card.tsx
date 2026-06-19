@@ -7,6 +7,9 @@ import { useMoney } from '@/presentation/hooks/use-money';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import { Badge, Card, cn, Skeleton, SolMark, Stat, TickFlash } from '@/presentation/ui';
 
+/** Days window for the all-time on-chain PnL headline (the rolling daily rollup keeps this cheap). */
+const ALL_TIME_DAYS = 3650;
+
 export function SummaryCard() {
   const portfolio = usePortfolio((s) => s.portfolio);
   const scope = usePortfolio((s) => s.scope);
@@ -16,11 +19,17 @@ export function SummaryCard() {
   // Lightweight: only today's realized PnL is read here (since=0 — todayPnlSol is computed from local
   // midnight server-side regardless of the window). The heavier Stats grid still lives in the Stats tab.
   const { data: stats } = useScopedQuery(() => api.stats(scope, 0), [scope, closedVersion]);
+  // The wallet's TRUE all-time on-chain realized PnL — the headline truth (also reconciled in Stats).
+  const { data: curve } = useScopedQuery(
+    () => api.walletPnlCurve(scope, ALL_TIME_DAYS),
+    [scope, closedVersion],
+  );
   if (!portfolio) return <SummarySkeleton />;
 
   const t = portfolio.totals;
   const pnlTone = toneOf(t.uPnlSol);
   const today = stats?.todayPnlSol ?? null;
+  const realPnl = curve?.totalTradingSol ?? null;
 
   return (
     <Card
@@ -63,15 +72,16 @@ export function SummaryCard() {
             }
           />
           <Stat
-            label="Unrealized PnL"
+            label="Active PnL"
             tone={pnlTone}
             value={<TickFlash value={t.uPnlSol}>{m.sol(t.uPnlSol, { signed: true })}</TickFlash>}
             sub={m.pct(t.uPnlPct)}
           />
           <Stat
-            label="Fees"
-            value={m.sol(t.feesSol)}
-            sub={`${m.sol(t.unclaimedFeesSol)} unclaimed`}
+            label="Real PnL"
+            tone={realPnl != null ? toneOf(realPnl) : 'neutral'}
+            value={realPnl != null ? m.sol(realPnl, { signed: true }) : '—'}
+            sub="on-chain"
           />
           <Stat
             label="Open"

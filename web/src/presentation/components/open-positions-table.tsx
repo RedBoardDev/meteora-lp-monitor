@@ -4,16 +4,18 @@ import { useState } from 'react';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
 import { fmtDuration, rangeLabel } from '@/domain/format';
-import type { OpenPositionEntity } from '@/domain/position';
+import { type OpenPositionEntity, toneOf } from '@/domain/position';
 import { useMoney } from '@/presentation/hooks/use-money';
 import {
   Badge,
   Card,
   CardHeader,
   CardTitle,
+  cn,
   EmptyState,
   IconLayers,
   RangeBar,
+  toneText,
 } from '@/presentation/ui';
 import { Pagination } from './pagination';
 import { PnlCell, PoolActions, RowHeader, RowShell, RowSkeleton, TokenPair } from './position-row';
@@ -24,10 +26,12 @@ const OPEN_PAGE_SIZE = 100;
 
 export function OpenPositionsTable() {
   const portfolio = usePortfolio((s) => s.portfolio);
+  const m = useMoney();
   const [openChart, setOpenChart] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   if (!portfolio) return <ListSkeleton />;
 
+  const t = portfolio.totals;
   const rows = portfolio.openByValue;
   const pages = Math.max(1, Math.ceil(rows.length / OPEN_PAGE_SIZE));
   const safePage = Math.min(page, pages); // clamp if the live set shrank under us
@@ -38,7 +42,23 @@ export function OpenPositionsTable() {
     <Card>
       <CardHeader>
         <CardTitle>Open positions</CardTitle>
-        <span className="tabular text-faint text-xs">{rows.length}</span>
+        <div className="flex flex-wrap items-center justify-end gap-x-5 gap-y-1 text-xs">
+          {rows.length > 0 && (
+            <>
+              <span className="flex items-baseline gap-1.5">
+                <span className="text-faint uppercase tracking-wide">Unrealized</span>
+                <span className={cn('tabular font-medium', toneText[toneOf(t.uPnlSol)])}>
+                  {m.sol(t.uPnlSol, { signed: true })}
+                </span>
+              </span>
+              <span className="flex items-baseline gap-1.5">
+                <span className="text-faint uppercase tracking-wide">Fees</span>
+                <span className="tabular font-medium text-profit">{m.sol(t.unclaimedFeesSol)}</span>
+              </span>
+            </>
+          )}
+          <span className="tabular text-faint">{rows.length}</span>
+        </div>
       </CardHeader>
       {rows.length === 0 ? (
         <EmptyState
