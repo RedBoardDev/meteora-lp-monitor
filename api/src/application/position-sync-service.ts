@@ -38,7 +38,12 @@ export class PositionSync {
     wallet: string,
     snapshot: OnchainWalletSnapshot,
     valued: OnchainValued,
-  ): Promise<{ open: number; closed: number; closedRows: ClosedPosition[] }> {
+  ): Promise<{
+    open: number;
+    closed: number;
+    closedRows: ClosedPosition[];
+    openPositions: OpenPosition[];
+  }> {
     const projection = await this.legPnl.pnlByPosition(wallet);
     const { open, closed, priorOpenAddrs } = await this.buildRows(
       wallet,
@@ -60,7 +65,7 @@ export class PositionSync {
       { wallet, open: open.length, closed: closed.length, newlyClosed: closedRows.length },
       'positions reprojected from chain',
     );
-    return { open: open.length, closed: closed.length, closedRows };
+    return { open: open.length, closed: closed.length, closedRows, openPositions: open };
   }
 
   /** Cadence-cheap refresh of just the OPEN positions' live values; never writes the closed history. */
@@ -68,12 +73,12 @@ export class PositionSync {
     wallet: string,
     snapshot: OnchainWalletSnapshot,
     valued: OnchainValued,
-  ): Promise<number> {
+  ): Promise<OpenPosition[]> {
     const openAddrs = snapshot.positions.map((p) => p.positionAddress);
     const projection = openAddrs.length > 0 ? await this.legPnl.pnlForPositions(openAddrs) : [];
     const { open } = await this.buildRows(wallet, projection, snapshot, valued);
     await this.repo.replaceOpenForWallet(wallet, open);
-    return open.length;
+    return open;
   }
 
   private async buildRows(
