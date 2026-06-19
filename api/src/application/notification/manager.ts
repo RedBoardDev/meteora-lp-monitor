@@ -1,4 +1,10 @@
-import type { ClosedPosition, EventKind, LiveEvent, NotifRule, WalletState } from '@binsight/shared';
+import type {
+  ClosedPosition,
+  EventKind,
+  LiveEvent,
+  NotifRule,
+  WalletState,
+} from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
 import type { ConfigRepository, NotificationChannel } from '@/domain/ports';

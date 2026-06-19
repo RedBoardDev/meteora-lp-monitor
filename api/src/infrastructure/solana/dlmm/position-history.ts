@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { utils } from '@coral-xyz/anchor';
 import type { PositionEvent, PositionEventKind, PositionHistory } from '@binsight/shared';
+import { utils } from '@coral-xyz/anchor';
 import type {
   Connection,
   ParsedTransactionWithMeta,

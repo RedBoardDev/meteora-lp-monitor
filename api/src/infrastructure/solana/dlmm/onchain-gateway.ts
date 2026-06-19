@@ -1,4 +1,3 @@
-import { utils } from '@coral-xyz/anchor';
 import {
   type PositionBins,
   type PositionHistory,
@@ -7,6 +6,7 @@ import {
   USDC_MINT,
   USDT_MINT,
 } from '@binsight/shared';
+import { utils } from '@coral-xyz/anchor';
 import {
   type AccountInfo,
   type Connection,
