@@ -3,18 +3,18 @@
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
 import { periodDays } from '@/domain/period';
-import { type Tone, toneOf } from '@/domain/position';
+import { toneOf } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';
 import { useMoney } from '@/presentation/hooks/use-money';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import { cn, Skeleton, SolMark, toneText } from '@/presentation/ui';
 
 /**
- * The PnL reconciliation bridge — the headline that resolves the app's most confusing duality:
- *   Positions PnL  →  (what leaked after closing)  →  Wallet PnL
- * Position PnL is mark-at-close (LPAgent parity); Wallet PnL is the TRUE on-chain SOL cash-flow, which
- * also books the loss from dumping leftover tokens AFTER a close (rugs / slippage). The middle term is
- * exactly that gap (wallet − positions) — the "post-close bleed", the actionable insight for an LP.
+ * The PnL reconciliation band — the headline that resolves the app's most confusing duality. The HERO
+ * is the wallet's TRUE on-chain SOL result (spanning two columns); beside it, two stat cells tell the
+ * story of the gap — `marked at close` (mark-at-close / LPAgent parity) and `lost after close` (the
+ * post-close bleed = wallet − positions, which the per-position view never sees). It shares the metric
+ * grid's columns so it reads as one coherent header, not a separate box.
  */
 export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
   const scope = usePortfolio((s) => s.scope);
@@ -25,92 +25,64 @@ export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
     [scope, closedVersion, period],
   );
 
-  if (loading && !curve) return <Skeleton className="h-[68px] w-full rounded-lg" />;
+  const m = useMoney();
+  if (loading && !curve) return <Skeleton className="h-[88px] w-full rounded-lg" />;
   if (!curve) return null;
 
   const wallet = curve.totalTradingSol;
   const postClose = wallet - positionsPnl;
 
   return (
-    <div className="rounded-lg border border-border bg-bg-elevated/60 p-3 sm:p-4">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-1">
-        <Node
-          label="Positions"
-          value={positionsPnl}
-          sub="mark-at-close"
-          tip="Sum of each closed position's PnL at its close — the LPAgent-style, in-position result."
-        />
-        <Connector tone={toneOf(postClose)} />
-        <Node
-          label="Post-close"
-          value={postClose}
-          sub="rugs · slippage"
-          tip="What leaked AFTER closing — selling the leftover token for less than its close value. The bleed the per-position view never sees."
-          dim
-        />
-        <Connector tone={toneOf(wallet)} />
-        <Node
-          label="Wallet"
-          value={wallet}
-          sub="true on-chain SOL"
-          tip={`The wallet's real realized SOL${curve.complete ? '' : ' (still indexing…)'} — every lamport reconciled on-chain.`}
-          strong
-        />
+    <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
+      <div className="col-span-2 sm:col-span-3 lg:col-span-2">
+        <span className="font-medium text-faint text-xs uppercase tracking-wide">
+          Real PnL · on-chain{!curve.complete && ' · indexing…'}
+          <span
+            title="The wallet's TRUE realized SOL. Unlike the per-position 'mark-at-close' figure, it also books the loss from dumping leftover tokens AFTER a close (rugs / slippage). Post-close = wallet − positions."
+            role="img"
+            aria-label="How the real PnL is reconciled"
+            className="ml-2 inline-grid size-4 cursor-help place-items-center rounded-full border border-border align-middle text-[10px] text-faint"
+          >
+            i
+          </span>
+        </span>
+        <span
+          className={cn(
+            'tabular mt-1.5 flex items-center gap-1.5 font-semibold text-4xl leading-none',
+            toneText[toneOf(wallet)],
+          )}
+        >
+          {m.sol(wallet, { signed: true })}
+          {m.showGlyph && <SolMark size={20} />}
+        </span>
       </div>
+
+      <Leg label="Marked at close" value={positionsPnl} />
+      <Leg label="Lost after close" value={postClose} />
     </div>
   );
 }
 
-function Node({
-  label,
-  value,
-  sub,
-  tip,
-  dim = false,
-  strong = false,
-}: {
-  label: string;
-  value: number;
-  sub: string;
-  tip: string;
-  dim?: boolean;
-  strong?: boolean;
-}) {
+/** A reconciliation leg, styled to match the metric cells: a tone dot + label, then the signed SOL
+ *  value (no glyph — the hero carries the only one, keeping the row calm). */
+function Leg({ label, value }: { label: string; value: number }) {
   const m = useMoney();
-  const tone: Tone = toneOf(value);
+  const tone = toneOf(value);
   return (
-    <div
-      title={tip}
-      className={cn(
-        'flex flex-1 cursor-help flex-col gap-0.5 rounded-md px-3 py-1.5',
-        strong && 'bg-surface/70',
-      )}
-    >
-      <span className="font-medium text-[11px] text-faint uppercase tracking-wide">{label}</span>
-      <span
-        className={cn(
-          'tabular inline-flex items-center gap-1 font-semibold leading-none',
-          strong ? 'text-xl' : 'text-lg',
-          dim ? 'text-muted' : toneText[tone],
-        )}
-      >
-        {m.sol(value, { signed: true })}
-        {m.showGlyph && <SolMark size={strong ? 15 : 13} />}
+    <div className="flex flex-col gap-1">
+      <span className="flex items-center gap-1.5 font-medium text-faint text-xs uppercase tracking-wide">
+        <span
+          className={cn(
+            'size-1.5 rounded-full',
+            tone === 'profit' ? 'bg-profit' : tone === 'loss' ? 'bg-loss' : 'bg-faint',
+          )}
+          aria-hidden="true"
+        />
+        {label}
       </span>
-      <span className="text-[11px] text-faint">{sub}</span>
-    </div>
-  );
-}
-
-/** The →/↓ link between two bridge nodes (horizontal on desktop, vertical on mobile). */
-function Connector({ tone }: { tone: Tone }) {
-  return (
-    <div
-      className={cn('flex shrink-0 items-center justify-center px-1 text-faint', toneText[tone])}
-      aria-hidden="true"
-    >
-      <span className="hidden sm:inline">→</span>
-      <span className="sm:hidden">↓</span>
+      <span className={cn('tabular font-semibold text-2xl leading-none', toneText[tone])}>
+        {m.sol(value, { signed: true })}
+      </span>
     </div>
   );
 }

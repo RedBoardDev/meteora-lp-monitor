@@ -3,6 +3,7 @@
 import type { Bucket } from '@binsight/shared';
 import { useState } from 'react';
 import { FilterBar } from './filter-bar';
+import { PairsCard } from './pairs-card';
 import { PerformanceCard } from './performance-card';
 import { ProfitChart } from './profit-chart';
 
@@ -16,6 +17,7 @@ export function StatsPanel() {
       <FilterBar bucket={bucket} onBucket={setBucket} />
       <PerformanceCard />
       <ProfitChart bucket={bucket} />
+      <PairsCard />
     </div>
   );
 }
