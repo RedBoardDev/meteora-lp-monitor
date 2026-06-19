@@ -1,7 +1,14 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { NextConfig } from 'next';
 
+const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Self-contained server for the Docker image.
+  output: 'standalone',
+  // Monorepo: trace the workspace dependency (@meteora/shared) from the repo root into the bundle.
+  outputFileTracingRoot: repoRoot,
 };
 
 export default nextConfig;
