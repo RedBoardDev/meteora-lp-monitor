@@ -55,9 +55,9 @@ export function PerformanceCard() {
 
 function PerformanceBody({ stats }: { stats: Stats }) {
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col">
       <PnlBridge positionsPnl={stats.totalPnlSol} />
-      <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
+      <div className="mt-6 grid grid-cols-2 gap-x-6 gap-y-5 border-border border-t pt-6 sm:grid-cols-3 lg:grid-cols-4">
         <Stat
           label="Win rate"
           value={`${stats.winRate.toFixed(0)}%`}
