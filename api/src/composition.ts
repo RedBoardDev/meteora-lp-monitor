@@ -6,6 +6,7 @@ import { Engine } from './application/engine/index';
 import { StrategyService } from './application/engine/strategy-service';
 import { EventBus } from './application/event-bus';
 import { HealthMonitor } from './application/health-monitor';
+import { NetworthRecorder } from './application/networth-recorder';
 import { NotificationManager } from './application/notification/manager';
 import { PositionSync } from './application/position-sync-service';
 import { ResidualBackfill } from './application/residual-backfill';
@@ -26,6 +27,7 @@ import { PostgresAccountRepository } from './infrastructure/persistence/account-
 import { PostgresConfigRepository } from './infrastructure/persistence/config-repository';
 import { closeDatabase, openDatabase, runMigrations } from './infrastructure/persistence/database';
 import { DlmmLegRepository } from './infrastructure/persistence/dlmm-leg-repository';
+import { NetworthSnapshotRepository } from './infrastructure/persistence/networth-snapshot-repository';
 import { PostgresPositionRepository } from './infrastructure/persistence/position-repository';
 import { PushRepository } from './infrastructure/persistence/push-repository';
 import { WalletFlowRepository } from './infrastructure/persistence/wallet-flow-repository';
@@ -140,6 +142,10 @@ export function compose(config: AppConfig): App {
   // Wallet PnL curve — the TRUE realized SOL over time from on-chain cash-flow (captures rug/slippage
   // losses that position-level PnL misses). Reads the persisted flows; SQL aggregation, no live paging.
   const walletPnl = new WalletPnlService(walletFlowRepo);
+  // Forward-only Net Worth history (TRUE on-chain wallet total = tvl + idle, sampled into 15-min
+  // buckets) + a fail-loud reconciliation of the flow ledger against the live on-chain idle.
+  const networthSnapshots = new NetworthSnapshotRepository(db);
+  const networthRecorder = new NetworthRecorder(bus, networthSnapshots, walletFlowRepo, logger);
   const presence = new PresenceTracker(config.PRESENCE_TIMEOUT_SECONDS * 1000);
   const bark = new BarkChannel(
     config.BARK_BASE_URL,
@@ -186,6 +192,7 @@ export function compose(config: AppConfig): App {
       await configRepo.init();
       await accounts.init(config.OWNER_ADDRESS);
       notifications.start();
+      networthRecorder.start();
       await engine.start();
       const server = await buildServer({
         config,
@@ -196,6 +203,7 @@ export function compose(config: AppConfig): App {
         accounts,
         backfill,
         walletPnl,
+        networthSnapshots,
         notifications,
         presence,
         pushRepo,

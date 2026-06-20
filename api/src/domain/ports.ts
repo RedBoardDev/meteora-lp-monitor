@@ -267,6 +267,9 @@ export interface WalletFlowRepository {
   upsertFlows(wallet: string, flows: WalletFlowRow[]): Promise<void>;
   /** The daily flow series for one or more wallets since `sinceSec`, summed in SQL by UTC day. */
   dailyFlows(wallets: string[], sinceSec: number): Promise<DailyFlow[]>;
+  /** The reconstructed on-chain cash balance = signed sum of every persisted flow (native + wSOL).
+   *  Backs the Net Worth reconciliation invariant (ledger vs live on-chain idle). */
+  reconstructedSum(wallet: string): Promise<number>;
   /** Authoritatively rebuild the daily rollup from the raw flows (idempotent boot repair). */
   rebuildDaily(): Promise<void>;
   /** Resync the rollup from raw on boot (always rebuilds — authoritative + idempotent). */

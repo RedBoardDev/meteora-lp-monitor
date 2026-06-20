@@ -16,6 +16,8 @@ describe('buildCashflowCurve', () => {
     expect(days[0]!.cumulativeSol).toBe(-10); // deployed 10
     expect(days[1]!.cumulativeSol).toBe(-10); // flat (no activity)
     expect(days[2]!.cumulativeSol).toBe(-5); // rug realized: −10 + 5 = −5
+    // No external flow here → reconstructed cash balance tracks the trading curve exactly.
+    expect(days.map((d) => d.cumulativeTotalSol)).toEqual([-10, -10, -5]);
     expect(totalTradingSol).toBeCloseTo(-5, 9);
   });
 
@@ -28,6 +30,8 @@ describe('buildCashflowCurve', () => {
     expect(totalTradingSol).toBe(3); // PnL unaffected by the CEX withdrawal
     expect(totalExternalSol).toBe(-20);
     expect(days[0]!.cumulativeSol).toBe(3);
+    // Net worth curve DOES include the external move: reconstructed cash balance = 3 + (−20) = −17.
+    expect(days[0]!.cumulativeTotalSol).toBe(-17);
   });
 
   it('the cumulative end equals the total trading flow (lamport-consistent)', () => {
@@ -38,6 +42,8 @@ describe('buildCashflowCurve', () => {
     ];
     const { days, totalTradingSol } = buildCashflowCurve(flows);
     expect(days[days.length - 1]!.cumulativeSol).toBeCloseTo(totalTradingSol, 9);
+    // All-trading window → reconstructed cash balance equals the trading curve at every point.
+    for (const d of days) expect(d.cumulativeTotalSol).toBeCloseTo(d.cumulativeSol, 9);
     expect(totalTradingSol).toBeCloseTo(3.2, 9);
   });
 });

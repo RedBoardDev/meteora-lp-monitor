@@ -72,6 +72,7 @@ function fillCurve(
 
   const days: CashflowDay[] = [];
   let cumulative = 0;
+  let cumulativeTotal = 0;
   let totalTradingSol = 0;
   let totalExternalSol = 0;
   if (minDay && maxDay) {
@@ -84,9 +85,16 @@ function fillCurve(
       const tradingSol = trading.get(date) ?? 0;
       const externalSol = external.get(date) ?? 0;
       cumulative += tradingSol;
+      cumulativeTotal += tradingSol + externalSol;
       totalTradingSol += tradingSol;
       totalExternalSol += externalSol;
-      days.push({ date, tradingSol, externalSol, cumulativeSol: cumulative });
+      days.push({
+        date,
+        tradingSol,
+        externalSol,
+        cumulativeSol: cumulative,
+        cumulativeTotalSol: cumulativeTotal,
+      });
     }
   }
   return { days, totalTradingSol, totalExternalSol };

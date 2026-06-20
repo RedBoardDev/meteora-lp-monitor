@@ -118,6 +118,16 @@ export class WalletFlowRepository implements WalletFlowRepositoryPort {
     await this.rebuildDaily();
   }
 
+  /** The reconstructed on-chain cash balance for a wallet = the signed sum of every persisted flow
+   *  (native + wSOL). The reconciliation invariant compares this ledger against the live on-chain idle. */
+  async reconstructedSum(wallet: string): Promise<number> {
+    const [row] = await this.db
+      .select({ sum: sql<string>`coalesce(sum(${walletFlows.solFlow}), 0)` })
+      .from(walletFlows)
+      .where(eq(walletFlows.wallet, wallet));
+    return Number(row?.sum ?? 0);
+  }
+
   async getCursor(wallet: string): Promise<FlowCursor | null> {
     const [row] = await this.db
       .select()

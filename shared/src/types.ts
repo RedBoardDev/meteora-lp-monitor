@@ -398,6 +398,8 @@ export interface WalletPnlDay {
   externalSol: number;
   /** running cumulative trading SOL since the window start (the curve). */
   cumulativeSol: number;
+  /** running cumulative of (trading+external) = reconstructed on-chain cash balance (reconciles with getBalance) */
+  cumulativeTotalSol: number;
 }
 
 export interface WalletPnlCurve {
@@ -409,6 +411,26 @@ export interface WalletPnlCurve {
   totalExternalSol: number;
   /** false if any requested wallet's on-chain history isn't fully ingested yet (curve still building). */
   complete: boolean;
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * Net Worth curve (forward-only TRUE on-chain wallet total over time) — server DTO
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** One reconstructed Net Worth point (per UTC day): on-chain cash + capital deployed in open positions. */
+export interface NetworthCurvePoint {
+  /** YYYY-MM-DD (UTC). */
+  date: string;
+  /** cash + deployed — the REAL Net Worth at end of that day (reconciles with the hero walletTotalSol). */
+  networth: number;
+  /** cumulative on-chain SOL cash-flow up to end of that day (reconciles with getBalance). */
+  cash: number;
+  /** at-cost SOL deposited in every position OPEN at end of that day. */
+  deployed: number;
+}
+
+export interface NetworthCurve {
+  points: NetworthCurvePoint[];
 }
 
 /* ────────────────────────────────────────────────────────────────────────

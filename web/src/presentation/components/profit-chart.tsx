@@ -26,8 +26,8 @@ import {
 } from '@/presentation/ui';
 import { ImageShareModal } from './image-share-modal';
 
-/** Which PnL: the wallet's true on-chain cash-flow, or per-position close PnL (Meteora, LPAgent-style). */
-type Source = 'wallet' | 'positions';
+/** Which view: the wallet's net worth (on-chain cash + open positions), or per-position close PnL (Meteora, LPAgent-style). */
+type Source = 'networth' | 'positions';
 
 const W = 1000;
 const H = 300;
@@ -60,22 +60,29 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
   const closedVersion = usePortfolio((s) => s.closedVersion);
   const netWorth = usePortfolio((s) => s.portfolio?.totals.walletTotalSol ?? 0);
   const period = useUi((s) => s.period);
-  const [source, setSource] = useState<Source>('wallet');
+  const [source, setSource] = useState<Source>('networth');
 
   // Two self-consistent views (toggle):
-  //  • Wallet    = the wallet's TRUE PnL from on-chain cash-flow (verified): the cumulative line is
-  //                the real SOL realized over time, incl. rug/slippage losses after a close. No bars
-  //                (daily flow is capital churn, not profit).
+  //  • Net Worth = the REAL net worth per UTC day (on-chain cash + capital deployed in open positions),
+  //                reconstructed on-chain. The line is the day-by-day net worth; `realized` carries the
+  //                day-over-day delta (the true gain/loss). No bars (the line IS the value).
   //  • Positions = per-position close PnL (Meteora, LPAgent-style): bars per bucket + a cumulative
   //                line that is just the running sum of those bars.
   const { data, loading, stale, error, refetch } = useScopedQuery<ProfitBucket[]>(async () => {
-    if (source === 'wallet') {
-      const curve = await api.walletPnlCurve(scope, periodDays(period, Date.now()));
-      return curve.days.map((d) => ({
-        t: Date.parse(`${d.date}T00:00:00Z`),
-        realized: d.tradingSol,
-        cumulative: d.cumulativeSol,
-      }));
+    if (source === 'networth') {
+      const curve = await api.networthCurve(scope, periodDays(period, Date.now()));
+      const pts = curve.points;
+      let prev: number | null = null;
+      return pts.map((p, i) => {
+        // Today (the last point) is reconstructed "at cost" and briefly LAGS the live tx stream: a fresh
+        // deposit hits the cash ledger before its position shows up in the legs, so the line would dip to
+        // ~idle. For today, use the live, on-chain-reconciled net worth (idle + open TVL) — the same
+        // value as the headline — so the curve never shows a phantom drop.
+        const value = i === pts.length - 1 && netWorth > 0 ? netWorth : p.networth;
+        const delta = prev == null ? 0 : value - prev;
+        prev = value;
+        return { t: Date.parse(`${p.date}T00:00:00Z`), realized: delta, cumulative: value };
+      });
     }
     const positions = await api.profitHistory(scope, bucket, sinceMs(period, Date.now()));
     let run = 0;
@@ -85,8 +92,15 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
     });
   }, [scope, bucket, closedVersion, period, source]);
 
-  // Headline = the cumulative line's end (the realized PnL over the window for the chosen view).
-  const total = data && data.length > 0 ? (data[data.length - 1]?.cumulative ?? null) : null;
+  // Headline: Net Worth = the REAL net worth (idle cash + open positions' value), not the cash
+  // curve's last point (which is only the on-chain cash, excluding open TVL). Positions keeps the
+  // cumulative line's end (the realized PnL over the window).
+  const total =
+    source === 'networth'
+      ? netWorth
+      : data && data.length > 0
+        ? (data[data.length - 1]?.cumulative ?? null)
+        : null;
   const svgRef = useRef<SVGSVGElement>(null);
   const [shareOpen, setShareOpen] = useState(false);
 
@@ -96,7 +110,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-baseline gap-3">
-              <CardTitle>{source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}</CardTitle>
+              <CardTitle>{source === 'networth' ? 'Net Worth' : 'Positions PnL'}</CardTitle>
               {total != null && (
                 <span className={cn('tabular font-semibold text-sm', toneText[toneOf(total)])}>
                   <SolAmount n={total} signed />
@@ -119,7 +133,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
                 value={source}
                 onChange={setSource}
                 options={[
-                  { label: 'Wallet', value: 'wallet' },
+                  { label: 'Net Worth', value: 'networth' },
                   { label: 'Positions', value: 'positions' },
                 ]}
               />
@@ -138,9 +152,9 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
             <Skeleton className="h-[300px] w-full" />
           ) : !data || data.length === 0 ? (
             <EmptyState
-              title={source === 'wallet' ? 'No wallet activity yet' : 'No realized PnL yet'}
+              title={source === 'networth' ? 'No on-chain activity yet' : 'No realized PnL yet'}
               hint={
-                source === 'wallet'
+                source === 'networth'
                   ? 'On-chain SOL cash-flow will chart here.'
                   : 'Closed positions will chart here.'
               }
@@ -151,11 +165,12 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
                 buckets={data}
                 netWorth={netWorth}
                 showBars={source === 'positions'}
+                mode={source}
                 svgRef={svgRef}
               />
               <p className="mt-3 text-[11px] text-faint leading-relaxed">
-                {source === 'wallet'
-                  ? "The wallet's TRUE realized PnL from on-chain SOL — it books the loss when leftover tokens are dumped after a close (rugs / slippage), which the per-position view misses. Verified on-chain."
+                {source === 'networth'
+                  ? 'Net Worth = ton SOL on-chain + le capital dans tes positions ouvertes. La courbe = ta valeur jour par jour ; le delta entre deux points = ton gain/perte réel sur la période. Vérifié on-chain.'
                   : 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.'}
               </p>
             </div>
@@ -165,9 +180,9 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
       <ImageShareModal
         open={shareOpen}
         onClose={() => setShareOpen(false)}
-        title={source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}
+        title={source === 'networth' ? 'Net Worth' : 'Positions PnL'}
         filename={`binsight-${source}-pnl.png`}
-        shareTitle={source === 'wallet' ? 'Wallet PnL' : 'Positions PnL'}
+        shareTitle={source === 'networth' ? 'Net Worth' : 'Positions PnL'}
         aspect="10 / 3"
         getImage={() => renderChartPng(svgRef.current)}
       />
@@ -179,11 +194,13 @@ function ProfitGraph({
   buckets,
   netWorth,
   showBars = true,
+  mode = 'positions',
   svgRef,
 }: {
   buckets: ProfitBucket[];
   netWorth: number;
   showBars?: boolean;
+  mode?: Source;
   svgRef?: React.Ref<SVGSVGElement>;
 }) {
   const [hover, setHover] = useState<number | null>(null);
@@ -355,24 +372,41 @@ function ProfitGraph({
               }}
             >
               <div className="mb-1.5 text-[11px] text-faint">{fmtDate(active.t)}</div>
-              {showBars && (
-                <TipRow
-                  label="This period"
-                  value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(active.realized)}
-                  tone={toneOf(active.realized)}
-                />
-              )}
-              <TipRow
-                label="Cumulative"
-                value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(cumHover)}
-                tone={toneOf(cumHover)}
-              />
-              {nwPct(cumHover) && (
-                <TipRow
-                  label="vs Net Worth"
-                  value={hideAmounts ? AMOUNT_MASK : nwPct(cumHover)!}
-                  tone={toneOf(cumHover)}
-                />
+              {mode === 'networth' ? (
+                <>
+                  <TipRow
+                    label="Net Worth"
+                    value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(cumHover)}
+                    tone="neutral"
+                  />
+                  <TipRow
+                    label="Day's change"
+                    value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(active.realized)}
+                    tone={toneOf(active.realized)}
+                  />
+                </>
+              ) : (
+                <>
+                  {showBars && (
+                    <TipRow
+                      label="This period"
+                      value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(active.realized)}
+                      tone={toneOf(active.realized)}
+                    />
+                  )}
+                  <TipRow
+                    label="Cumulative"
+                    value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(cumHover)}
+                    tone={toneOf(cumHover)}
+                  />
+                  {nwPct(cumHover) && (
+                    <TipRow
+                      label="vs Net Worth"
+                      value={hideAmounts ? AMOUNT_MASK : nwPct(cumHover)!}
+                      tone={toneOf(cumHover)}
+                    />
+                  )}
+                </>
               )}
             </Tooltip>
           </div>
