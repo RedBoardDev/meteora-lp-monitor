@@ -36,7 +36,7 @@ type UiState = {
 export const useUi = create<UiState>((set) => ({
   selected: null,
   select: (selected) => set({ selected }),
-  period: 'all',
+  period: '1m',
   setPeriod: (period) => set({ period }),
   tab: 'positions',
   setTab: (tab) => set({ tab }),
