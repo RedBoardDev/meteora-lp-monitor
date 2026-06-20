@@ -5,7 +5,7 @@ import { useRef, useState } from 'react';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { AMOUNT_MASK, usePrefs } from '@/application/stores/prefs-store';
 import { useUi } from '@/application/stores/ui-store';
-import { fmtDate, fmtSolSigned } from '@/domain/format';
+import { fmtDate, fmtDateFull, fmtSolSigned } from '@/domain/format';
 import { periodDays, sinceMs } from '@/domain/period';
 import { type Tone, toneOf } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';
@@ -393,7 +393,7 @@ function ProfitGraph({
                 borderColor: 'var(--color-border-strong)',
               }}
             >
-              <div className="mb-1.5 text-[11px] text-faint">{fmtDate(active.t)}</div>
+              <div className="mb-1.5 text-[11px] text-faint">{fmtDateFull(active.t)}</div>
               {mode !== 'positions' ? (
                 <>
                   <TipRow
