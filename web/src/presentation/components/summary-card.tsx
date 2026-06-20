@@ -18,13 +18,21 @@ function periodLabel(period: Period): string {
   return PERIOD_OPTIONS.find((o) => o.value === period)?.label ?? period.toUpperCase();
 }
 
-/** Net Worth at the start of `period` = the first curve point on/after the period floor (the baseline
- *  the gain is measured against). Null when the curve has no point in the window. */
-function networthAtStart(points: NetworthCurvePoint[], period: Period, now: number): number | null {
+/** Real PnL at a curve point = networth − apports = the PERFORMANCE net of deposits/withdrawals. */
+function realPnlAt(point: NetworthCurvePoint): number {
+  return point.realPnl;
+}
+
+/** The curve point at the start of `period` = the first point on/after the period floor (the baseline
+ *  the real-PnL gain is measured against). Null when the curve has no point in the window. */
+function startPointOf(
+  points: NetworthCurvePoint[],
+  period: Period,
+  now: number,
+): NetworthCurvePoint | null {
   const floor = sinceMs(period, now);
-  if (floor <= 0) return points[0]?.networth ?? null;
-  const start = points.find((p) => Date.parse(`${p.date}T00:00:00Z`) >= floor);
-  return start?.networth ?? null;
+  if (floor <= 0) return points[0] ?? null;
+  return points.find((p) => Date.parse(`${p.date}T00:00:00Z`) >= floor) ?? null;
 }
 
 export function SummaryCard() {
@@ -45,19 +53,23 @@ export function SummaryCard() {
   const t = portfolio.totals;
   const pnlTone = toneOf(t.uPnlSol);
   const points = curve?.points ?? [];
-  // NOW = the live, on-chain-reconciled net worth (walletTotalSol = idle + open TVL), NOT the curve's
-  // last point: today's at-cost reconstruction lags the live tx stream (a fresh deposit hits the cash
-  // ledger before its position shows up in the legs), which would briefly show a phantom loss (-31 etc).
-  const nwNow = t.walletTotalSol;
+  // NOW = the LIVE real PnL = walletTotalSol − cumulative apports. walletTotalSol (idle + open TVL) is the
+  // live, on-chain-reconciled net worth, NOT the curve's last point: today's at-cost reconstruction lags
+  // the live tx stream (a fresh deposit hits the cash ledger before its position shows up in the legs).
+  // apportsLast = the cumulative net deposits as of the last curve point (apports change slowly — they're
+  // funding moves, not intraday trading — so the last persisted value is the right "now" baseline).
+  const apportsLast = points.at(-1)?.apports ?? 0;
+  const realPnlNow = t.walletTotalSol - apportsLast;
   // Yesterday = the last reconstructed curve point STRICTLY before today (the curve's last point IS today).
   const todayStr = new Date(Date.now()).toISOString().slice(0, 10);
   const past = points.filter((p) => p.date < todayStr);
-  const nwYesterday = past.length > 0 ? past[past.length - 1]!.networth : null;
-  // TODAY = the day-over-day Net Worth evolution (live now − yesterday's close).
-  const today = nwYesterday != null ? nwNow - nwYesterday : null;
-  // GAIN (period) = NetWorth(now) − NetWorth(start of the selected period). The REAL, on-chain gain.
-  const startNw = networthAtStart(points, period, Date.now());
-  const gain = startNw != null ? nwNow - startNw : null;
+  const yesterdayPoint = past.length > 0 ? past[past.length - 1]! : null;
+  // TODAY = day-over-day real-PnL evolution (live now − yesterday's real PnL). CAN be negative.
+  const today = yesterdayPoint != null ? realPnlNow - realPnlAt(yesterdayPoint) : null;
+  // GAIN (period) = realPnl(now) − realPnl(start of the selected period). The REAL performance, net of
+  // apports — CAN be negative (e.g. a lifetime trading loss). On-chain verified.
+  const startPoint = startPointOf(points, period, Date.now());
+  const gain = startPoint != null ? realPnlNow - realPnlAt(startPoint) : null;
 
   return (
     <Card
@@ -94,7 +106,7 @@ export function SummaryCard() {
             sub={
               today != null && t.walletTotalSol > 0
                 ? m.pct((today / t.walletTotalSol) * 100)
-                : 'Net Worth Δ'
+                : 'Real PnL Δ'
             }
           />
           <Stat
@@ -107,7 +119,7 @@ export function SummaryCard() {
             label={`Gain (${periodLabel(period)})`}
             tone={gain != null ? toneOf(gain) : 'neutral'}
             value={gain != null ? m.sol(gain, { signed: true }) : '—'}
-            sub="Net Worth Δ"
+            sub="Real PnL Δ"
           />
           <Stat
             label="Open"

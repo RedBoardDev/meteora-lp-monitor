@@ -15,32 +15,36 @@ function periodLabel(period: Period): string {
   return PERIOD_OPTIONS.find((o) => o.value === period)?.label ?? period.toUpperCase();
 }
 
-/** Net Worth gain over `period` = NetWorth(now) − NetWorth(start of period). Null when the curve has
- *  no point on/before the period floor. */
-function networthGain(
+/** Real PnL gain over `period` = realPnl(now) − realPnl(start of period), where realPnl = performance
+ *  net of apports (deposits/withdrawals). CAN be negative. Null when the curve has no point on/before the
+ *  period floor or the live net worth is unknown. */
+function realPnlGain(
   points: NetworthCurvePoint[],
   period: Period,
   now: number,
-  end: number | null,
+  walletTotalSol: number | null,
 ): number | null {
-  // `end` is the LIVE net worth (walletTotalSol), not points[last]: today's at-cost point lags the live
-  // tx stream and would briefly show a phantom loss when fresh capital is deployed.
-  if (points.length === 0 || end == null) return null;
+  // realPnlNow uses the LIVE net worth (walletTotalSol) minus the cumulative apports of the last curve
+  // point — NOT points[last].realPnl: today's at-cost reconstruction lags the live tx stream (a fresh
+  // deposit hits the cash ledger before its position shows up in the legs).
+  if (points.length === 0 || walletTotalSol == null) return null;
+  const apportsLast = points.at(-1)?.apports ?? 0;
+  const realPnlNow = walletTotalSol - apportsLast;
   const floor = sinceMs(period, now);
   const start =
     floor <= 0
-      ? points[0]?.networth
-      : points.find((p) => Date.parse(`${p.date}T00:00:00Z`) >= floor)?.networth;
-  return start == null ? null : end - start;
+      ? points[0]?.realPnl
+      : points.find((p) => Date.parse(`${p.date}T00:00:00Z`) >= floor)?.realPnl;
+  return start == null ? null : realPnlNow - start;
 }
 
 /**
  * The PnL reconciliation band — the headline that resolves the app's most confusing duality. The HERO
- * is the wallet's REAL Net Worth gain over the selected period (on-chain cash + open-position capital,
- * end − start), NOT the trading-cumulative; beside it, two stat cells reconcile the per-position story —
- * `marked at close` (mark-at-close / LPAgent parity) and `trading cash-flow` (the on-chain realized SOL
- * over the same window, which books post-close bleed the per-position view never sees). It shares the
- * metric grid's columns so it reads as one coherent header, not a separate box.
+ * is the wallet's REAL PnL gain over the selected period (performance NET of apports = deposits/with-
+ * drawals, end − start), which CAN be negative; beside it, two stat cells reconcile the per-position
+ * story — `marked at close` (mark-at-close / LPAgent parity) and `trading cash-flow` (the on-chain
+ * realized SOL over the same window, which books post-close bleed the per-position view never sees). It
+ * shares the metric grid's columns so it reads as one coherent header, not a separate box.
  */
 export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
   const scope = usePortfolio((s) => s.scope);
@@ -61,18 +65,18 @@ export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
   if (nwLoading && !networth) return <Skeleton className="h-[88px] w-full rounded-lg" />;
   if (!networth) return null;
 
-  const gain = networthGain(networth.points, period, Date.now(), nwNow);
+  const gain = realPnlGain(networth.points, period, Date.now(), nwNow);
   const trading = curve?.totalTradingSol ?? null;
 
   return (
     <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
       <div className="col-span-2 sm:col-span-3 lg:col-span-2">
         <span className="font-medium text-faint text-xs uppercase tracking-wide">
-          Gain · Net Worth ({periodLabel(period)}){curve && !curve.complete && ' · indexing…'}
+          PnL réel ({periodLabel(period)}){curve && !curve.complete && ' · indexing…'}
           <span
-            title="Your REAL gain over the period: NetWorth(now) − NetWorth(start), where Net Worth = on-chain SOL + capital deployed in open positions. Verified on-chain — it does not plunge when capital is deployed into an LP."
+            title="Your REAL PnL over the period: realPnl(now) − realPnl(start), where real PnL = your wallet value NET of apports (deposits/withdrawals). It can be negative (you injected more than your current value). Verified on-chain."
             role="img"
-            aria-label="How the Net Worth gain is computed"
+            aria-label="How the real PnL gain is computed"
             className="ml-2 inline-grid size-4 cursor-help place-items-center rounded-full border border-border align-middle text-[10px] text-faint"
           >
             i

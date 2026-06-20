@@ -2,16 +2,17 @@ import { and, asc, gte, inArray, sql } from 'drizzle-orm';
 import type { Database } from './database';
 import { networthSnapshots } from './schema';
 
-/** One reconstructed Net Worth point: the on-chain cash + the capital deployed in open positions. */
+/** One reconstructed Net Worth point: the wallet VALUE + the real PnL net of deposits/withdrawals. */
 export interface NetworthReconstructedRow {
   /** YYYY-MM-DD (UTC). */
   date: string;
-  /** networth = cash + deployed (reconciles with the live hero walletTotalSol within rounding). */
+  /** networth = cum_trading + cum_ext + deployed — the wallet VALUE at end of that day (≥0 in practice;
+   *  reconciles with the live hero walletTotalSol within rounding). */
   networth: number;
-  /** cumulative on-chain SOL cash-flow up to end of that UTC day (reconciles with getBalance). */
-  cash: number;
-  /** at-cost SOL deposited in every position OPEN at end of that day. */
-  deployed: number;
+  /** apports = cum_ext = cumulative net external SOL flow (deposits − withdrawals) up to end of that day. */
+  apports: number;
+  /** realPnl = cum_trading + deployed = networth − apports — the PERFORMANCE net of apports (CAN be negative). */
+  realPnl: number;
 }
 
 /** A 15-minute UTC bucket index for an epoch-ms timestamp = floor(unix_seconds / 900). */
@@ -88,13 +89,21 @@ export class NetworthSnapshotRepository {
   }
 
   /**
-   * The REAL Net Worth curve, reconstructed per UTC day from the ledger (not the persisted snapshots).
+   * The REAL Net Worth + PnL curve, reconstructed per UTC day from the ledger (not the snapshots).
    *
-   * NetWorth(day) = cash(day) + deployed_atcost(day), where
-   *  • cash(day)     = cumulative sum of ALL wallet_flows.sol_flow up to end of that day (≡ getBalance).
-   *  • deployed(day) = the SOL-side deposit (from dlmm_legs, sol side per dlmm_pools.sol_side) of every
-   *                    position OPEN at end of that day (open = opened_at ≤ end AND (closed_at IS NULL OR
-   *                    closed_at > end); lifecycle in ms from positions.opened_at/closed_at).
+   * Daily flows are split by `is_trading`: net_trading = Σ sol_flow WHERE is_trading (the realized
+   * trading PnL increment); net_ext = Σ sol_flow WHERE NOT is_trading (deposits/withdrawals = "apports").
+   * Three running sums per UTC day: cum_trading, cum_ext, and `deployed` (the open-position-at-cost sweep).
+   *
+   *  • networth(day) = cum_trading + cum_ext + deployed — the wallet VALUE (≥0 in practice; ≡ getBalance
+   *                    + open TVL at cost). Falls to 0 if the wallet is emptied; never negative.
+   *  • apports(day)  = cum_ext — cumulative net deposits.
+   *  • realPnl(day)  = cum_trading + deployed = networth − apports — the PERFORMANCE net of apports. CAN
+   *                    be negative (e.g. injected more than the wallet is currently worth).
+   *
+   * `deployed` = SOL-side deposit (from dlmm_legs, sol side per dlmm_pools.sol_side) of every position
+   * OPEN at end of that day (open = opened_at ≤ end AND (closed_at IS NULL OR closed_at > end); lifecycle
+   * in ms from positions.opened_at/closed_at).
    *
    * The window starts at the UTC date of `sinceSec` (floored to the day); `sinceSec = 0` ⇒ the earliest
    * wallet_flows day for these wallets (the wallet's first on-chain activity). Reconciles with the live
@@ -116,11 +125,14 @@ export class NetworthSnapshotRepository {
     // correlated-subquery scan (which took ~17s all-time) — this is ~130ms.
     const rows = await this.db.execute<{
       date: string;
-      cash: string;
-      deployed: string;
+      networth: string;
+      apports: string;
+      realpnl: string;
     }>(sql`
       with flow as (
-        select floor(ts / 86400)::int as day, sum(sol_flow) as net
+        select floor(ts / 86400)::int as day,
+          sum(sol_flow) filter (where is_trading) as net_trading,
+          sum(sol_flow) filter (where not is_trading) as net_ext
         from wallet_flows
         where wallet = any(string_to_array(${walletsCsv}, ','))
         group by 1
@@ -154,22 +166,27 @@ export class NetworthSnapshotRepository {
       ),
       curve as (
         select days.day,
-          sum(coalesce(f.net, 0)) over o as cash,
+          sum(coalesce(f.net_trading, 0)) over o as cum_trading,
+          sum(coalesce(f.net_ext, 0)) over o as cum_ext,
           sum(coalesce(e.delta, 0)) over o as deployed
         from days
         left join flow f on f.day = days.day
         left join evd e on e.day = days.day
         window o as (order by days.day)
       )
-      select to_char(to_timestamp(day * 86400), 'YYYY-MM-DD') as date, cash, deployed
+      select to_char(to_timestamp(day * 86400), 'YYYY-MM-DD') as date,
+        cum_trading + cum_ext + deployed as networth,
+        cum_ext as apports,
+        cum_trading + deployed as realpnl
       from curve
       where day >= ${sinceDay}
       order by day
     `);
-    return rows.map((r) => {
-      const cash = Number(r.cash);
-      const deployed = Number(r.deployed);
-      return { date: r.date, networth: cash + deployed, cash, deployed };
-    });
+    return rows.map((r) => ({
+      date: r.date,
+      networth: Number(r.networth),
+      apports: Number(r.apports),
+      realPnl: Number(r.realpnl),
+    }));
   }
 }

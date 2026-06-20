@@ -26,8 +26,11 @@ import {
 } from '@/presentation/ui';
 import { ImageShareModal } from './image-share-modal';
 
-/** Which view: the wallet's net worth (on-chain cash + open positions), or per-position close PnL (Meteora, LPAgent-style). */
-type Source = 'networth' | 'positions';
+/** Which view:
+ *  • networth  = the wallet VALUE (on-chain cash + open positions; ≥0, never negative).
+ *  • pnl       = the REAL PnL = performance net of apports (deposits/withdrawals); CAN be negative.
+ *  • positions = per-position close PnL (Meteora, LPAgent-style). */
+type Source = 'networth' | 'pnl' | 'positions';
 
 const W = 1000;
 const H = 300;
@@ -55,6 +58,20 @@ function niceTicks(min: number, max: number, count = 4): number[] {
   return ticks;
 }
 
+/** Card / share title for the selected source. */
+function sourceTitle(source: Source): string {
+  return source === 'networth' ? 'Net Worth' : source === 'pnl' ? 'Real PnL' : 'Positions PnL';
+}
+
+/** Explanatory note under the chart for the selected source. */
+function sourceNote(source: Source): string {
+  if (source === 'networth')
+    return 'Net Worth = la VALEUR de ton wallet (cash + positions). Tombe à 0 si tu vides, jamais négatif.';
+  if (source === 'pnl')
+    return 'PnL réel = ta perf nette de tes apports/retraits. Peut être négatif (ex: tu as injecté plus que ta valeur actuelle). Vérifié on-chain.';
+  return 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.';
+}
+
 export function ProfitChart({ bucket }: { bucket: Bucket }) {
   const scope = usePortfolio((s) => s.scope);
   const closedVersion = usePortfolio((s) => s.closedVersion);
@@ -62,23 +79,29 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
   const period = useUi((s) => s.period);
   const [source, setSource] = useState<Source>('networth');
 
-  // Two self-consistent views (toggle):
-  //  • Net Worth = the REAL net worth per UTC day (on-chain cash + capital deployed in open positions),
-  //                reconstructed on-chain. The line is the day-by-day net worth; `realized` carries the
-  //                day-over-day delta (the true gain/loss). No bars (the line IS the value).
+  // Three self-consistent views (toggle):
+  //  • Net Worth = the wallet VALUE per UTC day (on-chain cash + capital deployed in open positions),
+  //                reconstructed on-chain. The line is the day-by-day value; `realized` carries the
+  //                day-over-day delta. No bars (the line IS the value). ≥0 — never negative.
+  //  • PnL       = the REAL PnL per UTC day = performance NET of apports (deposits/withdrawals). The line
+  //                is `p.realPnl`; `realized` carries its day-over-day delta. CAN be negative.
   //  • Positions = per-position close PnL (Meteora, LPAgent-style): bars per bucket + a cumulative
   //                line that is just the running sum of those bars.
   const { data, loading, stale, error, refetch } = useScopedQuery<ProfitBucket[]>(async () => {
-    if (source === 'networth') {
+    if (source === 'networth' || source === 'pnl') {
       const curve = await api.networthCurve(scope, periodDays(period, Date.now()));
       const pts = curve.points;
+      // The live "now" figure that replaces the last (at-cost, lagging) point:
+      //  • networth → live net worth (idle + open TVL) = walletTotalSol.
+      //  • pnl      → live real PnL = walletTotalSol − apportsLast (cumulative net deposits, last point).
+      // Today (the last point) is reconstructed "at cost" and briefly LAGS the live tx stream: a fresh
+      // deposit hits the cash ledger before its position shows up in the legs, so the line would dip.
+      const apportsLast = pts.at(-1)?.apports ?? 0;
+      const liveNow = source === 'networth' ? netWorth : netWorth - apportsLast;
       let prev: number | null = null;
       return pts.map((p, i) => {
-        // Today (the last point) is reconstructed "at cost" and briefly LAGS the live tx stream: a fresh
-        // deposit hits the cash ledger before its position shows up in the legs, so the line would dip to
-        // ~idle. For today, use the live, on-chain-reconciled net worth (idle + open TVL) — the same
-        // value as the headline — so the curve never shows a phantom drop.
-        const value = i === pts.length - 1 && netWorth > 0 ? netWorth : p.networth;
+        const base = source === 'networth' ? p.networth : p.realPnl;
+        const value = i === pts.length - 1 && netWorth > 0 ? liveNow : base;
         const delta = prev == null ? 0 : value - prev;
         prev = value;
         return { t: Date.parse(`${p.date}T00:00:00Z`), realized: delta, cumulative: value };
@@ -92,9 +115,11 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
     });
   }, [scope, bucket, closedVersion, period, source]);
 
-  // Headline: Net Worth = the REAL net worth (idle cash + open positions' value), not the cash
-  // curve's last point (which is only the on-chain cash, excluding open TVL). Positions keeps the
-  // cumulative line's end (the realized PnL over the window).
+  // Headline:
+  //  • networth → the live net worth (idle cash + open positions' value) = walletTotalSol.
+  //  • pnl      → the live real PnL = netWorth − apportsLast; that IS the last point's (forced) cumulative.
+  //  • positions→ the cumulative line's end (the realized PnL over the window).
+  // For pnl / positions the last forced cumulative already encodes the live "now" figure.
   const total =
     source === 'networth'
       ? netWorth
@@ -110,7 +135,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-baseline gap-3">
-              <CardTitle>{source === 'networth' ? 'Net Worth' : 'Positions PnL'}</CardTitle>
+              <CardTitle>{sourceTitle(source)}</CardTitle>
               {total != null && (
                 <span className={cn('tabular font-semibold text-sm', toneText[toneOf(total)])}>
                   <SolAmount n={total} signed />
@@ -134,6 +159,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
                 onChange={setSource}
                 options={[
                   { label: 'Net Worth', value: 'networth' },
+                  { label: 'PnL', value: 'pnl' },
                   { label: 'Positions', value: 'positions' },
                 ]}
               />
@@ -152,11 +178,11 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
             <Skeleton className="h-[300px] w-full" />
           ) : !data || data.length === 0 ? (
             <EmptyState
-              title={source === 'networth' ? 'No on-chain activity yet' : 'No realized PnL yet'}
+              title={source === 'positions' ? 'No realized PnL yet' : 'No on-chain activity yet'}
               hint={
-                source === 'networth'
-                  ? 'On-chain SOL cash-flow will chart here.'
-                  : 'Closed positions will chart here.'
+                source === 'positions'
+                  ? 'Closed positions will chart here.'
+                  : 'On-chain SOL cash-flow will chart here.'
               }
             />
           ) : (
@@ -168,11 +194,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
                 mode={source}
                 svgRef={svgRef}
               />
-              <p className="mt-3 text-[11px] text-faint leading-relaxed">
-                {source === 'networth'
-                  ? 'Net Worth = ton SOL on-chain + le capital dans tes positions ouvertes. La courbe = ta valeur jour par jour ; le delta entre deux points = ton gain/perte réel sur la période. Vérifié on-chain.'
-                  : 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.'}
-              </p>
+              <p className="mt-3 text-[11px] text-faint leading-relaxed">{sourceNote(source)}</p>
             </div>
           )}
         </div>
@@ -180,9 +202,9 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
       <ImageShareModal
         open={shareOpen}
         onClose={() => setShareOpen(false)}
-        title={source === 'networth' ? 'Net Worth' : 'Positions PnL'}
+        title={sourceTitle(source)}
         filename={`binsight-${source}-pnl.png`}
-        shareTitle={source === 'networth' ? 'Net Worth' : 'Positions PnL'}
+        shareTitle={sourceTitle(source)}
         aspect="10 / 3"
         getImage={() => renderChartPng(svgRef.current)}
       />
@@ -372,12 +394,12 @@ function ProfitGraph({
               }}
             >
               <div className="mb-1.5 text-[11px] text-faint">{fmtDate(active.t)}</div>
-              {mode === 'networth' ? (
+              {mode !== 'positions' ? (
                 <>
                   <TipRow
-                    label="Net Worth"
+                    label={mode === 'networth' ? 'Net Worth' : 'Real PnL'}
                     value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(cumHover)}
-                    tone="neutral"
+                    tone={mode === 'networth' ? 'neutral' : toneOf(cumHover)}
                   />
                   <TipRow
                     label="Day's change"

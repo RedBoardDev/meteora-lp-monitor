@@ -417,16 +417,17 @@ export interface WalletPnlCurve {
  * Net Worth curve (forward-only TRUE on-chain wallet total over time) — server DTO
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** One reconstructed Net Worth point (per UTC day): on-chain cash + capital deployed in open positions. */
+/** One reconstructed Net Worth + PnL point (per UTC day). */
 export interface NetworthCurvePoint {
   /** YYYY-MM-DD (UTC). */
   date: string;
-  /** cash + deployed — the REAL Net Worth at end of that day (reconciles with the hero walletTotalSol). */
+  /** The wallet VALUE at end of that day (cum_trading + cum_ext + deployed; ≥0 in practice; reconciles
+   *  with the hero walletTotalSol). Falls to 0 if emptied — never negative. */
   networth: number;
-  /** cumulative on-chain SOL cash-flow up to end of that day (reconciles with getBalance). */
-  cash: number;
-  /** at-cost SOL deposited in every position OPEN at end of that day. */
-  deployed: number;
+  /** Cumulative net deposits (cum_ext = deposits − withdrawals) up to end of that day. */
+  apports: number;
+  /** The PERFORMANCE net of apports (= networth − apports = cum_trading + deployed). CAN be negative. */
+  realPnl: number;
 }
 
 export interface NetworthCurve {
