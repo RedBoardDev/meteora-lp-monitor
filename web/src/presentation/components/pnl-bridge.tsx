@@ -21,7 +21,7 @@ export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
   const closedVersion = usePortfolio((s) => s.closedVersion);
   const period = useUi((s) => s.period);
   const { data: curve, loading } = useScopedQuery(
-    () => api.walletPnlCurve(scope, periodDays(period)),
+    () => api.walletPnlCurve(scope, periodDays(period, Date.now())),
     [scope, closedVersion, period],
   );
 

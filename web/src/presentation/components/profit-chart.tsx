@@ -70,7 +70,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
   //                line that is just the running sum of those bars.
   const { data, loading, stale, error, refetch } = useScopedQuery<ProfitBucket[]>(async () => {
     if (source === 'wallet') {
-      const curve = await api.walletPnlCurve(scope, periodDays(period));
+      const curve = await api.walletPnlCurve(scope, periodDays(period, Date.now()));
       return curve.days.map((d) => ({
         t: Date.parse(`${d.date}T00:00:00Z`),
         realized: d.tradingSol,
