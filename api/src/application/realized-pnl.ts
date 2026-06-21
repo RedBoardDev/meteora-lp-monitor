@@ -119,9 +119,12 @@ export class RealizedPnlEngine {
   /**
    * Realized `market_pnl_sol` per CLOSED position of `wallet` (open positions feed the inventory but are
    * not reported). Empty map when the Enhanced API is disabled (no api-key) or the wallet has no legs on
-   * a SOL-paired pool — callers leave existing values untouched in that case.
+   * a SOL-paired pool — callers leave existing values untouched in that case. Returns `null` when the
+   * buy/sell history came back INCOMPLETE (a Helius page kept failing, or the maxPages cap was hit): an
+   * incomplete sell history makes FIFO under-consume inventory → too much leftover "held" → inflation, so
+   * the engine must NOT hand back values to persist (it would overwrite good data with inflated ones).
    */
-  async computeForWallet(wallet: string): Promise<Map<string, number>> {
+  async computeForWallet(wallet: string): Promise<Map<string, number> | null> {
     const out = new Map<string, number>();
     if (!this.enhanced.enabled) {
       this.logger.warn({ wallet }, 'realized-pnl: skipped (no Helius api-key for Enhanced API)');
@@ -190,10 +193,11 @@ export class RealizedPnlEngine {
     // 4. Buys + sells from the wallet's earliest leg minus a day.
     const oldestLegSec = Math.min(...legRows.map((l) => l.blockTime ?? Number.POSITIVE_INFINITY));
     const sinceMs = (Number.isFinite(oldestLegSec) ? oldestLegSec : 0) * 1000 - DAY_MS;
-    const [{ buys }, { sells }] = await Promise.all([
-      this.enhanced.fetchBuys(wallet, sinceMs),
-      this.enhanced.fetchSells(wallet, sinceMs),
-    ]);
+    const [{ buys, complete: buysComplete }, { sells, complete: sellsComplete }] =
+      await Promise.all([
+        this.enhanced.fetchBuys(wallet, sinceMs),
+        this.enhanced.fetchSells(wallet, sinceMs),
+      ]);
     this.logger.info(
       {
         wallet,
@@ -202,9 +206,22 @@ export class RealizedPnlEngine {
         mints: mints.size,
         buys: buys.length,
         sells: sells.length,
+        buysComplete,
+        sellsComplete,
       },
       'realized-pnl: data loaded',
     );
+
+    // Completeness guard: an incomplete buy/sell history makes the FIFO under-consume inventory, leaving
+    // too much "held" residual that then gets valued and inflates closed PnL. Returning these to the
+    // caller would PERSIST inflated values over good ones — so skip the whole pass instead.
+    if (!buysComplete || !sellsComplete) {
+      this.logger.warn(
+        { wallet, buysComplete, sellsComplete },
+        'realized-pnl: incomplete sell history — skipping persist to avoid overwriting with inflated held values',
+      );
+      return null;
+    }
 
     // 5. Build per-mint event timelines.
     const evByMint = new Map<string, Ev[]>();

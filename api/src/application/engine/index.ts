@@ -391,7 +391,9 @@ export class Engine {
     this.realizedPnlRunning.add(wallet);
     try {
       const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
-      if (pnlByPos.size === 0) return;
+      // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so a
+      // flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
+      if (pnlByPos == null || pnlByPos.size === 0) return;
       for (const [pos, pnl] of pnlByPos) await this.repo.setAuthoritativePnl(pos, pnl);
       // Tell viewers the closed figures changed so the table/stats recompute with the real cash values.
       this.bus.emit('closedChanged', { wallet });

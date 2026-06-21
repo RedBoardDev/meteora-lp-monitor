@@ -50,6 +50,8 @@ function makeEngine(opts: {
   buys: ResidualSell[];
   sells: ResidualSell[];
   prices?: Map<string, number>;
+  buysComplete?: boolean;
+  sellsComplete?: boolean;
 }): RealizedPnlEngine {
   const legSource: RealizedLegSource = {
     legsByWallet: async () => opts.legs,
@@ -60,8 +62,12 @@ function makeEngine(opts: {
   };
   const enhanced = {
     enabled: true,
-    fetchBuys: async () => ({ buys: opts.buys, complete: true, oldestTs: 0 }),
-    fetchSells: async () => ({ sells: opts.sells, complete: true, oldestTs: 0 }),
+    fetchBuys: async () => ({ buys: opts.buys, complete: opts.buysComplete ?? true, oldestTs: 0 }),
+    fetchSells: async () => ({
+      sells: opts.sells,
+      complete: opts.sellsComplete ?? true,
+      oldestTs: 0,
+    }),
   } as unknown as EnhancedTxGateway;
   const prices = {
     getPricesSol: async () => opts.prices ?? new Map<string, number>(),
@@ -99,10 +105,11 @@ describe('RealizedPnlEngine — chained FIFO cost-basis', () => {
     });
 
     const out = await engine.computeForWallet('W');
-    expect(out.get('P1')).toBeCloseTo(-5, 9);
-    expect(out.get('P2')).toBeCloseTo(13, 9);
+    expect(out).not.toBeNull();
+    expect(out!.get('P1')).toBeCloseTo(-5, 9);
+    expect(out!.get('P2')).toBeCloseTo(13, 9);
     // Wallet conservation: Σ PnL = Σ solLeg + (Σ sells − Σ buys) when nothing is still held.
-    expect((out.get('P1') ?? 0) + (out.get('P2') ?? 0)).toBeCloseTo(-2 + (20 - 10), 9);
+    expect((out!.get('P1') ?? 0) + (out!.get('P2') ?? 0)).toBeCloseTo(-2 + (20 - 10), 9);
   });
 
   it('marks a still-held residual at min(current price, close-bin) and only reports closed positions', async () => {
@@ -127,8 +134,25 @@ describe('RealizedPnlEngine — chained FIFO cost-basis', () => {
     });
 
     const out = await engine.computeForWallet('W');
-    expect(out.size).toBe(1);
-    expect(out.get('P2')).toBeCloseTo(1e-7, 12);
+    expect(out).not.toBeNull();
+    expect(out!.size).toBe(1);
+    expect(out!.get('P2')).toBeCloseTo(1e-7, 12);
+  });
+
+  it('returns null (skip persist) when the sell history is incomplete', async () => {
+    // A flaky Helius fetch returns complete=false. The engine must NOT hand back values to persist —
+    // returning them would overwrite good market_pnl_sol with inflated, under-consumed held residuals.
+    const legs = [leg('P1', 'deposit', 100, 10, 1000), leg('P1', 'withdraw', 100, 5, 2000)];
+    const status = new Map([['P1', { status: 'closed', closedAt: 2000_000 }]]);
+    const engine = makeEngine({
+      legs,
+      status,
+      buys: [{ ts: 500, mint: MINT, tokenAmount: 100, solReceived: 10 }],
+      sells: [{ ts: 5000, mint: MINT, tokenAmount: 100, solReceived: 20 }],
+      sellsComplete: false, // incomplete history → skip signal
+    });
+
+    expect(await engine.computeForWallet('W')).toBeNull();
   });
 
   it('returns an empty map when the Enhanced API is disabled', async () => {
@@ -152,6 +176,8 @@ describe('RealizedPnlEngine — chained FIFO cost-basis', () => {
       async () => 0,
       noopLogger,
     );
-    expect((await engine.computeForWallet('W')).size).toBe(0);
+    const out = await engine.computeForWallet('W');
+    expect(out).not.toBeNull();
+    expect(out!.size).toBe(0);
   });
 });
