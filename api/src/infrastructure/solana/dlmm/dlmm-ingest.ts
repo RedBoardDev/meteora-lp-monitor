@@ -7,7 +7,11 @@ import { decodeDlmmLegs } from './dlmm-event-decoder';
 
 const SIG_PAGE = 1000; // getSignaturesForAddress hard cap
 const TX_BATCH = 50; // getParsedTransactions batch size — Helius rejects 100 (413 Payload Too Large)
-const BATCH_CONCURRENCY = 6; // parallel batch requests (≈300 txs in flight; well under 50 RPS)
+const BATCH_CONCURRENCY = 1; // serial batch requests — no burst, stays under the key's rate limit
+const BATCH_PAUSE_MS = 600; // pause between requests so a full-history backfill doesn't trigger 429s
+// Bound the backfill to a recent window (days) to keep volume under a limited key's rate limit. 0 =
+// full history. Settable via env so the window can be widened incrementally ("petit à petit").
+const SINCE_DAYS = Number(process.env.INGEST_SINCE_DAYS) || 0;
 
 /**
  * Ingests a wallet's FULL Meteora DLMM history from chain into Postgres — paged signatures →
@@ -37,6 +41,7 @@ export class DlmmIngest implements DlmmIngestPort {
     let pages = 0;
     const cursor = await this.repo.getCursor(wallet);
     const owner = new PublicKey(wallet);
+    const sinceSec = SINCE_DAYS > 0 ? Date.now() / 1000 - SINCE_DAYS * 86_400 : 0;
 
     const resuming = cursor != null && !cursor.complete;
     const toppingUp = cursor?.complete === true;
@@ -92,6 +97,13 @@ export class DlmmIngest implements DlmmIngestPort {
       oldestSig = page[page.length - 1]!.signature;
       before = oldestSig;
 
+      // Bounded window: stop once we've paged past the cutoff (NOT genesis — leave complete=false so a
+      // later run with a wider window can extend). blockTime is seconds; null on very old sigs → ignore.
+      if (sinceSec > 0) {
+        const oldestBt = page[page.length - 1]!.blockTime;
+        if (oldestBt != null && oldestBt < sinceSec) break;
+      }
+
       if (hitKnownTop) break;
       if (page.length < SIG_PAGE) {
         reachedGenesis = true;
@@ -112,15 +124,20 @@ export class DlmmIngest implements DlmmIngestPort {
 
   /** One page of signatures, newest-first, with retry. */
   private async signatures(owner: PublicKey, before: string | undefined) {
-    for (let i = 0; i < 8; i++) {
+    let lastErr: unknown;
+    for (let i = 0; i < 10; i++) {
       try {
         return await this.conn.getSignaturesForAddress(owner, { limit: SIG_PAGE, before });
       } catch (err) {
+        lastErr = err;
         this.logger.debug({ err, i }, 'getSignaturesForAddress retry');
-        await sleep(Math.min(8000, 600 * (i + 1)));
+        await sleep(Math.min(15000, 800 * (i + 1)));
       }
     }
-    return [];
+    // CRITICAL: THROW, never return [] — an empty page is read as genesis and would FALSELY mark the
+    // backfill complete mid-history (this is what truncated the new wallets at ~21 days). Throwing
+    // aborts the page without advancing the cursor, so a re-run resumes from where it failed.
+    throw lastErr ?? new Error('getSignaturesForAddress failed after retries');
   }
 
   /**
@@ -143,6 +160,7 @@ export class DlmmIngest implements DlmmIngestPort {
           legs.push(...decodeDlmmLegs(tx));
         }
       }
+      if (i + BATCH_CONCURRENCY < chunks.length) await sleep(BATCH_PAUSE_MS);
     }
     return { legs, txs };
   }
