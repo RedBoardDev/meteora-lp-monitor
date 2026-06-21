@@ -142,6 +142,52 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     return { sells, complete, oldestTs };
   }
 
+  /** Same paging as fetchSells but extracts BUYS (token in, SOL out) — the real SOL entry cost of
+   *  pre-bought deposited tokens. Returns the ResidualSell shape (solReceived = SOL spent). */
+  async fetchBuys(
+    wallet: string,
+    sinceMs: number,
+  ): Promise<{ buys: ResidualSell[]; complete: boolean; oldestTs: number }> {
+    if (!this.apiKey) return { buys: [], complete: false, oldestTs: Number.POSITIVE_INFINITY };
+    const sinceSec = sinceMs / 1000;
+    const buys: ResidualSell[] = [];
+    let before: string | undefined;
+    let reachedFloor = false;
+    let complete = false;
+    let oldestTs = Number.POSITIVE_INFINITY;
+    let page = 0;
+    for (; page < this.maxPages && !reachedFloor; page++) {
+      const url =
+        `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
+        `?api-key=${this.apiKey}&type=SWAP&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
+      const txs = await this.fetchPageWithRetry(url, wallet, page);
+      if (txs == null) break;
+      if (txs.length === 0) {
+        complete = true;
+        break;
+      }
+      for (const tx of txs) {
+        oldestTs = Math.min(oldestTs, tx.timestamp);
+        if (tx.timestamp < sinceSec) {
+          reachedFloor = true;
+          continue;
+        }
+        const buy = parseSwapBuy(tx, wallet);
+        if (buy) buys.push(buy);
+      }
+      const last = txs[txs.length - 1];
+      if (!last) {
+        complete = true;
+        break;
+      }
+      before = last.signature;
+      if (INTER_PAGE_MS) await new Promise((r) => setTimeout(r, INTER_PAGE_MS));
+    }
+    if (reachedFloor) complete = true;
+    this.logger.info({ wallet, buys: buys.length, complete }, 'enhanced: buys fetched');
+    return { buys, complete, oldestTs };
+  }
+
   /**
    * Page the WALLET's own txs since `sinceMs` and reduce each to its net SOL+WSOL flow + a trading
    * flag (SWAP or DLMM-touching). Feeds the wallet PnL curve. `complete=false` on a fetch failure.
@@ -441,4 +487,52 @@ export function parseSwapSell(tx: EnhancedTx, wallet: string): ResidualSell | nu
   const solReceived = netWsol > 1e-9 ? netWsol : netNative;
   if (tokenAmount <= 0 || solReceived <= 0) return null;
   return { ts: tx.timestamp, mint, tokenAmount, solReceived };
+}
+
+/**
+ * Mirror of parseSwapSell for BUYS: the wallet RECEIVES a token (net inflow) and SPENDS SOL. Returns
+ * the ResidualSell shape with solReceived = SOL SPENT, so reconstructRealized can FIFO-attribute buys
+ * to a position's deposited tokens exactly like it attributes sells to residuals — i.e. the real SOL
+ * entry cost of pre-bought deposited tokens (the missing piece for token/mixed-deposit positions).
+ */
+export function parseSwapBuy(tx: EnhancedTx, wallet: string): ResidualSell | null {
+  const tts = tx.tokenTransfers ?? [];
+  const candidates = [
+    ...new Set(
+      tts
+        .filter((t) => t.mint !== SOL_MINT && t.toUserAccount === wallet && t.tokenAmount > 0)
+        .map((t) => t.mint),
+    ),
+  ];
+  const netIn = (mint: string) => {
+    const inn = tts
+      .filter((t) => t.mint === mint && t.toUserAccount === wallet)
+      .reduce((s, t) => s + t.tokenAmount, 0);
+    const back = tts
+      .filter((t) => t.mint === mint && t.fromUserAccount === wallet)
+      .reduce((s, t) => s + t.tokenAmount, 0);
+    return { inn, net: inn - back };
+  };
+  const bought = candidates
+    .map((mint) => ({ mint, ...netIn(mint) }))
+    .filter((x) => x.net > 0 && x.net > x.inn * MIN_NET_FRACTION);
+  if (bought.length !== 1) return null;
+  const { mint, net: tokenAmount } = bought[0]!;
+
+  const wsolOut = tts
+    .filter((t) => t.mint === SOL_MINT && t.fromUserAccount === wallet)
+    .reduce((s, t) => s + t.tokenAmount, 0);
+  const wsolIn = tts
+    .filter((t) => t.mint === SOL_MINT && t.toUserAccount === wallet)
+    .reduce((s, t) => s + t.tokenAmount, 0);
+  const netWsolOut = wsolOut - wsolIn;
+  const nat = tx.nativeTransfers ?? [];
+  const nativeOut = nat
+    .filter((t) => t.fromUserAccount === wallet)
+    .reduce((s, t) => s + t.amount, 0);
+  const nativeIn = nat.filter((t) => t.toUserAccount === wallet).reduce((s, t) => s + t.amount, 0);
+  const netNativeOut = (nativeOut - nativeIn) / LAMPORTS_PER_SOL;
+  const solSpent = netWsolOut > 1e-9 ? netWsolOut : netNativeOut;
+  if (tokenAmount <= 0 || solSpent <= 0) return null;
+  return { ts: tx.timestamp, mint, tokenAmount, solReceived: solSpent };
 }

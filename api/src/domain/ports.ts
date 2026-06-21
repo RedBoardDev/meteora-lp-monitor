@@ -112,6 +112,11 @@ export interface PositionRepository {
   /** Overwrite the authoritative closed PnL (residual revalued at the real on-chain sell proceeds) for
    *  one position, bypassing the settle-freeze — a deliberate enrichment, not a pool-price resync. */
   setAuthoritativePnl(positionAddress: string, pnlSol: number): Promise<void>;
+  /** status + closedAt for EVERY position (open + closed) of a wallet, keyed by address. The realized-PnL
+   *  FIFO needs open positions too (their deposits consume token inventory), but reports only closed ones. */
+  positionStatusForWallet(
+    wallet: string,
+  ): Promise<Map<string, { status: string; closedAt: number | null }>>;
   /** A single closed position by address (deep-links a position drawer from the URL). Null if not a closed position. */
   getClosedByAddress(positionAddress: string): Promise<ClosedPosition | null>;
   /** The wallet that owns a position (open OR closed), by address. Null if unknown — used to scope the
@@ -308,6 +313,12 @@ export interface EnhancedTxGateway {
     wallet: string,
     sinceMs: number,
   ): Promise<{ sells: ResidualSell[]; complete: boolean; oldestTs: number }>;
+  /** All clean SOL→token buys since `sinceMs` (ResidualSell shape, solReceived = SOL SPENT) — the real
+   *  entry cost of pre-bought deposited tokens, for the chained-FIFO realized-PnL engine. */
+  fetchBuys(
+    wallet: string,
+    sinceMs: number,
+  ): Promise<{ buys: ResidualSell[]; complete: boolean; oldestTs: number }>;
   /** Page a wallet's full tx stream for PERSISTENCE, handing each page to `onPage` (incremental). */
   pageFlows(
     wallet: string,

@@ -9,6 +9,7 @@ import { HealthMonitor } from './application/health-monitor';
 import { NetworthRecorder } from './application/networth-recorder';
 import { NotificationManager } from './application/notification/manager';
 import { PositionSync } from './application/position-sync-service';
+import { RealizedPnlEngine } from './application/realized-pnl';
 import { ResidualBackfill } from './application/residual-backfill';
 import { flowFromHistory } from './application/residual-realized';
 import { WalletFlowIngest } from './application/wallet-flow-ingest';
@@ -139,6 +140,17 @@ export function compose(config: AppConfig): App {
     return hist ? flowFromHistory(hist) : null;
   };
   const backfill = new ResidualBackfill(gateway, enhanced, positionFlow, positionRepo, bus, logger);
+  // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + Helius buys/sells,
+  // held residual marked via the shared price gateway). Triggered by the engine after a wallet's closed
+  // set changes — the production port of scripts/fifo-cost-basis.ts.
+  const realizedPnl = new RealizedPnlEngine(
+    dlmmLegRepo,
+    positionRepo,
+    enhanced,
+    prices,
+    (mint) => onchain.decimalsOf(mint),
+    logger,
+  );
   // Wallet PnL curve — the TRUE realized SOL over time from on-chain cash-flow (captures rug/slippage
   // losses that position-level PnL misses). Reads the persisted flows; SQL aggregation, no live paging.
   const walletPnl = new WalletPnlService(walletFlowRepo);
@@ -180,6 +192,7 @@ export function compose(config: AppConfig): App {
     dlmmIngest,
     positionSync,
     walletFlowIngest,
+    realizedPnl,
   );
   const notifications = new NotificationManager(bus, configRepo, presence, bark, webPush, logger);
 

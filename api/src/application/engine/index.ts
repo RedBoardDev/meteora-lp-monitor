@@ -9,6 +9,7 @@ import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
 import type { PositionSync } from '@/application/position-sync-service';
+import type { RealizedPnlEngine } from '@/application/realized-pnl';
 import type { WalletFlowIngest } from '@/application/wallet-flow-ingest';
 import type { AppConfig } from '@/config/env';
 import { classifyInstruction } from '@/domain/dlmm';
@@ -64,6 +65,9 @@ export class Engine {
   // Wallets a client is currently viewing (maintained by the WS layer). The recurring net-worth
   // snapshot only runs for viewed wallets (+ notify-enabled ones) so idle wallets cost no RPC.
   private viewedWallets = new Set<string>();
+  // Per-wallet guard so the chained-FIFO realized-PnL pass (Enhanced API + price gateway) never runs
+  // twice concurrently for the same wallet — it fires async off the close-notification, not the loop.
+  private readonly realizedPnlRunning = new Set<string>();
 
   constructor(
     gateway: PositionsGateway,
@@ -81,6 +85,7 @@ export class Engine {
     private readonly dlmmIngest: DlmmIngest,
     private readonly positionSync: PositionSync,
     private readonly walletFlowIngest: WalletFlowIngest,
+    private readonly realizedPnl: RealizedPnlEngine,
   ) {
     this.emitter = new StateEmitter(this.wallets, subscriber, bus, this.health);
     this.refresher = new PositionRefresher(
@@ -342,6 +347,10 @@ export class Engine {
         if (res.closed !== rt.lastClosedCount) {
           rt.lastClosedCount = res.closed;
           this.bus.emit('closedChanged', { wallet: rt.address });
+          // The closed set moved → (re)compute the authoritative on-chain realized market_pnl_sol for
+          // this wallet's closed positions. Runs async (Enhanced API + price gateway) so it never blocks
+          // the snapshot loop; the UI fills in via a second closedChanged when it persists.
+          void this.runRealizedPnl(rt.address);
         }
       } else if (
         this.onchainSource &&
@@ -369,6 +378,32 @@ export class Engine {
   private applyOpenPositions(rt: WalletRuntime, positions: OpenPosition[]): void {
     rt.open = new Map(positions.map((p) => [p.positionAddress, p]));
     this.emitter.emitState(rt.address);
+  }
+
+  /**
+   * Recompute + persist the authoritative on-chain realized PnL (`market_pnl_sol`) for a wallet's CLOSED
+   * positions via the chained-FIFO engine. Idempotent (re-running just rewrites the same values) and
+   * single-flight per wallet so it can never pile up. Errors are swallowed — a failed pass must not
+   * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
+   */
+  private async runRealizedPnl(wallet: string): Promise<void> {
+    if (this.realizedPnlRunning.has(wallet)) return;
+    this.realizedPnlRunning.add(wallet);
+    try {
+      const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
+      if (pnlByPos.size === 0) return;
+      for (const [pos, pnl] of pnlByPos) await this.repo.setAuthoritativePnl(pos, pnl);
+      // Tell viewers the closed figures changed so the table/stats recompute with the real cash values.
+      this.bus.emit('closedChanged', { wallet });
+      this.logger.info(
+        { wallet, written: pnlByPos.size },
+        'realized-pnl: market_pnl_sol persisted',
+      );
+    } catch (err) {
+      this.logger.error({ err, wallet }, 'realized-pnl pass failed — keeping prior market_pnl_sol');
+    } finally {
+      this.realizedPnlRunning.delete(wallet);
+    }
   }
 
   private doReconcile(rt: WalletRuntime): Promise<void> {
