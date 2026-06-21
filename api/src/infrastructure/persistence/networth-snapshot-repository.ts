@@ -11,9 +11,9 @@ export interface NetworthReconstructedRow {
   networth: number;
   /** apports = cum_ext = cumulative net external SOL flow (deposits − withdrawals) up to end of that day. */
   apports: number;
-  /** realPnl = cumulative realized LP-position PnL: running sum (carried forward) of the per-position
-   *  realized PnL (FIFO real-cash market_pnl_sol, else the bin mark pnl_sol) over CLOSED positions,
-   *  bucketed by UTC close-day. Matches LPAgent's PnL chart; CAN be negative. */
+  /** realPnl = networth − apports = cum_trading + deployed — the wallet's REAL performance net of its
+   *  external deposits/withdrawals. CAN be negative (injected more than the wallet is currently worth).
+   *  (Per-position LPAgent-style PnL is a separate metric, served for the Positions chart.) */
   realPnl: number;
 }
 
@@ -100,11 +100,8 @@ export class NetworthSnapshotRepository {
    *  • networth(day) = cum_trading + cum_ext + deployed — the wallet VALUE (≥0 in practice; ≡ getBalance
    *                    + open TVL at cost). Falls to 0 if the wallet is emptied; never negative.
    *  • apports(day)  = cum_ext — cumulative net deposits.
-   *  • realPnl(day)  = cumulative realized LP-position PnL: the running sum (carried forward across days
-   *                    with no closes) of per-position realized PnL — coalesce(market_pnl_sol, pnl_sol)
-   *                    summed over CLOSED positions bucketed by UTC close-day. This is the LP-position
-   *                    performance series (matches LPAgent's PnL chart), NOT networth − apports. CAN be
-   *                    negative.
+   *  • realPnl(day)  = cum_trading + deployed = networth − apports — the wallet's REAL performance net of
+   *                    external deposits/withdrawals. CAN be negative (injected more than current value).
    *
    * `deployed` = SOL-side deposit (from dlmm_legs, sol side per dlmm_pools.sol_side) of every position
    * OPEN at end of that day (open = opened_at ≤ end AND (closed_at IS NULL OR closed_at > end); lifecycle
@@ -166,16 +163,6 @@ export class NetworthSnapshotRepository {
         select close_day as day, -sum(dep) as delta from life where close_day is not null group by 1
       ),
       evd as (select day, sum(delta) as delta from ev group by 1),
-      -- Per UTC close-day, the realized LP-position PnL = FIFO real-cash (market_pnl_sol) when present,
-      -- else the bin mark (pnl_sol). closed_at is in ms; /1000/86400 → epoch-day.
-      closed as (
-        select floor(p.closed_at / 1000 / 86400)::int as day,
-          sum(coalesce(p.market_pnl_sol, p.pnl_sol)) as closepnl
-        from positions p
-        where p.wallet = any(string_to_array(${walletsCsv}, ','))
-          and p.status = 'closed' and p.closed_at is not null
-        group by 1
-      ),
       days as (
         select generate_series((select min(day) from flow), floor(extract(epoch from current_date) / 86400)::int) as day
       ),
@@ -183,19 +170,16 @@ export class NetworthSnapshotRepository {
         select days.day,
           sum(coalesce(f.net_trading, 0)) over o as cum_trading,
           sum(coalesce(f.net_ext, 0)) over o as cum_ext,
-          sum(coalesce(e.delta, 0)) over o as deployed,
-          -- running cumulative realized close PnL, carried forward on days with no closes.
-          sum(coalesce(c.closepnl, 0)) over o as cum_closepnl
+          sum(coalesce(e.delta, 0)) over o as deployed
         from days
         left join flow f on f.day = days.day
         left join evd e on e.day = days.day
-        left join closed c on c.day = days.day
         window o as (order by days.day)
       )
       select to_char(to_timestamp(day * 86400), 'YYYY-MM-DD') as date,
         cum_trading + cum_ext + deployed as networth,
         cum_ext as apports,
-        cum_closepnl as realpnl
+        cum_trading + deployed as realpnl
       from curve
       where day >= ${sinceDay}
       order by day
