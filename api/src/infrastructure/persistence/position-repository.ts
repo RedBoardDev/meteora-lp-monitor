@@ -35,10 +35,8 @@ const SETTLE_MS = 150_000;
 // Postgres's 65535 bind-parameter limit — a single oversized insert fails the whole reconcile.
 const INSERT_CHUNK = 500;
 
-// Positions view = the bin mark-at-close (pnl_sol), the LP-comparable per-position PnL. The FIFO
-// real-cash reprice still lives in market_pnl_sol (fed to the realPnl chart) but is NOT the value
-// shown here: this view must match LPAgent's per-position figure, which is the bin mark.
-const PNL = sql<number>`${positionsTable.pnlSol}`;
+// Effective realized PnL = market reprice when present, else the raw pool mark.
+const PNL = sql<number>`coalesce(${positionsTable.marketPnlSol}, ${positionsTable.pnlSol})`;
 
 type Row = typeof positionsTable.$inferSelect;
 
@@ -483,10 +481,10 @@ function rowToOpen(r: Row): OpenPosition {
 }
 
 function rowToClosed(r: Row): ClosedPosition {
-  // Positions view = the bin mark-at-close (pnl_sol), the LP-comparable per-position PnL. The FIFO
-  // real-cash reprice (market_pnl_sol) still feeds the realPnl chart but is deliberately NOT shown
-  // here, so this view matches LPAgent's per-position figure (the bin mark) to the cent.
-  const pnlSol = n(r.pnlSol);
+  // Effective PnL = market-valued PnL when enriched (stored in market_pnl_sol), else Meteora's raw
+  // pool mark as the fallback until the market value arrives.
+  const market = r.marketPnlSol == null ? null : n(r.marketPnlSol);
+  const pnlSol = market ?? n(r.pnlSol);
   const depositSol = n(r.depositSol);
   return {
     positionAddress: r.positionAddress,
@@ -510,7 +508,6 @@ function rowToClosed(r: Row): ClosedPosition {
     durationSeconds: r.durationSeconds == null ? null : n(r.durationSeconds),
     minPrice: r.minPrice == null ? undefined : n(r.minPrice),
     maxPrice: r.maxPrice == null ? undefined : n(r.maxPrice),
-    // Always the bin mark from pnl_sol now (see above); 'pool' is the matching source label.
-    pnlSource: 'pool',
+    pnlSource: market != null ? 'market' : 'pool',
   };
 }
