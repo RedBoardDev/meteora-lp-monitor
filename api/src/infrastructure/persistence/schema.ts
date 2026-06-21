@@ -143,6 +143,23 @@ export const walletFlowDaily = pgTable(
   (t) => [primaryKey({ columns: [t.wallet, t.day] })],
 );
 
+// Forward-only Net Worth history: the TRUE on-chain wallet total (tvl + idle) sampled into 15-min
+// UTC buckets. There is no reliable historical mark-to-market, so this is only ever written going
+// forward from the live `state` stream — last write in a bucket wins. The PK already serves the
+// (wallet, bucket) range scan the curve reads.
+export const networthSnapshots = pgTable(
+  'networth_snapshots',
+  {
+    wallet: text('wallet').notNull(),
+    bucket: integer('bucket').notNull(), // UTC 15-min bucket = floor(unix_seconds / 900)
+    ts: ms('ts').notNull(), // epoch ms of the sample that landed in this bucket
+    walletTotalSol: doublePrecision('wallet_total_sol').notNull(),
+    tvlSol: doublePrecision('tvl_sol').notNull(),
+    idleSol: doublePrecision('idle_sol').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.wallet, t.bucket] })],
+);
+
 // Per-wallet flow-ingest progress — same shape/semantics as dlmm_ingest_cursor (page newest→genesis,
 // resume from oldestSig, top-up until the previously-seen newestSig).
 export const walletFlowCursor = pgTable('wallet_flow_cursor', {

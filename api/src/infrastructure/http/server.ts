@@ -11,6 +11,7 @@ import type { AppConfig } from '@/config/env';
 import type { AccountRepository, ConfigRepository, PositionRepository } from '@/domain/ports';
 import type { GeckoTerminalGateway } from '@/infrastructure/geckoterminal/geckoterminal-gateway';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import type { NetworthSnapshotRepository } from '@/infrastructure/persistence/networth-snapshot-repository';
 import type { PushRepository } from '@/infrastructure/persistence/push-repository';
 import {
   buildSiwsMessage,
@@ -49,6 +50,7 @@ export type ServerDeps = {
   accounts: AccountRepository;
   backfill: ResidualBackfill;
   walletPnl: WalletPnlService;
+  networthSnapshots: NetworthSnapshotRepository;
   notifications: NotificationManager;
   presence: PresenceTracker;
   pushRepo: PushRepository;
@@ -372,6 +374,7 @@ export async function buildServer(deps: ServerDeps) {
     accounts: deps.accounts,
     backfill: deps.backfill,
     walletPnl: deps.walletPnl,
+    networthSnapshots: deps.networthSnapshots,
     notifications: deps.notifications,
     presence: deps.presence,
     pushRepo: deps.pushRepo,

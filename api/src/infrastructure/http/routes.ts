@@ -15,6 +15,7 @@ import type { WalletPnlService } from '@/application/wallet-pnl-service';
 import type { AccountRepository, ConfigRepository, PositionRepository } from '@/domain/ports';
 import type { GeckoTerminalGateway } from '@/infrastructure/geckoterminal/geckoterminal-gateway';
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import type { NetworthSnapshotRepository } from '@/infrastructure/persistence/networth-snapshot-repository';
 import type { PushRepository, PushSub } from '@/infrastructure/persistence/push-repository';
 import { renderClosedPnlCard } from '@/infrastructure/share-card/pnl-card';
 import { TtlCache, VersionedCache } from '@/util/cache';
@@ -33,6 +34,8 @@ export type RouteDeps = {
   accounts: AccountRepository;
   backfill: ResidualBackfill;
   walletPnl: WalletPnlService;
+  /** Forward-only persisted Net Worth (TRUE on-chain wallet total over time). */
+  networthSnapshots: NetworthSnapshotRepository;
   notifications: NotificationManager;
   presence: PresenceTracker;
   pushRepo: PushRepository;
@@ -60,6 +63,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     accounts,
     backfill,
     walletPnl,
+    networthSnapshots,
     notifications,
     presence,
     pushRepo,
@@ -224,6 +228,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return curveCache.wrap(`curve|${req.query.wallet ?? 'all'}|${days}`, wallets, () =>
       walletPnl.curve(wallets, days),
     );
+  });
+
+  // The REAL Net Worth curve, reconstructed per UTC day from the ledger: NetWorth(day) = on-chain cash
+  // (cumulative wallet_flows ≡ getBalance) + at-cost capital deployed in positions OPEN that day. This
+  // traces true net worth (it does NOT plunge when capital is deployed into an LP). `days` = window
+  // length (default 30). Same scope resolution as /wallet/pnl-curve — `wallet=all` aggregates the
+  // caller's watchlist.
+  app.get<{ Querystring: { wallet?: string; days?: string } }>('/networth/curve', async (req) => {
+    const days = Math.min(3650, Math.max(1, Number(req.query.days) || 30));
+    const wallets = await scopeWallets(req.account!.id, req.query.wallet);
+    const sinceSec = days >= 3650 ? 0 : Math.floor((Date.now() - days * 86_400_000) / 1000);
+    return { points: await networthSnapshots.reconstructedCurve(wallets, sinceSec) };
   });
 
   // OHLCV candles for a pool's position price chart (GeckoTerminal, in SOL = our range unit). Cached

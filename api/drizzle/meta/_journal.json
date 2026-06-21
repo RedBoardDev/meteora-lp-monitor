@@ -71,6 +71,13 @@
       "when": 1781900000000,
       "tag": "0009_session_and_nonce_purpose",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781962167367,
+      "tag": "0010_lumpy_baron_zemo",
+      "breakpoints": true
     }
   ]
 }

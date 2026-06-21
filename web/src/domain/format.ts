@@ -75,6 +75,16 @@ export function fmtDate(epochMs: number | null): string {
   return new Date(epochMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+/** Like fmtDate but with the year — used in chart tooltips, whose curves span multiple years. */
+export function fmtDateFull(epochMs: number | null): string {
+  if (epochMs == null) return '—';
+  return new Date(epochMs).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 /** Truncate a base58 address for display: "HXUi…E5a6y". */
 export function shortAddr(addr: string, head = 4, tail = 4): string {
   if (addr.length <= head + tail + 1) return addr;

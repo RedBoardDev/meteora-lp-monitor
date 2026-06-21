@@ -3,6 +3,7 @@ import type {
   Bucket,
   Candle,
   ClosedPosition,
+  NetworthCurve,
   PositionBins,
   PositionHistory,
   ProfitBucket,
@@ -86,6 +87,10 @@ export const api = {
    *  position-level history misses. `days` = window length. */
   walletPnlCurve: (scope: string, days: number) =>
     get<WalletPnlCurve>(`wallet/pnl-curve?wallet=${encodeURIComponent(scope)}&days=${days}`),
+
+  /** The forward-only TRUE Net Worth curve (on-chain wallet total = tvl + idle, sampled over time). */
+  networthCurve: (scope: string, days: number) =>
+    get<NetworthCurve>(`networth/curve?wallet=${encodeURIComponent(scope)}&days=${days}`),
 
   /** SOL spot price in USD for the display-currency toggle (null when unavailable). */
   solUsd: () => get<{ price: number | null }>('sol-usd'),

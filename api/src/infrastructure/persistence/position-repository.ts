@@ -174,6 +174,20 @@ export class PostgresPositionRepository implements PositionRepository {
     return rows.map(rowToOpen);
   }
 
+  async positionStatusForWallet(
+    wallet: string,
+  ): Promise<Map<string, { status: string; closedAt: number | null }>> {
+    const rows = await this.db
+      .select({
+        a: positionsTable.positionAddress,
+        s: positionsTable.status,
+        c: positionsTable.closedAt,
+      })
+      .from(positionsTable)
+      .where(eq(positionsTable.wallet, wallet));
+    return new Map(rows.map((r) => [r.a, { status: r.s, closedAt: r.c }]));
+  }
+
   async getClosed(
     wallets: string[],
     opts: {
