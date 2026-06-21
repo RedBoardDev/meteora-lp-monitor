@@ -34,18 +34,26 @@ const read = async (repo: PostgresPositionRepository) =>
   (await repo.getClosed(['w'], { page: 1, pageSize: 10 })).rows[0]!;
 
 describe('PostgresPositionRepository — closed PnL', () => {
-  it('keeps the market reprice (residual @ market) when a later pool-price resync re-upserts', async () => {
+  it('serves the bin mark (pnl_sol) for the Positions view, never the market_pnl_sol reprice', async () => {
     const repo = await newRepo();
+    const closedAt = Date.now(); // within the settle window so a re-upsert of the bin mark applies
     await repo.upsertClosed([
-      { ...base, positionAddress: 'A', pnlSol: -0.19, pnlSource: 'market' },
+      // pnlSource 'market' writes BOTH pnl_sol and market_pnl_sol to this value initially.
+      { ...base, positionAddress: 'A', closedAt, pnlSol: -0.01, pnlSource: 'market' },
     ]);
-    expect((await read(repo)).pnlSol).toBeCloseTo(-0.19);
-    await repo.upsertClosed([{ ...base, positionAddress: 'A', pnlSol: -0.01, pnlSource: 'pool' }]);
-    expect((await read(repo)).pnlSol).toBeCloseTo(-0.19); // market value survives the pool-mark resync
-    expect((await read(repo)).pnlSource).toBe('market');
+    // The FIFO real-cash reprice lands in market_pnl_sol; it must NOT change the served Positions PnL.
+    await repo.setAuthoritativePnl('A', -0.19);
+    expect((await read(repo)).pnlSol).toBeCloseTo(-0.01); // bin mark, not the -0.19 reprice
+    expect((await read(repo)).pnlSource).toBe('pool');
+    // A later pool-price resync re-marks the bin mark while still in-window — that IS the served value.
+    await repo.upsertClosed([
+      { ...base, positionAddress: 'A', closedAt, pnlSol: -0.013, pnlSource: 'pool' },
+    ]);
+    expect((await read(repo)).pnlSol).toBeCloseTo(-0.013);
+    expect((await read(repo)).pnlSource).toBe('pool');
   });
 
-  it('falls back to the pool mark when never repriced', async () => {
+  it('serves the pool/bin mark with a pool source', async () => {
     const repo = await newRepo();
     await repo.upsertClosed([{ ...base, positionAddress: 'B', pnlSol: -0.028, pnlSource: 'pool' }]);
     expect((await read(repo)).pnlSol).toBeCloseTo(-0.028);
@@ -61,19 +69,20 @@ describe('PostgresPositionRepository — closed PnL', () => {
     expect((await read(repo)).pnlPctSol).toBeCloseTo(1.892, 2);
   });
 
-  it('setAuthoritativePnl (LPAgent) overrides even after freeze, and survives a later resync', async () => {
+  it('setAuthoritativePnl writes market_pnl_sol (for the realPnl chart) without touching the served bin mark', async () => {
     const repo = await newRepo();
     const closedAt = Date.now() - 300_000; // past the settle/freeze window
     await repo.upsertClosed([
       { ...base, positionAddress: 'F', closedAt, pnlSol: -0.01, pnlSource: 'pool' },
     ]);
-    await repo.setAuthoritativePnl('F', -0.19174); // LPAgent's market-valued PnL
-    expect((await read(repo)).pnlSol).toBeCloseTo(-0.19174);
-    // The 90s pool-price resync must not clobber the LPAgent value.
+    await repo.setAuthoritativePnl('F', -0.19174); // LPAgent's market-valued PnL → market_pnl_sol only
+    // The Positions view serves the frozen bin mark, not the reprice.
+    expect((await read(repo)).pnlSol).toBeCloseTo(-0.01);
+    // The frozen bin mark also resists a later pool-price resync.
     await repo.upsertClosed([
       { ...base, positionAddress: 'F', closedAt, pnlSol: -0.02, pnlSource: 'pool' },
     ]);
-    expect((await read(repo)).pnlSol).toBeCloseTo(-0.19174);
+    expect((await read(repo)).pnlSol).toBeCloseTo(-0.01);
   });
 });
 
