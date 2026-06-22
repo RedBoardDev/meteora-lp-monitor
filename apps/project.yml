@@ -1,25 +1,25 @@
-name: MeteoraLPMonitor
+name: Binsight
 options:
-  bundleIdPrefix: com.meteoralpmonitor
+  bundleIdPrefix: com.binsight
   deploymentTarget:
     macOS: "14.0"
     iOS: "17.0"
   createIntermediateGroups: true
 
 packages:
-  MeteoraLPMonitorKit:
-    path: MeteoraLPMonitorKit
+  BinsightKit:
+    path: BinsightKit
 
 targets:
-  MeteoraLPMonitorMac:
+  BinsightMac:
     type: application
     platform: macOS
     sources:
-      - MeteoraLPMonitorMac
+      - BinsightMac
     dependencies:
-      - package: MeteoraLPMonitorKit
+      - package: BinsightKit
     info:
-      path: MeteoraLPMonitorMac/Info.generated.plist
+      path: BinsightMac/Info.generated.plist
       properties:
         LSUIElement: true
         CFBundleDisplayName: LP Monitor
@@ -27,9 +27,9 @@ targets:
         MLPMApiURL: "$(MLPM_API_URL)"
     settings:
       base:
-        PRODUCT_NAME: MeteoraLPMonitor
+        PRODUCT_NAME: Binsight
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        PRODUCT_BUNDLE_IDENTIFIER: com.meteoralpmonitor.mac
+        PRODUCT_BUNDLE_IDENTIFIER: com.binsight.mac
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
@@ -37,15 +37,15 @@ targets:
         ENABLE_HARDENED_RUNTIME: NO
         MLPM_API_URL: http://localhost:8787
 
-  MeteoraLPMonitoriOS:
+  BinsightiOS:
     type: application
     platform: iOS
     sources:
-      - MeteoraLPMonitoriOS
+      - BinsightiOS
     dependencies:
-      - package: MeteoraLPMonitorKit
+      - package: BinsightKit
     info:
-      path: MeteoraLPMonitoriOS/Info.generated.plist
+      path: BinsightiOS/Info.generated.plist
       properties:
         CFBundleDisplayName: LP Monitor
         UILaunchScreen: {}
@@ -55,9 +55,9 @@ targets:
         MLPMApiURL: "$(MLPM_API_URL)"
     settings:
       base:
-        PRODUCT_NAME: MeteoraLPMonitor
+        PRODUCT_NAME: Binsight
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        PRODUCT_BUNDLE_IDENTIFIER: com.meteoralpmonitor.ios
+        PRODUCT_BUNDLE_IDENTIFIER: com.binsight.ios
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO

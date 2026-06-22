@@ -1,4 +1,4 @@
-import MeteoraLPMonitorKit
+import BinsightKit
 import SwiftUI
 
 /// Tracks whether the iOS app is foreground, so presence reports active only then
@@ -6,7 +6,7 @@ import SwiftUI
 private final class ForegroundState { var active = true }
 
 @main
-struct MeteoraLPMonitoriOSApp: App {
+struct BinsightiOSApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var store = PortfolioStore()
     @State private var client: LiveClient

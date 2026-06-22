@@ -1,17 +1,17 @@
 # Binsight — macOS + iOS clients
 
 SwiftUI clients for the Binsight API. macOS is a menu-bar agent; iOS is a
-full app. Both share **MeteoraLPMonitorKit**. Design: `DESIGN.md`.
+full app. Both share **BinsightKit**. Design: `DESIGN.md`.
 
 ## Structure
 
 ```
 apps/
-  MeteoraLPMonitorKit/      shared Swift package (no AppKit/UIKit in the core)
-    Sources/MeteoraLPMonitorKit/{Models,Networking,State,Notifications,Formatting,UI}
-    Tests/MeteoraLPMonitorKitTests
-  MeteoraLPMonitorMac/      macOS menu-bar app (MenuBarExtra) — thin shell
-  MeteoraLPMonitoriOS/      iOS app (NavigationStack) — thin shell
+  BinsightKit/      shared Swift package (no AppKit/UIKit in the core)
+    Sources/BinsightKit/{Models,Networking,State,Notifications,Formatting,UI}
+    Tests/BinsightKitTests
+  BinsightMac/      macOS menu-bar app (MenuBarExtra) — thin shell
+  BinsightiOS/      iOS app (NavigationStack) — thin shell
   project.yml        XcodeGen: the package + both app targets
 ```
 
@@ -29,7 +29,7 @@ make install-ios TEAM=XXXXXXXXXX # physical iPhone (needs your Apple ID team —
 ```
 
 Helpers: `make team-id` (lists your Apple Team IDs), `make xcode` (open the project),
-`make apps-gen` (regenerate `MeteoraLPMonitor.xcodeproj`). First run installs XcodeGen via Homebrew.
+`make apps-gen` (regenerate `Binsight.xcodeproj`). First run installs XcodeGen via Homebrew.
 
 ### Zero config: API URL + token are baked from `.env`
 
@@ -51,11 +51,11 @@ If CLI device detection fails, `make xcode` → pick your iPhone → ⌘R does t
 
 ### Manual / CLI checks
 ```sh
-cd apps/MeteoraLPMonitorKit && swift test
+cd apps/BinsightKit && swift test
 ```
 
 ## How it fits the system
 
 - Each client sends presence over the WebSocket (`device: mac | ios`). While a client is
   active, events show as native notifications there; otherwise the backend pushes to Bark.
-- Planned: App Group (`group.com.meteoralpmonitor`) + WidgetKit/Live Activity (P2/P3).
+- Planned: App Group (`group.com.binsight`) + WidgetKit/Live Activity (P2/P3).

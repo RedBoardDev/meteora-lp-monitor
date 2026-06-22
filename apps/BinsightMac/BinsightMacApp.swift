@@ -1,8 +1,8 @@
-import MeteoraLPMonitorKit
+import BinsightKit
 import SwiftUI
 
 @main
-struct MeteoraLPMonitorMacApp: App {
+struct BinsightMacApp: App {
     @State private var store = PortfolioStore()
     @State private var client: LiveClient
     @State private var presence = MacPresence()

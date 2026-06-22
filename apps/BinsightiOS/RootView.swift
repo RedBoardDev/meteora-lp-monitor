@@ -1,4 +1,4 @@
-import MeteoraLPMonitorKit
+import BinsightKit
 import SwiftUI
 
 struct RootView: View {
