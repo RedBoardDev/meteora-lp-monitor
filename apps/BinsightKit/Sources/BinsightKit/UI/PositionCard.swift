@@ -4,7 +4,6 @@ import SwiftUI
 /// PnL (SOL + %), size/age, fees, and the range bar.
 public struct PositionCard: View {
     let p: OpenPosition
-    @State private var hovering = false
 
     public init(p: OpenPosition) { self.p = p }
 
@@ -13,6 +12,7 @@ public struct PositionCard: View {
             HStack(alignment: .center, spacing: 8) {
                 Text("\(p.tokenX)/\(p.tokenY)").font(.system(size: 13, weight: .semibold))
                 RangeBadge(status: p.rangeStatus)
+                if let s = p.strategy { StrategyBadge(family: s) }
                 PositionLinks(wallet: p.wallet, positionAddress: p.positionAddress, mint: p.tokenXMint)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 0) {
@@ -36,7 +36,6 @@ public struct PositionCard: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .cardSurface(elevated: hovering)
-        .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
+        .cardSurface()
     }
 }

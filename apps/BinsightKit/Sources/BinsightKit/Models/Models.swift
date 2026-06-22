@@ -4,6 +4,14 @@ import Foundation
 
 public enum RangeStatus: String, Codable, Sendable { case `in`, out_up, out_down, unknown }
 
+/// DLMM liquidity shape the position was opened with, resolved server-side from the open transaction.
+/// Raw values match the wire enum (`@binsight/shared`). Nil until resolved (or if resolution failed).
+public enum StrategyFamily: String, Codable, Sendable {
+    case spot = "Spot"
+    case curve = "Curve"
+    case bidAsk = "BidAsk"
+}
+
 /// Client-side Solana address validation, mirrors the server's WalletSchema (base58, 32–44 chars;
 /// rejects 0x/EVM & junk). A local guard so an obviously-malformed address never hits the network —
 /// the backend re-validates.
@@ -45,6 +53,7 @@ public struct OpenPosition: Codable, Identifiable, Sendable {
     public let maxPrice: Double
     public let poolPrice: Double?
     public let openedAt: Double?
+    public let strategy: StrategyFamily?
 }
 
 public struct WalletState: Codable, Sendable {

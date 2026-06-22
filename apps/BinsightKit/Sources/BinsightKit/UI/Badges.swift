@@ -39,8 +39,24 @@ public struct RangeBadge: View {
     }
 }
 
-/// Claimed (✓) + unclaimed (◷) fees rendered with SF Symbols instead of unicode glyphs, with the
-/// fee yield as a percent of position size. Shared by the open-position card on both platforms.
+/// Compact, neutral chip for the position's DLMM strategy (Spot/Curve/BidAsk) — mirrors the web's
+/// strategy badge. Deliberately uncoloured so it reads as a different facet than the range status.
+public struct StrategyBadge: View {
+    let family: StrategyFamily
+
+    public init(family: StrategyFamily) { self.family = family }
+
+    public var body: some View {
+        Text(family.rawValue)
+            .font(.system(size: 10, weight: .semibold))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// Cumulative fees earned by the position — claimed + unclaimed as a single SOL figure (no split,
+/// no yield percent). Shared by the open-position card on both platforms.
 public struct FeesLabel: View {
     let position: OpenPosition
 
@@ -49,11 +65,8 @@ public struct FeesLabel: View {
     public var body: some View {
         HStack(spacing: 5) {
             Text("Fees")
-            Image(systemName: "checkmark.circle")
-            Text(abs3(position.claimedFeesSol))
-            Image(systemName: "clock")
-            Text(abs3(position.unclaimedFeesSol))
-            Text("(\(feeYield(position)))")
+            Image(systemName: "centsign.circle")
+            Text(abs3(position.claimedFeesSol + position.unclaimedFeesSol))
         }
         .font(.data(11))
         .foregroundStyle(.secondary)

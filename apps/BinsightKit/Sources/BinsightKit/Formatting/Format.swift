@@ -25,7 +25,3 @@ public func ageString(_ openedAt: Double?) -> String {
     if secs < 86_400 { return "\(Int(secs / 3600))h" }
     return "\(Int(secs / 86_400))d"
 }
-
-public func feeYield(_ p: OpenPosition) -> String {
-    pctOf(p.claimedFeesSol + p.unclaimedFeesSol, p.sizeSol)
-}
