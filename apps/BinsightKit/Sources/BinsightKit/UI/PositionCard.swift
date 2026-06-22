@@ -4,6 +4,7 @@ import SwiftUI
 /// PnL (SOL + %), size/age, fees, and the range bar.
 public struct PositionCard: View {
     let p: OpenPosition
+    @State private var hovering = false
 
     public init(p: OpenPosition) { self.p = p }
 
@@ -13,7 +14,10 @@ public struct PositionCard: View {
                 Text("\(p.tokenX)/\(p.tokenY)").font(.system(size: 13, weight: .semibold))
                 RangeBadge(status: p.rangeStatus)
                 if let s = p.strategy { StrategyBadge(family: s) }
+                // Always laid out (reserves space so the card never resizes); just faded in on hover.
                 PositionLinks(wallet: p.wallet, positionAddress: p.positionAddress, mint: p.tokenXMint)
+                    .opacity(showLinks ? 1 : 0)
+                    .allowsHitTesting(showLinks)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 0) {
                     Text("\(signed(p.pnlSol)) SOL")
@@ -37,5 +41,15 @@ public struct PositionCard: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardSurface()
+        .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
+    }
+
+    // macOS: reveal the quick-links only while the row is hovered (declutter). iOS (touch) always shows.
+    private var showLinks: Bool {
+        #if os(macOS)
+            return hovering
+        #else
+            return true
+        #endif
     }
 }
