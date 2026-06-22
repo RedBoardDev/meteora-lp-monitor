@@ -121,7 +121,7 @@ function AuthCard() {
 
   return (
     <main className="grid min-h-dvh place-items-center px-6">
-      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-8 shadow-pop">
+      <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-pop sm:p-8">
         <div className="mb-7 flex flex-col items-center gap-3 text-center">
           {/* biome-ignore lint/performance/noImgElement: tiny static brand mark, no layout cost */}
           <img src="/icon.svg" alt="" width={56} height={56} className="size-14 rounded-2xl" />

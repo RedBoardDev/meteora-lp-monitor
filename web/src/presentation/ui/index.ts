@@ -7,6 +7,7 @@ export { EmptyState } from './empty-state';
 export {
   IconArrowDown,
   IconArrowUp,
+  IconChartBar,
   IconChartToggle,
   IconCheck,
   IconClose,
@@ -15,6 +16,7 @@ export {
   IconExternal,
   IconEye,
   IconEyeOff,
+  IconHistory,
   IconLayers,
   IconRefresh,
   IconSearch,
@@ -27,6 +29,7 @@ export { Input } from './input';
 export { Modal } from './modal';
 export { RangeBar } from './range-bar';
 export { Segmented } from './segmented';
+export { Sheet } from './sheet';
 export { Skeleton } from './skeleton';
 export { SolAmount } from './sol-amount';
 export { Stat } from './stat';

@@ -2,67 +2,48 @@
 
 import { Suspense, useEffect } from 'react';
 import { usePortfolio } from '@/application/stores/portfolio-store';
-import { type Tab, useUi } from '@/application/stores/ui-store';
+import { startSolUsdPolling } from '@/application/stores/sol-usd-store';
 import { useWallets } from '@/application/stores/wallets-store';
-import { Tabs } from '@/presentation/ui';
-import { AppShell } from './app-shell';
-import { ClosedPositionsTable } from './closed-positions-table';
-import { EmptyWallets } from './empty-wallets';
-import { IndexingBanner } from './indexing-banner';
-import { OpenPositionsTable } from './open-positions-table';
-import { PositionDrawer } from './position-drawer';
-import { StatsPanel } from './stats-panel';
-import { SummaryCard } from './summary-card';
-import { TabsActions } from './tabs-actions';
+import { useIsMobile, useMounted } from '@/presentation/hooks/use-media-query';
+import { MobileApp } from '@/presentation/mobile/mobile-app';
+import { DesktopShell } from './desktop-shell';
 import { UrlState } from './url-state';
 
-const TABS: { label: string; value: Tab }[] = [
-  { label: 'Positions', value: 'positions' },
-  { label: 'Stats', value: 'stats' },
-  { label: 'History', value: 'history' },
-];
-
+/**
+ * Single fork point between the frozen desktop composition ({@link DesktopShell}) and the dedicated
+ * mobile tree ({@link MobileApp}). Owns all shared bootstrap — the portfolio live feed, the wallet
+ * list refresh and the SOL/USD poll — so neither shell duplicates it. The mount gate avoids a
+ * first-paint flash between the SSR default and the resolved client viewport; only the chosen
+ * subtree mounts, so stores/queries are never subscribed twice.
+ */
 export function Dashboard() {
   const start = usePortfolio((s) => s.start);
   const stop = usePortfolio((s) => s.stop);
-  const tab = useUi((s) => s.tab);
-  const setTab = useUi((s) => s.setTab);
-  const noWallets = useWallets((s) => s.loaded && s.wallets.length === 0);
+  const refreshWallets = useWallets((s) => s.refresh);
+  const stopWallets = useWallets((s) => s.stop);
+  const mounted = useMounted();
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     start();
     return () => stop();
   }, [start, stop]);
 
+  useEffect(() => {
+    void refreshWallets();
+    const stopSolUsd = startSolUsdPolling();
+    return () => {
+      stopWallets();
+      stopSolUsd();
+    };
+  }, [refreshWallets, stopWallets]);
+
   return (
     <div className="min-h-dvh">
       <Suspense fallback={null}>
         <UrlState />
       </Suspense>
-      <AppShell />
-      <main className="mx-auto flex max-w-6xl flex-col gap-5 px-6 py-6">
-        {noWallets ? (
-          <EmptyWallets />
-        ) : (
-          <>
-            <div className="rise">
-              <SummaryCard />
-            </div>
-            <IndexingBanner />
-            <div className="flex items-end justify-between gap-3 border-border border-b">
-              <Tabs options={TABS} value={tab} onChange={setTab} />
-              <TabsActions />
-            </div>
-            {/* Mounted per tab (not CSS-hidden), so the Stats fetches + chart only run when opened. */}
-            <div key={tab} className="rise">
-              {tab === 'positions' && <OpenPositionsTable />}
-              {tab === 'stats' && <StatsPanel />}
-              {tab === 'history' && <ClosedPositionsTable />}
-            </div>
-          </>
-        )}
-      </main>
-      <PositionDrawer />
+      {mounted ? isMobile ? <MobileApp /> : <DesktopShell /> : null}
     </div>
   );
 }

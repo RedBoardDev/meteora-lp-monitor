@@ -1,11 +1,10 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect } from 'react';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { usePrefs } from '@/application/stores/prefs-store';
 import { useSession } from '@/application/stores/session-store';
-import { startSolUsdPolling, useSolUsd } from '@/application/stores/sol-usd-store';
+import { useSolUsd } from '@/application/stores/sol-usd-store';
 import { useUi } from '@/application/stores/ui-store';
 import { useWallets } from '@/application/stores/wallets-store';
 import { shortAddr } from '@/domain/format';
@@ -28,7 +27,6 @@ export function AppShell() {
   const setScope = usePortfolio((s) => s.setScope);
   const wallets = useWallets((s) => s.wallets);
   const refreshWallets = useWallets((s) => s.refresh);
-  const stopWallets = useWallets((s) => s.stop);
   const settingsOpen = useUi((s) => s.settingsOpen);
   const setSettingsOpen = useUi((s) => s.setSettingsOpen);
   const hideAmounts = usePrefs((s) => s.hideAmounts);
@@ -36,15 +34,6 @@ export function AppShell() {
   const currency = usePrefs((s) => s.currency);
   const setCurrency = usePrefs((s) => s.setCurrency);
   const solUsd = useSolUsd((s) => s.rate);
-
-  useEffect(() => {
-    void refreshWallets();
-    const stopSolUsd = startSolUsdPolling();
-    return () => {
-      stopWallets();
-      stopSolUsd();
-    };
-  }, [refreshWallets, stopWallets]);
 
   const options = [
     { label: 'All', value: 'all' },
