@@ -4,7 +4,7 @@ import Security
 /// Minimal Keychain store for secrets (the auth password, exchanged for a short-lived JWT by
 /// `Auth`). Cross-platform (macOS + iOS).
 enum Keychain {
-    private static let service = "com.meteoralpmonitor"
+    private static let service = "com.binsight"
 
     static func get(_ account: String) -> String? {
         let query: [String: Any] = [
