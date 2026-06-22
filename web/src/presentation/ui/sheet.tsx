@@ -1,6 +1,6 @@
 'use client';
 
-import { AnimatePresence, motion, type PanInfo } from 'motion/react';
+import { AnimatePresence, motion, type PanInfo, useDragControls } from 'motion/react';
 import type { ReactNode } from 'react';
 import { useFocusTrap } from '@/presentation/hooks/use-focus-trap';
 import { IconClose } from './icons';
@@ -23,6 +23,9 @@ const DISMISS_VELOCITY = 600;
  */
 export function Sheet({ open, onClose, title, children }: SheetProps) {
   const panelRef = useFocusTrap<HTMLElement>(open, onClose);
+  // Drag is scoped to the grab handle (dragListener disabled on the panel) so it never competes with
+  // the scrollable body — a downward flick inside the content scrolls, it doesn't dismiss the sheet.
+  const dragControls = useDragControls();
 
   function onDragEnd(_e: unknown, info: PanInfo) {
     if (info.offset.y > DISMISS_OFFSET || info.velocity.y > DISMISS_VELOCITY) onClose();
@@ -50,12 +53,17 @@ export function Sheet({ open, onClose, title, children }: SheetProps) {
             exit={{ y: '100%' }}
             transition={{ type: 'spring', stiffness: 320, damping: 34 }}
             drag="y"
+            dragListener={false}
+            dragControls={dragControls}
             dragConstraints={{ top: 0, bottom: 0 }}
             dragElastic={{ top: 0, bottom: 0.6 }}
             onDragEnd={onDragEnd}
           >
-            {/* Grab handle — also the primary drag affordance. */}
-            <div className="flex shrink-0 cursor-grab justify-center pt-2.5 pb-1 active:cursor-grabbing">
+            {/* Grab handle — the drag affordance (touch-none so the gesture drags, not scrolls). */}
+            <div
+              onPointerDown={(e) => dragControls.start(e)}
+              className="flex shrink-0 cursor-grab touch-none justify-center pt-2.5 pb-2 active:cursor-grabbing"
+            >
               <div className="h-1 w-9 rounded-full bg-border-strong" />
             </div>
             <header className="flex shrink-0 items-center justify-between gap-3 px-5 py-3">

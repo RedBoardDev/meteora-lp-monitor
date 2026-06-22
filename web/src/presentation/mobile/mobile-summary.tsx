@@ -11,9 +11,9 @@ import { Badge, Card, cn, Skeleton, SolMark, toneText } from '@/presentation/ui'
 const pctOf = (value: number, basis: number) => (basis > 0 ? (value / basis) * 100 : 0);
 
 /**
- * Mobile portfolio header, modelled on the macOS widget / iOS app: uPnL hero + Wallet on top, then a
- * Fees · TVL · Today strip. Distinct from the desktop {@link SummaryCard} (Net Worth framing) — kept
- * as its own component so the desktop header stays untouched.
+ * Compact global mobile header (rendered on every tab): Net Worth hero + Today only, to stay small on
+ * a phone. The richer metrics live in {@link MobilePortfolioStats} on the Positions tab. Its own
+ * component (not the desktop {@link SummaryCard}) so the desktop header stays untouched.
  */
 export function MobileSummary() {
   const portfolio = usePortfolio((s) => s.portfolio);
@@ -29,8 +29,6 @@ export function MobileSummary() {
   const today = stats?.todayPnlSol ?? null;
   const todayTone = today != null ? toneOf(today) : 'neutral';
 
-  // Compact global header (every tab): Net Worth + Today only. The richer metrics live in a box on
-  // the Positions tab ({@link MobilePortfolioStats}) so this stays small on a phone.
   return (
     <Card className="p-4">
       <div className="flex items-start justify-between gap-3">
