@@ -1,7 +1,7 @@
-type ClientDevice = 'mac' | 'ios' | 'web';
+type ClientDevice = 'mac' | 'web';
 
 /**
- * Tracks presence from any interactive client (Mac/iOS/web) via WebSocket heartbeats. Each
+ * Tracks presence from any interactive client (Mac/web) via WebSocket heartbeats. Each
  * client reports `active` based on real presence (foreground, not idle/asleep/locked).
  * Routing: any client active → show native in that app; none active → push to Bark.
  *  - `active:false` expires that device immediately (sleep/lock/background), no timeout wait.

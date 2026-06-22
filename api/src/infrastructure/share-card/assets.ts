@@ -19,6 +19,6 @@ function resolveAssetsDir(): string {
   throw new Error('share-card assets directory not found (expected api/assets/share-card)');
 }
 
-export const shareCardAssetsDir = resolveAssetsDir();
+const shareCardAssetsDir = resolveAssetsDir();
 
 export const shareCardAsset = (file: string): string => join(shareCardAssetsDir, file);

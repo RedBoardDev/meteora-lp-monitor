@@ -12,7 +12,7 @@ export const API_URL = process.env.API_URL ?? 'http://localhost:8787';
 
 export const SESSION_COOKIE = 'mlpm_session';
 
-export function sessionCookieOptions(maxAgeSeconds: number) {
+function sessionCookieOptions(maxAgeSeconds: number) {
   return {
     httpOnly: true,
     sameSite: 'lax' as const,

@@ -11,16 +11,16 @@ describe('PresenceTracker', () => {
 
   it('explicit inactive flips immediately (sleep/lock/background)', () => {
     const p = new PresenceTracker(30_000);
-    p.heartbeat('ios', true);
+    p.heartbeat('web', true);
     expect(p.isAnyClientActive()).toBe(true);
-    p.heartbeat('ios', false);
+    p.heartbeat('web', false);
     expect(p.isAnyClientActive()).toBe(false);
   });
 
   it('any device counts as active (one asleep, one foreground)', () => {
     const p = new PresenceTracker(30_000);
     p.heartbeat('mac', false);
-    p.heartbeat('ios', true);
+    p.heartbeat('web', true);
     expect(p.isAnyClientActive()).toBe(true);
   });
 
@@ -33,9 +33,9 @@ describe('PresenceTracker', () => {
   it('activeDevices lists only currently-active devices (drives native-vs-Bark routing)', () => {
     const p = new PresenceTracker(30_000);
     p.heartbeat('mac', false); // e.g. Mac with notifications muted → reports inactive
-    p.heartbeat('ios', true);
-    expect(p.activeDevices()).toEqual(['ios']);
-    p.heartbeat('ios', false); // iOS app closed too → nothing active → routing falls to Bark
+    p.heartbeat('web', true);
+    expect(p.activeDevices()).toEqual(['web']);
+    p.heartbeat('web', false); // web client closed too → nothing active → routing falls to Bark
     expect(p.activeDevices()).toEqual([]);
   });
 });

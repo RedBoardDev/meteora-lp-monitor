@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 /** Display currency for money values. USD multiplies SOL by the live SOL/USD rate. */
-export type Currency = 'SOL' | 'USD';
+type Currency = 'SOL' | 'USD';
 
 type PrefsState = {
   /** Mask every money value as asterisks — for screenshots / sharing the curve publicly. */

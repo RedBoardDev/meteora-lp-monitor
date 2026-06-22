@@ -14,10 +14,7 @@ const fieldStr = (v: unknown): string =>
  * solSide is null for a non-SOL-quote pool (neither token is SOL) — still returned so callers can surface
  * the position flagged rather than drop it. Null only on a missing/undecodable account. Cache per pool.
  */
-export async function loadPoolMeta(
-  conn: Connection,
-  pool: PublicKey,
-): Promise<LoadedPoolMeta | null> {
+async function loadPoolMeta(conn: Connection, pool: PublicKey): Promise<LoadedPoolMeta | null> {
   const info = await conn.getAccountInfo(pool);
   if (!info) return null;
   let lb: Record<string, unknown>;

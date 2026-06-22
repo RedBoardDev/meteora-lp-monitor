@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
  * first client render before hydration) the server snapshot is returned — see {@link useMounted}
  * for gating UI that must not flash between the server default and the resolved client value.
  */
-export function useMediaQuery(query: string, serverSnapshot = false): boolean {
+function useMediaQuery(query: string, serverSnapshot = false): boolean {
   const subscribe = useCallback(
     (onChange: () => void) => {
       const mql = window.matchMedia(query);
@@ -24,7 +24,7 @@ export function useMediaQuery(query: string, serverSnapshot = false): boolean {
 }
 
 /** The single mobile/desktop divide for the whole app: below Tailwind's `md` (768px) = mobile. */
-export const MOBILE_BREAKPOINT = 768;
+const MOBILE_BREAKPOINT = 768;
 
 /**
  * True on phone-sized viewports (< 768px). The one fork point between the desktop composition and

@@ -13,8 +13,6 @@ const TIMEFRAMES: Record<string, { tf: 'minute' | 'hour' | 'day'; aggregate: num
   '1d': { tf: 'day', aggregate: 1 },
 };
 
-export const GECKOTERMINAL_TIMEFRAMES = Object.keys(TIMEFRAMES);
-
 /**
  * OHLCV candles for a Solana pool from GeckoTerminal (free, no key). Prices are requested with
  * `currency=token&token=base`, i.e. the base token quoted in the pool's quote token (SOL for our
