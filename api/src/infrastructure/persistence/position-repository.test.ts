@@ -1,4 +1,4 @@
-import type { ClosedPosition } from '@binsight/shared';
+import type { ClosedPosition, OpenPosition } from '@binsight/shared';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
@@ -21,6 +21,27 @@ const base: Omit<ClosedPosition, 'positionAddress' | 'pnlSol' | 'pnlSource'> = {
   openedAt: 1,
   closedAt: 2,
   durationSeconds: 1,
+};
+
+const openBase: Omit<OpenPosition, 'positionAddress'> = {
+  wallet: 'w',
+  poolAddress: 'p',
+  tokenX: 'MEME',
+  tokenY: 'SOL',
+  tokenXMint: 'mint',
+  strategy: null,
+  sizeSol: 10,
+  pnlSol: 0,
+  pnlPctSol: 0,
+  claimedFeesSol: 0,
+  unclaimedFeesSol: 0,
+  rangeStatus: 'in',
+  minPrice: 0,
+  maxPrice: 0,
+  poolPrice: null,
+  outOfRangeSince: null,
+  openedAt: 5,
+  updatedAt: 5,
 };
 
 // Fresh in-memory Postgres (PGlite) per test, with the real Drizzle migrations applied.
@@ -87,15 +108,20 @@ describe('PostgresPositionRepository — strategy', () => {
     expect((await read(repo)).strategy).toBe('BidAsk'); // travels onto the closed read
   });
 
-  it('addressesMissingStrategy lists unresolved closed positions and drops them once set', async () => {
+  it('addressesMissingStrategy lists unresolved positions (open ones first) and drops them once set', async () => {
     const repo = await newRepo();
     await repo.upsertClosed([
       { ...base, positionAddress: 'M1', pnlSol: 0, pnlSource: 'pool' },
       { ...base, positionAddress: 'M2', pnlSol: 0, pnlSource: 'pool' },
     ]);
+    // An OPEN position missing its strategy must be backfilled too — and prioritised, since it drives
+    // the live card/badge. (Regression guard: the query used to be closed-only.)
+    await repo.replaceOpenForWallet('w', [{ ...openBase, positionAddress: 'O1' }]);
+    const missing = await repo.addressesMissingStrategy(10);
+    expect(missing[0]).toBe('O1'); // open first
+    expect(missing.slice(1).sort()).toEqual(['M1', 'M2']);
+    await repo.setStrategy('O1', 'Spot');
     expect((await repo.addressesMissingStrategy(10)).sort()).toEqual(['M1', 'M2']);
-    await repo.setStrategy('M1', 'Spot');
-    expect(await repo.addressesMissingStrategy(10)).toEqual(['M2']);
   });
 });
 
