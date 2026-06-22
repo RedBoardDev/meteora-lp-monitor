@@ -177,6 +177,14 @@ body {
   scrollbar-color: var(--color-border-strong) transparent;
 }
 
+/* Hide the scrollbar on horizontally-scrolled rows (mobile scope chips, etc.) — scroll still works. */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

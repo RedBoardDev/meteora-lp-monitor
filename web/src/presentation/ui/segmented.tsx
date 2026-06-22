@@ -27,7 +27,8 @@ export function Segmented<T extends string>({
           aria-pressed={value === o.value}
           onClick={() => onChange(o.value)}
           className={cn(
-            'rounded-sm px-3 py-1 font-medium text-xs transition-colors duration-150',
+            // Mobile-first: py-1.5 for an easier touch target; `md:py-1` restores the compact desktop control.
+            'rounded-sm px-3 py-1.5 font-medium text-xs transition-colors duration-150 md:py-1',
             value === o.value
               ? 'bg-accent-soft text-accent shadow-[inset_0_0_0_1px_var(--color-border-strong)]'
               : 'text-muted hover:bg-highlight hover:text-text',

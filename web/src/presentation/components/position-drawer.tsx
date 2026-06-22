@@ -7,6 +7,7 @@ import { fmtAmount, fmtDate, fmtDuration, rangeLabel, shortAddr } from '@/domain
 import { type OpenPositionEntity, toneOf } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';
 import { useCopy } from '@/presentation/hooks/use-copy';
+import { useIsMobile } from '@/presentation/hooks/use-media-query';
 import { useMoney } from '@/presentation/hooks/use-money';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import {
@@ -17,6 +18,7 @@ import {
   IconCheck,
   IconCopy,
   IconExternal,
+  Sheet,
   Skeleton,
   SolAmount,
   Stat,
@@ -42,22 +44,25 @@ const fmtApr = (apr: number | null): string =>
 export function PositionDrawer() {
   const selected = useUi((s) => s.selected);
   const select = useUi((s) => s.select);
+  const isMobile = useIsMobile();
+  // Same content, different chrome: a bottom sheet on phones, the right-side drawer on desktop.
+  const Container = isMobile ? Sheet : Drawer;
 
   return (
-    <Drawer
+    <Container
       open={selected != null}
       onClose={() => select(null)}
       title={selected && <DrawerTitle selected={selected} />}
     >
       {selected && <DrawerBody key={selected.address} selected={selected} />}
-    </Drawer>
+    </Container>
   );
 }
 
 function DrawerTitle({ selected }: { selected: SelectedPosition & object }) {
   return (
-    <div className="flex items-center gap-2">
-      <span className="font-medium text-sm text-text">{selected.pair}</span>
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="truncate font-medium text-sm text-text">{selected.pair}</span>
       <a
         href={`https://solscan.io/account/${selected.address}`}
         target="_blank"
@@ -159,7 +164,7 @@ function OpenSummary({ p }: { p: OpenPositionEntity }) {
   return (
     <section>
       <SectionTitle>Position</SectionTitle>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-4 md:gap-x-6">
         <Stat label="Value" value={<SolAmount n={p.sizeSol} />} />
         <Stat
           label="Unrealized PnL"
@@ -193,7 +198,7 @@ function ClosedSummary({ p }: { p: ClosedPosition }) {
   return (
     <section>
       <SectionTitle>Summary</SectionTitle>
-      <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-4 md:gap-x-6">
         <Stat
           label="Realized PnL"
           tone={toneOf(p.pnlSol)}

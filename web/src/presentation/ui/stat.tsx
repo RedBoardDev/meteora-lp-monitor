@@ -16,7 +16,9 @@ export function Stat({ label, value, sub, tone = 'neutral', className }: StatPro
   return (
     <div className={cn('flex flex-col gap-1', className)}>
       <span className="font-medium text-faint text-xs uppercase tracking-wide">{label}</span>
-      <span className={cn('tabular font-semibold text-2xl leading-none', toneText[tone])}>
+      <span
+        className={cn('tabular font-semibold text-xl leading-none md:text-2xl', toneText[tone])}
+      >
         {value}
       </span>
       {sub != null && <span className="tabular text-muted text-sm">{sub}</span>}

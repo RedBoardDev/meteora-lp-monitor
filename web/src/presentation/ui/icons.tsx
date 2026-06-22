@@ -86,6 +86,20 @@ export const IconTrophy = (p: IconProps) => (
   </Icon>
 );
 
+export const IconChartBar = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 21h18M7 21v-6M12 21V8M17 21v-9" />
+  </Icon>
+);
+
+export const IconHistory = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M3 3v5h5" />
+    <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+    <path d="M12 7v5l4 2" />
+  </Icon>
+);
+
 export const IconCopy = (p: IconProps) => (
   <Icon size={14} {...p}>
     <rect x="9" y="9" width="11" height="11" rx="2" />

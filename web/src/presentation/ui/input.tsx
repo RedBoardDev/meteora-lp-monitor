@@ -11,7 +11,9 @@ export function Input({
     <input
       ref={ref}
       className={cn(
-        'w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-text transition-colors placeholder:text-faint focus:border-border-strong',
+        // Mobile-first: text-base avoids iOS focus-zoom and py-2.5 gives a ~44px tap target; `md:` restores
+        // the exact desktop sizing (text-sm / py-2) so the ≥768px appearance is unchanged.
+        'w-full rounded-md border border-border bg-bg px-3 py-2.5 text-base text-text transition-colors placeholder:text-faint focus:border-border-strong md:py-2 md:text-sm',
         className,
       )}
       {...props}

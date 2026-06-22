@@ -1,14 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { usePortfolio } from '@/application/stores/portfolio-store';
+import { useState } from 'react';
 import { useUi } from '@/application/stores/ui-store';
 import { fmtDuration, fmtRelative } from '@/domain/format';
-import { ClosedPositionEntity } from '@/domain/position';
-import type { ClosedQuery } from '@/infrastructure/api/client';
-import { api } from '@/infrastructure/api/client';
+import type { ClosedPositionEntity } from '@/domain/position';
+import {
+  CLOSED_RESULTS,
+  CLOSED_SORTS,
+  useClosedQuery,
+} from '@/presentation/hooks/use-closed-query';
 import { useMoney } from '@/presentation/hooks/use-money';
-import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import {
   Card,
   CardHeader,
@@ -23,7 +24,6 @@ import {
   Input,
   Segmented,
 } from '@/presentation/ui';
-import { SEARCH_DEBOUNCE_MS } from '@/presentation/ui/timing';
 import { Pagination } from './pagination';
 import { PnlCell, PoolActions, RowHeader, RowShell, RowSkeleton, TokenPair } from './position-row';
 
@@ -31,69 +31,32 @@ import { PnlCell, PoolActions, RowHeader, RowShell, RowSkeleton, TokenPair } fro
 // gets the lion's share; the remaining columns hold short numbers and don't need the slack.
 const CLOSED_COLS = '2.6fr 0.7fr 0.9fr 0.9fr 1fr 0.9fr';
 
-const PAGE_SIZE = 10;
-
-const RESULTS = [
-  { label: 'All', value: 'all' as const },
-  { label: 'Wins', value: 'win' as const },
-  { label: 'Losses', value: 'loss' as const },
-];
-const SORTS = [
-  { label: 'Recent', value: 'recent' as const },
-  { label: 'PnL', value: 'pnl' as const },
-  { label: 'Fees', value: 'fees' as const },
-  { label: 'Held', value: 'duration' as const },
-];
-
 export function ClosedPositionsTable() {
-  const scope = usePortfolio((s) => s.scope);
-  const closedVersion = usePortfolio((s) => s.closedVersion);
-  const historyQuery = useUi((s) => s.historyQuery);
-  const [page, setPage] = useState(1);
-  const [qInput, setQInput] = useState('');
-  const [q, setQ] = useState('');
-  const [result, setResult] = useState<NonNullable<ClosedQuery['result']>>('all');
-  const [sort, setSort] = useState<NonNullable<ClosedQuery['sort']>>('recent');
-  const [dir, setDir] = useState<NonNullable<ClosedQuery['dir']>>('desc');
+  const {
+    hasData,
+    qInput,
+    setQInput,
+    q,
+    result,
+    setResult,
+    sort,
+    setSort,
+    dir,
+    setDir,
+    page,
+    setPage,
+    rows,
+    total,
+    pages,
+    loading,
+    stale,
+    error,
+    refetch,
+    exportCsv,
+  } = useClosedQuery();
   const [openChart, setOpenChart] = useState<string | null>(null);
-
-  // Debounce the search box so typing doesn't fire a request per keystroke.
-  useEffect(() => {
-    const t = setTimeout(() => setQ(qInput.trim()), SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(t);
-  }, [qInput]);
-
-  // An external token filter (clicking a Stats pair → filterByToken) drives the search box.
-  useEffect(() => {
-    if (historyQuery) setQInput(historyQuery);
-  }, [historyQuery]);
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset to page 1 on scope/filter change.
-  useEffect(() => setPage(1), [scope, q, result, sort, dir]);
-
-  const { data, loading, stale, error, refetch } = useScopedQuery(
-    () => api.closed(scope, page, PAGE_SIZE, { q, result, sort, dir }),
-    [scope, page, closedVersion, q, result, sort, dir],
-  );
-
-  const rows = (data?.rows ?? []).map((r) => new ClosedPositionEntity(r));
-  const total = data?.total ?? 0;
-  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const now = Date.now();
   const toggleChart = (addr: string) => setOpenChart((c) => (c === addr ? null : addr));
-
-  // CSV of the CURRENT filter (cookie-authed download, so a plain <a> carries the session).
-  function exportCsv() {
-    const params = new URLSearchParams({ wallet: scope, sort, dir });
-    if (q) params.set('q', q);
-    if (result !== 'all') params.set('result', result);
-    const a = document.createElement('a');
-    a.href = `/api/positions/closed.csv?${params.toString()}`;
-    a.download = 'meteora-closed-positions.csv';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  }
 
   return (
     <Card>
@@ -125,12 +88,12 @@ export function ClosedPositionsTable() {
             </button>
           )}
         </div>
-        <Segmented options={RESULTS} value={result} onChange={setResult} />
+        <Segmented options={CLOSED_RESULTS} value={result} onChange={setResult} />
         <div className="ml-auto flex items-center gap-2">
-          <Segmented options={SORTS} value={sort} onChange={setSort} />
+          <Segmented options={CLOSED_SORTS} value={sort} onChange={setSort} />
           <button
             type="button"
-            onClick={() => setDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+            onClick={() => setDir(dir === 'asc' ? 'desc' : 'asc')}
             aria-label={dir === 'asc' ? 'Sort ascending' : 'Sort descending'}
             className="rounded-md bg-surface-2 p-1.5 text-muted transition-colors hover:bg-hover hover:text-text"
           >
@@ -149,14 +112,14 @@ export function ClosedPositionsTable() {
         </div>
       </div>
 
-      {error && !data ? (
+      {error && !hasData ? (
         <EmptyState
           variant="error"
           title="Couldn't load history"
           hint="Check the connection."
           onRetry={refetch}
         />
-      ) : loading && !data ? (
+      ) : loading && !hasData ? (
         <RowSkeleton gridCols={CLOSED_COLS} />
       ) : rows.length === 0 ? (
         <EmptyState
