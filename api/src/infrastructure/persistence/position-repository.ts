@@ -337,11 +337,17 @@ export class PostgresPositionRepository implements PositionRepository {
   }
 
   async addressesMissingStrategy(limit: number): Promise<string[]> {
+    // Any position still missing its strategy — OPEN ones first (they drive the live card/badge,
+    // where the burst one-shot resolution often loses to RPC rate-limits), then the closed-history
+    // tail. Paced resolution in StrategyService.backfill succeeds where the live get() didn't stick.
     const rows = await this.db
       .select({ a: positionsTable.positionAddress })
       .from(positionsTable)
-      .where(and(eq(positionsTable.status, 'closed'), isNull(positionsTable.strategy)))
-      .orderBy(desc(positionsTable.closedAt))
+      .where(isNull(positionsTable.strategy))
+      .orderBy(
+        sql`case when ${positionsTable.status} = 'open' then 0 else 1 end`,
+        desc(positionsTable.openedAt),
+      )
       .limit(limit);
     return rows.map((r) => r.a);
   }

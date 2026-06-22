@@ -101,7 +101,7 @@ public struct CardSurface: ViewModifier {
     public func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return content
-            .background(elevated ? Theme.surface2 : Theme.surface)
+            .background(fill)
             .clipShape(shape)
             .overlay(shape.strokeBorder(Theme.border, lineWidth: 1))
             .overlay(
@@ -115,5 +115,16 @@ public struct CardSurface: ViewModifier {
                 .clipShape(shape)
                 .allowsHitTesting(false),
             )
+    }
+
+    /// Card fill. macOS: a faint light lift over the panel's translucent material so the card reads
+    /// as a *raised* surface (like iOS cards do over the near-black system background) instead of an
+    /// opaque dark patch. iOS: the solid brand surface on the near-black system background.
+    private var fill: Color {
+        #if os(macOS)
+            return Color.white.opacity(elevated ? 0.10 : 0.07)
+        #else
+            return elevated ? Theme.surface2 : Theme.surface
+        #endif
     }
 }

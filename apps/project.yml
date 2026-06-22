@@ -22,7 +22,7 @@ targets:
       path: BinsightMac/Info.generated.plist
       properties:
         LSUIElement: true
-        CFBundleDisplayName: LP Monitor
+        CFBundleDisplayName: Binsight
         NSHumanReadableCopyright: ""
         MLPMApiURL: "$(MLPM_API_URL)"
     settings:
@@ -47,7 +47,7 @@ targets:
     info:
       path: BinsightiOS/Info.generated.plist
       properties:
-        CFBundleDisplayName: LP Monitor
+        CFBundleDisplayName: Binsight
         UILaunchScreen: {}
         NSLocalNetworkUsageDescription: Connect to your Binsight API on the local network.
         NSAppTransportSecurity:
