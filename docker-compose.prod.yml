@@ -4,7 +4,7 @@
 #
 #   docker compose -f docker-compose.prod.yml up -d --build
 #
-name: meteora
+name: binsight
 
 services:
   postgres:
