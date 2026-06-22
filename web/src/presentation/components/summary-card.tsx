@@ -104,9 +104,7 @@ export function SummaryCard() {
               )
             }
             sub={
-              today != null && t.walletTotalSol > 0
-                ? m.pct((today / t.walletTotalSol) * 100)
-                : '—'
+              today != null && t.walletTotalSol > 0 ? m.pct((today / t.walletTotalSol) * 100) : '—'
             }
           />
           <Stat
