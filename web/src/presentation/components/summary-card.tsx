@@ -48,6 +48,9 @@ export function SummaryCard() {
     () => api.networthCurve(scope, ALL_TIME_DAYS),
     [scope, closedVersion],
   );
+  // Today's realized PnL comes from the backend (/stats.todayPnlSol) — the single source of truth, the
+  // exact value the macOS/iOS apps show. The client must NOT re-derive it (that drifted from the apps).
+  const { data: stats } = useScopedQuery(() => api.stats(scope), [scope, closedVersion]);
   if (!portfolio) return <SummarySkeleton />;
 
   const t = portfolio.totals;
@@ -60,12 +63,9 @@ export function SummaryCard() {
   // funding moves, not intraday trading — so the last persisted value is the right "now" baseline).
   const apportsLast = points.at(-1)?.apports ?? 0;
   const realPnlNow = t.walletTotalSol - apportsLast;
-  // Yesterday = the last reconstructed curve point STRICTLY before today (the curve's last point IS today).
-  const todayStr = new Date(Date.now()).toISOString().slice(0, 10);
-  const past = points.filter((p) => p.date < todayStr);
-  const yesterdayPoint = past.length > 0 ? past[past.length - 1]! : null;
-  // TODAY = day-over-day real-PnL evolution (live now − yesterday's real PnL). CAN be negative.
-  const today = yesterdayPoint != null ? realPnlNow - realPnlAt(yesterdayPoint) : null;
+  // TODAY = realized PnL from positions CLOSED since midnight — computed once by the backend
+  // (/stats.todayPnlSol) and shared verbatim with the macOS/iOS apps. Not re-derived here.
+  const today = stats?.todayPnlSol ?? null;
   // GAIN (period) = realPnl(now) − realPnl(start of the selected period). The REAL performance, net of
   // apports — CAN be negative (e.g. a lifetime trading loss). On-chain verified.
   const startPoint = startPointOf(points, period, Date.now());
@@ -106,7 +106,7 @@ export function SummaryCard() {
             sub={
               today != null && t.walletTotalSol > 0
                 ? m.pct((today / t.walletTotalSol) * 100)
-                : 'Real PnL Δ'
+                : '—'
             }
           />
           <Stat
