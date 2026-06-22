@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Shared "Connection" settings section (API URL + wallet address + password → JWT + error +
-/// Save & reconnect). Used by both the macOS and iOS Settings screens. `onSaved` lets the host
-/// reconnect (and, on iOS, dismiss) after a successful save. Renders a grouped `Section` — drop it
+/// Save & reconnect). Used by the macOS Settings screen. `onSaved` lets the host
+/// reconnect after a successful save. Renders a grouped `Section` — drop it
 /// inside a `Form`. Sign-in only; creating an account / resetting a password is done on the web (they
 /// require a wallet signature).
 public struct ConnectionSettingsSection: View {
@@ -54,12 +54,8 @@ public struct ConnectionSettingsSection: View {
 }
 
 extension View {
-    /// No autocapitalize / autocorrect for URL-style fields, cross-platform.
+    /// No autocorrect for URL-style fields.
     fileprivate func connectionInput() -> some View {
-        #if os(iOS)
-            return textInputAutocapitalization(.never).autocorrectionDisabled()
-        #else
-            return autocorrectionDisabled()
-        #endif
+        autocorrectionDisabled()
     }
 }

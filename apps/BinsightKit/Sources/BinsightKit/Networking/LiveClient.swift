@@ -1,6 +1,6 @@
 import Foundation
 
-public enum ClientDevice: String, Sendable { case mac, ios, web }
+public enum ClientDevice: String, Sendable { case mac, web }
 
 /// @MainActor: the mutable connection state (socket/backoff/stopped/started/reconnecting/heartbeat)
 /// is touched from URLSession completion handlers and Tasks. Pinning the whole class to the main

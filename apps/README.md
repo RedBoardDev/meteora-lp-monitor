@@ -1,61 +1,50 @@
-# Binsight — macOS + iOS clients
+# Binsight — macOS menu-bar app
 
-SwiftUI clients for the Binsight API. macOS is a menu-bar agent; iOS is a
-full app. Both share **BinsightKit**. Design: `DESIGN.md`.
+SwiftUI menu-bar client for the Binsight API. The mobile experience now lives in the web **PWA**;
+this app is the always-on desktop glance (menu-bar agent).
 
 ## Structure
 
 ```
 apps/
-  BinsightKit/      shared Swift package (no AppKit/UIKit in the core)
+  BinsightKit/      shared Swift package (no AppKit in the core)
     Sources/BinsightKit/{Models,Networking,State,Notifications,Formatting,UI}
     Tests/BinsightKitTests
   BinsightMac/      macOS menu-bar app (MenuBarExtra) — thin shell
-  BinsightiOS/      iOS app (NavigationStack) — thin shell
-  project.yml        XcodeGen: the package + both app targets
+  project.yml       XcodeGen: the package + the macOS app target
 ```
 
-The package holds everything portable (wire types, WS/REST clients, store, notifier,
-formatters, shared SwiftUI components). Each app target only owns its presentation shell.
+`BinsightKit` holds everything portable (wire types, WS/REST clients, store, notifier, formatters,
+shared SwiftUI components). `BinsightMac` owns only the menu-bar presentation shell.
 
-## Install (one command each, from the repo root)
-
-Each device is independent — run only the one(s) you want:
+## Install (from the repo root)
 
 ```sh
-make install-mac                 # macOS menu-bar app → /Applications, then launches it
-make run-ios                     # iOS app on the Simulator (no Apple ID needed)
-make install-ios TEAM=XXXXXXXXXX # physical iPhone (needs your Apple ID team — see make team-id)
+make install-mac    # build + install to /Applications, then launch
 ```
 
-Helpers: `make team-id` (lists your Apple Team IDs), `make xcode` (open the project),
-`make apps-gen` (regenerate `Binsight.xcodeproj`). First run installs XcodeGen via Homebrew.
+Helpers: `make xcode` (open the project), `make apps-gen` (regenerate `Binsight.xcodeproj`),
+`make apps-test` (run the BinsightKit unit tests). First run installs XcodeGen via Homebrew.
 
-### Zero config: API URL + token are baked from `.env`
+### Zero config: API URL + token baked from `.env`
 
-`make` reads the repo `.env` at build time and bakes the defaults into the app
-(`API_TOKEN` → token; URL → `localhost` by default). Nothing to type on first launch.
-You can still override anything in the app's **Settings** (persisted to Keychain/UserDefaults).
+`make` reads the repo `.env` at build time and bakes the defaults (URL → `localhost`; token). You can
+override anything in the app's **Settings** (persisted to Keychain/UserDefaults).
 
-For a **physical iPhone** `localhost` won't reach the Mac, so set the reachable address in `.env`:
-```sh
-CLIENT_API_URL=http://<mac-LAN-or-tailscale-ip>:8787   # optional; mac & simulator ignore it
-```
-(The iOS Info.plist already allows plaintext local-network HTTP for LAN/Tailscale.)
+### Signing (for notifications)
 
-### iPhone signing (Apple requirement)
-
-`make install-ios` needs `TEAM=` (a free Apple ID works; apps expire after 7 days, reinstall).
-First launch on device: **Settings → General → VPN & Device Management → trust your cert**.
-If CLI device detection fails, `make xcode` → pick your iPhone → ⌘R does the same.
+`make install-mac` auto-signs with your local Apple Development cert if one exists (the app is
+non-sandboxed, so no provisioning profile is needed); otherwise it falls back to an unsigned build.
+A signed build is needed for native notifications.
 
 ### Manual / CLI checks
+
 ```sh
-cd apps/BinsightKit && swift test
+cd apps/BinsightKit && swift test     # or: make apps-test
 ```
 
 ## How it fits the system
 
-- Each client sends presence over the WebSocket (`device: mac | ios`). While a client is
-  active, events show as native notifications there; otherwise the backend pushes to Bark.
-- Planned: App Group (`group.com.binsight`) + WidgetKit/Live Activity (P2/P3).
+While the macOS app is active, range/close events show as native macOS notifications; when it's away
+(asleep / locked / idle) the backend routes to Bark instead. Mobile is covered by the web PWA
+(Web Push).

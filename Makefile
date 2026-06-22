@@ -112,7 +112,7 @@ apps-test: ## Run the shared Swift package tests (BinsightKit)
 	cd $(APPS)/BinsightKit && swift test --scratch-path $(BUILD_DIR)/spm
 
 .PHONY: install-mac
-install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to sign (needed for notifs)
+install-mac: apps-gen ## macOS: build + install to /Applications, then launch (auto-signs with your dev cert if present — needed for notifs)
 	cd $(APPS) && xcodebuild -scheme BinsightMac -configuration Release \
 		-derivedDataPath $(BUILD_DIR)/mac $(MAC_SIGN) $(MLPM_BAKE) build
 	@killall Binsight 2>/dev/null && sleep 1 || true
@@ -120,36 +120,6 @@ install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to s
 	cp -R $(BUILD_DIR)/mac/Build/Products/Release/Binsight.app /Applications/
 	open /Applications/Binsight.app
 	@echo "✓ Binsight is in the menu bar (API URL + token baked from .env)."
-
-.PHONY: run-ios
-run-ios: apps-gen ## iOS: build & launch on a simulator (no Apple ID needed)
-	cd $(APPS) && xcodebuild -scheme BinsightiOS -configuration Debug \
-		-destination 'generic/platform=iOS Simulator' -derivedDataPath $(BUILD_DIR)/ios-sim \
-		CODE_SIGNING_ALLOWED=NO $(MLPM_BAKE) build
-	@UDID=$$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print $$2; exit}'); \
-		xcrun simctl boot $$UDID 2>/dev/null || true; open -a Simulator; \
-		xcrun simctl install $$UDID $(BUILD_DIR)/ios-sim/Build/Products/Debug-iphonesimulator/Binsight.app; \
-		xcrun simctl launch $$UDID com.binsight.ios
-	@echo "✓ Binsight running in the Simulator (reaches the Mac API on localhost)."
-
-.PHONY: install-ios
-install-ios: apps-gen ## iPhone: build + install on a plugged-in device (auto-detects your Team)
-	@TEAM_ID="$(TEAM)"; \
-		[ -n "$$TEAM_ID" ] || TEAM_ID=$$(security find-identity -v -p codesigning | grep -oE '\([A-Z0-9]{10}\)' | tr -d '()' | head -1); \
-		test -n "$$TEAM_ID" || { echo "No signing identity — add your Apple ID in Xcode → Settings → Accounts, then retry."; exit 1; }; \
-		echo "→ signing iOS with team $$TEAM_ID"; \
-		cd $(APPS) && xcodebuild -scheme BinsightiOS -configuration Debug \
-			-destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=$$TEAM_ID \
-			-derivedDataPath $(BUILD_DIR)/ios $(MLPM_BAKE) build
-	@DEV=$$(xcrun devicectl list devices 2>/dev/null | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1); \
-		test -n "$$DEV" || { echo "No connected iPhone found. Unlock it & trust this Mac, or run 'make xcode' → ⌘R."; exit 1; }; \
-		xcrun devicectl device install app --device $$DEV $(BUILD_DIR)/ios/Build/Products/Debug-iphoneos/Binsight.app
-	@echo "✓ Installed. On the iPhone: Settings → General → VPN & Device Management → trust your dev cert."
-
-.PHONY: team-id
-team-id: ## Print Apple Development Team IDs from your keychain (for install-ios TEAM=...)
-	@security find-identity -v -p codesigning | grep -oE '\([A-Z0-9]{10}\)' | tr -d '()' | sort -u; \
-		echo "(or Xcode → Settings → Accounts → your Apple ID → Team)"
 
 ## ─── Housekeeping ────────────────────────────────────────────────────────
 .PHONY: clean

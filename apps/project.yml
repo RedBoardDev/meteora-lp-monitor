@@ -3,7 +3,6 @@ options:
   bundleIdPrefix: com.binsight
   deploymentTarget:
     macOS: "14.0"
-    iOS: "17.0"
   createIntermediateGroups: true
 
 packages:
@@ -35,33 +34,4 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
         ENABLE_HARDENED_RUNTIME: NO
-        MLPM_API_URL: http://localhost:8787
-
-  BinsightiOS:
-    type: application
-    platform: iOS
-    sources:
-      - BinsightiOS
-    dependencies:
-      - package: BinsightKit
-    info:
-      path: BinsightiOS/Info.generated.plist
-      properties:
-        CFBundleDisplayName: Binsight
-        UILaunchScreen: {}
-        NSLocalNetworkUsageDescription: Connect to your Binsight API on the local network.
-        NSAppTransportSecurity:
-          NSAllowsLocalNetworking: true
-        MLPMApiURL: "$(MLPM_API_URL)"
-    settings:
-      base:
-        PRODUCT_NAME: Binsight
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        PRODUCT_BUNDLE_IDENTIFIER: com.binsight.ios
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
-        GENERATE_INFOPLIST_FILE: NO
-        SWIFT_VERSION: "5.0"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGN_STYLE: Automatic
         MLPM_API_URL: http://localhost:8787

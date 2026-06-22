@@ -45,11 +45,5 @@ public struct PositionCard: View {
     }
 
     // macOS: reveal the quick-links only while the row is hovered (declutter). iOS (touch) always shows.
-    private var showLinks: Bool {
-        #if os(macOS)
-            return hovering
-        #else
-            return true
-        #endif
-    }
+    private var showLinks: Bool { hovering }
 }

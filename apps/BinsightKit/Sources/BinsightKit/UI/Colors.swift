@@ -1,7 +1,5 @@
+import AppKit
 import SwiftUI
-#if os(macOS)
-    import AppKit
-#endif
 
 /// Brand palette, mapped from the web design tokens (web/src/app/globals.css) so all three
 /// clients share one premium-dark identity instead of leaning on system .green/.red/.accentColor.
@@ -15,8 +13,6 @@ public enum Theme {
     public static let outRange = Color(hex: 0xF5B948)
 
     // Surfaces / chrome greys
-    public static let surface = Color(hex: 0x141927)
-    public static let surface2 = Color(hex: 0x1B2233)
     public static let border = Color.white.opacity(0.08)
 
     // Depth accent: a faint top-edge highlight.
@@ -71,13 +67,9 @@ func isOut(_ s: RangeStatus) -> Bool { s == .out_up || s == .out_down }
 public extension View {
     /// macOS: show the pointing-hand cursor while hovering a clickable control. No-op on iOS.
     func pointingHandCursor() -> some View {
-        #if os(macOS)
-            return onHover { hovering in
-                if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
-        #else
-            return self
-        #endif
+        onHover { hovering in
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
     }
 
     /// Shared data-update animation: snap instantly under reduce-motion, else the entrance curve.
@@ -117,14 +109,9 @@ public struct CardSurface: ViewModifier {
             )
     }
 
-    /// Card fill. macOS: a faint light lift over the panel's translucent material so the card reads
-    /// as a *raised* surface (like iOS cards do over the near-black system background) instead of an
-    /// opaque dark patch. iOS: the solid brand surface on the near-black system background.
+    /// Card fill — a faint light lift over the panel's translucent material so the card reads as a
+    /// *raised* surface instead of an opaque dark patch.
     private var fill: Color {
-        #if os(macOS)
-            return Color.white.opacity(elevated ? 0.10 : 0.07)
-        #else
-            return elevated ? Theme.surface2 : Theme.surface
-        #endif
+        Color.white.opacity(elevated ? 0.10 : 0.07)
     }
 }

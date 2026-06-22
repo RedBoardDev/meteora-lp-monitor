@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared wallets editor (used in both macOS and iOS Settings). Lists monitored wallets
+/// Wallets editor (macOS Settings). Lists monitored wallets
 /// with delete + an add row, validates the address client-side, and surfaces API errors.
 /// `onChange` lets the host resync after a change.
 public struct WalletsEditor: View {
@@ -92,12 +92,8 @@ public struct WalletsEditor: View {
 }
 
 extension View {
-    /// No autocapitalize / autocorrect for address-style fields, cross-platform.
+    /// No autocorrect for address-style fields.
     fileprivate func plainInput() -> some View {
-        #if os(iOS)
-            return textInputAutocapitalization(.never).autocorrectionDisabled()
-        #else
-            return autocorrectionDisabled()
-        #endif
+        autocorrectionDisabled()
     }
 }
