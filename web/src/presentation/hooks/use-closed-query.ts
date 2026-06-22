@@ -8,7 +8,7 @@ import { api, type ClosedQuery } from '@/infrastructure/api/client';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import { SEARCH_DEBOUNCE_MS } from '@/presentation/ui/timing';
 
-export const CLOSED_PAGE_SIZE = 10;
+const CLOSED_PAGE_SIZE = 10;
 
 export const CLOSED_RESULTS = [
   { label: 'All', value: 'all' as const },

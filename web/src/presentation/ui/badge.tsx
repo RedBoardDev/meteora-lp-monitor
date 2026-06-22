@@ -1,7 +1,7 @@
 import type { HTMLAttributes } from 'react';
 import { cn } from './cn';
 
-export type BadgeTone = 'neutral' | 'profit' | 'loss' | 'in' | 'out' | 'accent' | 'warn';
+type BadgeTone = 'neutral' | 'profit' | 'loss' | 'in' | 'out' | 'accent' | 'warn';
 
 const TONES: Record<BadgeTone, string> = {
   neutral: 'bg-surface-2 text-muted',

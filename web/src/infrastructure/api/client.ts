@@ -53,7 +53,7 @@ async function getBlob(path: string, accept: string, signal?: AbortSignal): Prom
   return res.blob();
 }
 
-export type ClosedPage = { rows: ClosedPosition[]; total: number };
+type ClosedPage = { rows: ClosedPosition[]; total: number };
 
 /** The caller's own identity, from `/auth/me`. */
 export type AccountIdentity = { address: string; isOwner: boolean };
@@ -142,7 +142,7 @@ export const api = {
 };
 
 /** Result of asking the backend for a signature challenge (register / reset step 1). */
-export type NonceResult =
+type NonceResult =
   | { ok: true; nonce: string; message: string }
   | { ok: false; status: number; error?: string; notWhitelisted?: boolean };
 

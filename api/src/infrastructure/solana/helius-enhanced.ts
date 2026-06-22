@@ -495,7 +495,7 @@ export function parseSwapSell(tx: EnhancedTx, wallet: string): ResidualSell | nu
  * to a position's deposited tokens exactly like it attributes sells to residuals — i.e. the real SOL
  * entry cost of pre-bought deposited tokens (the missing piece for token/mixed-deposit positions).
  */
-export function parseSwapBuy(tx: EnhancedTx, wallet: string): ResidualSell | null {
+function parseSwapBuy(tx: EnhancedTx, wallet: string): ResidualSell | null {
   const tts = tx.tokenTransfers ?? [];
   const candidates = [
     ...new Set(

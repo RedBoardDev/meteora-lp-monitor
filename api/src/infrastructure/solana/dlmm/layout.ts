@@ -16,7 +16,7 @@ export const POSITION_V2_DISC = POSITION_V2_DISCRIMINATOR;
 export const LBPAIR_DISC = [33, 11, 49, 98, 181, 101, 177, 13] as const;
 
 export const BINS_PER_ARRAY = 70;
-export const POSITION_FIXED_SIZE = 8120; // discriminator(8) + 8112-byte body (70 inline bins)
+const POSITION_FIXED_SIZE = 8120; // discriminator(8) + 8112-byte body (70 inline bins)
 const INLINE_BINS = 70;
 const EXT_BIN_RECORD_SIZE = 112; // PositionBinData appended past 70 bins (up to 1400 total)
 const BIN_SIZE = 144;
@@ -45,7 +45,7 @@ function discMatches(b: Uint8Array, disc: readonly number[]): boolean {
 }
 
 // ── PositionV2 ────────────────────────────────────────────────────────────────
-export interface BinFeeInfo {
+interface BinFeeInfo {
   completeX: bigint;
   completeY: bigint;
   pendingX: bigint;

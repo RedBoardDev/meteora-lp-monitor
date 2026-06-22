@@ -345,7 +345,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('subscribe'), scope: z.string() }),
   z.object({
     type: z.literal('presence'),
-    device: z.enum(['mac', 'ios', 'web']),
+    device: z.enum(['mac', 'web']),
     active: z.boolean(),
   }),
   z.object({ type: z.literal('ping') }),
