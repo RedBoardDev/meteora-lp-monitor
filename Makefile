@@ -88,12 +88,12 @@ apps-tools: ## Install XcodeGen (one-off, needs Homebrew)
 	@command -v xcodegen >/dev/null || brew install xcodegen
 
 .PHONY: apps-gen
-apps-gen: apps-tools ## Generate MeteoraLPMonitor.xcodeproj from project.yml
+apps-gen: apps-tools ## Generate Binsight.xcodeproj from project.yml
 	cd $(APPS) && xcodegen generate
 
 .PHONY: xcode
 xcode: apps-gen ## Open the Binsight project in Xcode
-	open $(APPS)/MeteoraLPMonitor.xcodeproj
+	open $(APPS)/Binsight.xcodeproj
 
 .PHONY: notify-test
 notify-test: ## Fire a test notif. Needs MLPM_ADDRESS + MLPM_PASSWORD (a registered account). KIND=oor_enter to override.
@@ -108,28 +108,28 @@ notify-test: ## Fire a test notif. Needs MLPM_ADDRESS + MLPM_PASSWORD (a registe
 		"$(MLPM_URL)/debug/notify?kind=$(or $(KIND),position_close)"; echo
 
 .PHONY: apps-test
-apps-test: ## Run the shared Swift package tests (MeteoraLPMonitorKit)
-	cd $(APPS)/MeteoraLPMonitorKit && swift test --scratch-path $(BUILD_DIR)/spm
+apps-test: ## Run the shared Swift package tests (BinsightKit)
+	cd $(APPS)/BinsightKit && swift test --scratch-path $(BUILD_DIR)/spm
 
 .PHONY: install-mac
 install-mac: apps-gen ## macOS: build + install to /Applications. TEAM=<id> to sign (needed for notifs)
-	cd $(APPS) && xcodebuild -scheme MeteoraLPMonitorMac -configuration Release \
+	cd $(APPS) && xcodebuild -scheme BinsightMac -configuration Release \
 		-derivedDataPath $(BUILD_DIR)/mac $(MAC_SIGN) $(MLPM_BAKE) build
-	@killall MeteoraLPMonitor 2>/dev/null && sleep 1 || true
-	rm -rf /Applications/MeteoraLPMonitor.app
-	cp -R $(BUILD_DIR)/mac/Build/Products/Release/MeteoraLPMonitor.app /Applications/
-	open /Applications/MeteoraLPMonitor.app
+	@killall Binsight 2>/dev/null && sleep 1 || true
+	rm -rf /Applications/Binsight.app
+	cp -R $(BUILD_DIR)/mac/Build/Products/Release/Binsight.app /Applications/
+	open /Applications/Binsight.app
 	@echo "✓ Binsight is in the menu bar (API URL + token baked from .env)."
 
 .PHONY: run-ios
 run-ios: apps-gen ## iOS: build & launch on a simulator (no Apple ID needed)
-	cd $(APPS) && xcodebuild -scheme MeteoraLPMonitoriOS -configuration Debug \
+	cd $(APPS) && xcodebuild -scheme BinsightiOS -configuration Debug \
 		-destination 'generic/platform=iOS Simulator' -derivedDataPath $(BUILD_DIR)/ios-sim \
 		CODE_SIGNING_ALLOWED=NO $(MLPM_BAKE) build
 	@UDID=$$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print $$2; exit}'); \
 		xcrun simctl boot $$UDID 2>/dev/null || true; open -a Simulator; \
-		xcrun simctl install $$UDID $(BUILD_DIR)/ios-sim/Build/Products/Debug-iphonesimulator/MeteoraLPMonitor.app; \
-		xcrun simctl launch $$UDID com.meteoralpmonitor.ios
+		xcrun simctl install $$UDID $(BUILD_DIR)/ios-sim/Build/Products/Debug-iphonesimulator/Binsight.app; \
+		xcrun simctl launch $$UDID com.binsight.ios
 	@echo "✓ Binsight running in the Simulator (reaches the Mac API on localhost)."
 
 .PHONY: install-ios
@@ -138,12 +138,12 @@ install-ios: apps-gen ## iPhone: build + install on a plugged-in device (auto-de
 		[ -n "$$TEAM_ID" ] || TEAM_ID=$$(security find-identity -v -p codesigning | grep -oE '\([A-Z0-9]{10}\)' | tr -d '()' | head -1); \
 		test -n "$$TEAM_ID" || { echo "No signing identity — add your Apple ID in Xcode → Settings → Accounts, then retry."; exit 1; }; \
 		echo "→ signing iOS with team $$TEAM_ID"; \
-		cd $(APPS) && xcodebuild -scheme MeteoraLPMonitoriOS -configuration Debug \
+		cd $(APPS) && xcodebuild -scheme BinsightiOS -configuration Debug \
 			-destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=$$TEAM_ID \
 			-derivedDataPath $(BUILD_DIR)/ios $(MLPM_BAKE) build
 	@DEV=$$(xcrun devicectl list devices 2>/dev/null | grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1); \
 		test -n "$$DEV" || { echo "No connected iPhone found. Unlock it & trust this Mac, or run 'make xcode' → ⌘R."; exit 1; }; \
-		xcrun devicectl device install app --device $$DEV $(BUILD_DIR)/ios/Build/Products/Debug-iphoneos/MeteoraLPMonitor.app
+		xcrun devicectl device install app --device $$DEV $(BUILD_DIR)/ios/Build/Products/Debug-iphoneos/Binsight.app
 	@echo "✓ Installed. On the iPhone: Settings → General → VPN & Device Management → trust your dev cert."
 
 .PHONY: team-id
@@ -154,7 +154,7 @@ team-id: ## Print Apple Development Team IDs from your keychain (for install-ios
 ## ─── Housekeeping ────────────────────────────────────────────────────────
 .PHONY: clean
 clean: ## Remove build artifacts and node_modules
-	rm -rf node_modules */node_modules */dist $(BUILD_DIR) apps/MeteoraLPMonitor.xcodeproj apps/MeteoraLPMonitorKit/.build
+	rm -rf node_modules */node_modules */dist $(BUILD_DIR) apps/Binsight.xcodeproj apps/BinsightKit/.build
 
 .PHONY: help
 help: ## Show this help

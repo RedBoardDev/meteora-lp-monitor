@@ -1,5 +1,5 @@
 import XCTest
-@testable import MeteoraLPMonitorKit
+@testable import BinsightKit
 
 final class DecodingTests: XCTestCase {
     func testStatePayloadDecodes() throws {

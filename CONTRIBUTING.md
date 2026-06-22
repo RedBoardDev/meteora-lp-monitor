@@ -12,7 +12,7 @@
 api/         Fastify + TypeScript engine (DDD/hexagonal: domain / application / infrastructure)
 shared/      zod contract shared by the API (the Swift clients mirror it)
 web/         React web client (Vite)
-apps/        SwiftUI clients sharing the MeteoraLPMonitorKit Swift package (macOS + iOS)
+apps/        SwiftUI clients sharing the BinsightKit Swift package (macOS + iOS)
 Makefile     one entrypoint: setup, dev-api, install-mac, run-ios, install-ios, verify…
 ```
 
@@ -28,7 +28,7 @@ Makefile     one entrypoint: setup, dev-api, install-mac, run-ios, install-ios, 
 ## Conventions
 
 - TypeScript: strict, no `any` without justification, Biome-clean.
-- Swift: cross-platform logic lives in `MeteoraLPMonitorKit`; app targets stay thin. No AppKit/UIKit
+- Swift: cross-platform logic lives in `BinsightKit`; app targets stay thin. No AppKit/UIKit
   in the package core. Platform-specific code behind `#if os(...)`.
 - The `shared` zod schema is the source of truth for the wire contract — update it (and the
   Swift `Models.swift` mirror) together.

@@ -6,7 +6,7 @@ import Foundation
 /// P2: switch `defaults` to `UserDefaults(suiteName: appGroup)` once the App Group
 /// entitlement is provisioned, so widgets/Live Activity read the same config.
 public enum Config {
-    public static let appGroup = "group.com.meteoralpmonitor"
+    public static let appGroup = "group.com.binsight"
 
     static var defaults: UserDefaults { .standard }
 

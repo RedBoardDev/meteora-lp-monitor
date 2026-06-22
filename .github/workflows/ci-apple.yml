@@ -1,6 +1,6 @@
 name: CI / Apple
 
-# Build + test the shared Swift package (MeteoraLPMonitorKit) on a macOS runner. The main CI never
+# Build + test the shared Swift package (BinsightKit) on a macOS runner. The main CI never
 # compiles Swift, so a kit regression (e.g. an auth-flow change) would otherwise ship unnoticed. Only
 # the SwiftPM kit is built — the macOS/iOS app targets need XcodeGen + signing and are out of CI scope.
 # Path-gated because macOS runner minutes are scarce/expensive.
@@ -9,12 +9,12 @@ on:
   push:
     branches: [main]
     paths:
-      - 'apps/MeteoraLPMonitorKit/**'
+      - 'apps/BinsightKit/**'
       - '.github/workflows/ci-apple.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'apps/MeteoraLPMonitorKit/**'
+      - 'apps/BinsightKit/**'
       - '.github/workflows/ci-apple.yml'
 
 permissions:
@@ -33,8 +33,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Build + test MeteoraLPMonitorKit
-        working-directory: apps/MeteoraLPMonitorKit
+      - name: Build + test BinsightKit
+        working-directory: apps/BinsightKit
         run: |
           swift build
           swift test
