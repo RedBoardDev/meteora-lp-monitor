@@ -1,11 +1,7 @@
+import AppKit
 import UserNotifications
-#if os(macOS)
-    import AppKit
-#else
-    import UIKit
-#endif
 
-/// Notification authorization helpers, cross-platform.
+/// Notification authorization helpers.
 public enum NotifPermission {
     public static func status() async -> UNAuthorizationStatus {
         await withCheckedContinuation { cont in
@@ -25,13 +21,7 @@ public enum NotifPermission {
 
     /// Opens the OS notification settings for this app (used when already denied).
     public static func openSystemSettings() {
-        #if os(macOS)
-            let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
-            if let url { NSWorkspace.shared.open(url) }
-        #else
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
-            }
-        #endif
+        let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")
+        if let url { NSWorkspace.shared.open(url) }
     }
 }

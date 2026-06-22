@@ -1,14 +1,9 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// Quick-link button sizing: larger touch targets on iOS, compact on macOS (pointer).
-#if os(iOS)
-    private let linkButtonSize = CGSize(width: 34, height: 30)
-    private let linkIconFont: CGFloat = 14
-#else
-    private let linkButtonSize = CGSize(width: 22, height: 20)
-    private let linkIconFont: CGFloat = 11
-#endif
+// Quick-link button sizing — compact for pointer use.
+private let linkButtonSize = CGSize(width: 22, height: 20)
+private let linkIconFont: CGFloat = 11
 
 public struct RangeBadge: View {
     let status: RangeStatus
@@ -56,7 +51,7 @@ public struct StrategyBadge: View {
 }
 
 /// Cumulative fees earned by the position — claimed + unclaimed as a single SOL figure, with the fee
-/// yield (percent of position size) alongside. Shared by the open-position card on both platforms.
+/// yield (percent of position size) alongside. Used by the open-position card.
 public struct FeesLabel: View {
     let position: OpenPosition
 
@@ -76,7 +71,7 @@ public struct FeesLabel: View {
 }
 
 /// Two discreet quick-links per position: LPAgent portfolio + GMGN token chart.
-/// Uses SwiftUI's openURL so it works on both macOS and iOS.
+/// Uses SwiftUI's openURL.
 public struct PositionLinks: View {
     @Environment(\.openURL) private var openURL
     let wallet: String
@@ -135,8 +130,8 @@ public struct PositionLinks: View {
 
 /// A position's PnL share card, fetched from the backend on demand when the user invokes Share.
 ///
-/// Modelling it as `Transferable` lets a single `ShareLink` drive the native share sheet on both
-/// iOS and macOS: the (authenticated) PNG is generated lazily — only when the user actually shares —
+/// Modelling it as `Transferable` lets a single `ShareLink` drive the native macOS share sheet:
+/// the (authenticated) PNG is generated lazily — only when the user actually shares —
 /// which also sidesteps the macOS menu-bar popover dismissing while an imperative picker is shown.
 struct PnlCardTransferable: Transferable {
     let address: String
