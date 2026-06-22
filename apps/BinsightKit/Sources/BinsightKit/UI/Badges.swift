@@ -55,18 +55,20 @@ public struct StrategyBadge: View {
     }
 }
 
-/// Cumulative fees earned by the position — claimed + unclaimed as a single SOL figure (no split,
-/// no yield percent). Shared by the open-position card on both platforms.
+/// Cumulative fees earned by the position — claimed + unclaimed as a single SOL figure, with the fee
+/// yield (percent of position size) alongside. Shared by the open-position card on both platforms.
 public struct FeesLabel: View {
     let position: OpenPosition
 
     public init(position: OpenPosition) { self.position = position }
 
     public var body: some View {
-        HStack(spacing: 5) {
+        let fees = position.claimedFeesSol + position.unclaimedFeesSol
+        return HStack(spacing: 5) {
             Text("Fees")
             Image(systemName: "centsign.circle")
-            Text(abs3(position.claimedFeesSol + position.unclaimedFeesSol))
+            Text(abs3(fees))
+            Text("(\(pctOf(fees, position.sizeSol)))")
         }
         .font(.data(11))
         .foregroundStyle(.secondary)

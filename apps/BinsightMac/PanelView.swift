@@ -177,38 +177,11 @@ struct PanelView: View {
                 Text("No closed positions yet").font(.system(size: 12)).foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
-                ForEach(store.closed) { c in closedRow(c) }
+                ForEach(store.closed) { c in ClosedRow(c: c) }
             }
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
-    }
-
-    private func closedRow(_ c: ClosedPosition) -> some View {
-        HStack(spacing: 8) {
-            Text("\(c.tokenX)/\(c.tokenY)")
-                .font(.system(size: 12, weight: .medium))
-                .lineLimit(1)
-            Spacer()
-            Text(signed(c.pnlSol))
-                .font(.data(12, weight: .semibold))
-                .foregroundStyle(pnlColor(c.pnlPctSol))
-            HStack(spacing: 3) {
-                Image(systemName: "centsign.circle")
-                Text(abs3(c.feesSol))
-            }
-            .font(.data(11))
-            .foregroundStyle(.secondary)
-            .fixedSize()
-            Text(ageString(c.closedAt))
-                .font(.data(11))
-                .foregroundStyle(.tertiary)
-                .fixedSize()
-            PositionLinks(
-                wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
-                shareAddress: c.positionAddress)
-        }
-        .padding(.vertical, 3)
     }
 
     // MARK: Footer (icon menu rows)
@@ -278,6 +251,45 @@ struct PanelView: View {
             Spacer()
             Text("\(count)").font(.data(11)).foregroundStyle(.secondary)
         }
+    }
+}
+
+/// A closed-position row: pair on the left, stats on the right. The quick-links (LPAgent / GMGN /
+/// share) stay hidden until the row is hovered — appearing beside the stats — to keep the list clean.
+private struct ClosedRow: View {
+    let c: ClosedPosition
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("\(c.tokenX)/\(c.tokenY)")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+            Spacer()
+            // Always laid out (reserves width + height so the row never resizes); just faded in on hover.
+            PositionLinks(
+                wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
+                shareAddress: c.positionAddress)
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+            Text(signed(c.pnlSol))
+                .font(.data(12, weight: .semibold))
+                .foregroundStyle(pnlColor(c.pnlPctSol))
+            HStack(spacing: 3) {
+                Image(systemName: "centsign.circle")
+                Text(abs3(c.feesSol))
+            }
+            .font(.data(11))
+            .foregroundStyle(.secondary)
+            .fixedSize()
+            Text(ageString(c.closedAt))
+                .font(.data(11))
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
     }
 }
 
