@@ -161,10 +161,19 @@ export function registerWebSocket(
 
   // Per-wallet state emit (scope = the wallet address) → only clients watching that wallet.
   bus.on('state', (state) => {
+    // The 'all'-scope aggregate is identical for every client sharing a watchlist — compute it ONCE per
+    // distinct watched-set per emit (the owner's open tabs + macOS all watch the same list), not N times.
+    const aggByWatch = new Map<string, ReturnType<typeof engine.getState>>();
     for (const c of clients) {
       if (!c.watched.has(state.scope)) continue;
       if (c.view === 'all') {
-        send(c.socket, { type: 'state', payload: engine.getState([...c.watched], 'all') });
+        const key = [...c.watched].sort().join(',');
+        let agg = aggByWatch.get(key);
+        if (!agg) {
+          agg = engine.getState([...c.watched], 'all');
+          aggByWatch.set(key, agg);
+        }
+        send(c.socket, { type: 'state', payload: agg });
       } else if (c.view === state.scope) {
         send(c.socket, { type: 'state', payload: state });
       }
@@ -189,13 +198,22 @@ export function registerWebSocket(
     const frame = JSON.stringify({ type: 'closed_changed' });
     for (const c of clients) if (c.watched.has(e.wallet)) sendRaw(c.socket, frame);
   });
-  // Health — filter the per-wallet sync list to the client's watchlist (no global wallet leak).
+  // Health — filter the per-wallet sync list to the client's watchlist (no global wallet leak). The
+  // filtered frame is identical for clients sharing a watchlist, so serialize it ONCE per distinct
+  // watched-set (this fires every 1s for every client, so the per-client re-stringify added up).
   bus.on('health', (health) => {
+    const frameByWatch = new Map<string, string>();
     for (const c of clients) {
-      send(c.socket, {
-        type: 'health',
-        payload: { ...health, wallets: health.wallets.filter((w) => c.watched.has(w.wallet)) },
-      });
+      const key = [...c.watched].sort().join(',');
+      let frame = frameByWatch.get(key);
+      if (frame === undefined) {
+        frame = JSON.stringify({
+          type: 'health',
+          payload: { ...health, wallets: health.wallets.filter((w) => c.watched.has(w.wallet)) },
+        });
+        frameByWatch.set(key, frame);
+      }
+      sendRaw(c.socket, frame);
     }
   });
 
