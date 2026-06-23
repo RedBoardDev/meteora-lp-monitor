@@ -15,11 +15,18 @@ public actor Auth {
 
     private var cachedToken: String?
     private var expiresAt: Date?
+    /// In-flight refresh, shared so concurrent callers (a cold reconnect fires several at once) await ONE
+    /// /auth/login instead of each firing its own.
+    private var refreshTask: Task<String?, Never>?
 
     /// A currently-valid JWT, refreshed from the stored password when needed. Nil if not logged in.
     public func token() async -> String? {
         if let t = cachedToken, let e = expiresAt, e > Date().addingTimeInterval(60) { return t }
-        return await refresh()
+        if let inflight = refreshTask { return await inflight.value } // coalesce concurrent refreshes
+        let task = Task { await refresh() }
+        refreshTask = task
+        defer { refreshTask = nil }
+        return await task.value
     }
 
     /// Exchange an address + password for a JWT and persist both on success.

@@ -138,7 +138,7 @@ public struct NotifRule: Codable, Identifiable, Sendable {
 }
 
 // Tagged server messages (discriminated union by `type`).
-enum ServerMessage {
+enum ServerMessage: Decodable {
     case state(WalletState)
     case event(LiveEvent)
     case notify(LiveEvent)
@@ -146,23 +146,24 @@ enum ServerMessage {
     case closedChanged
     case other
 
+    private static let decoder = JSONDecoder()
+
+    /// Decode a raw WS frame in ONE pass (was: decode an Envelope for `type`, THEN re-decode the same
+    /// bytes into PayloadWrapper<T> with a freshly-allocated JSONDecoder per call — twice per 1Hz frame).
     init(from data: Data) throws {
-        let env = try JSONDecoder().decode(Envelope.self, from: data)
-        switch env.type {
-        case "state": self = .state(try env.decodePayload(WalletState.self, data))
-        case "event": self = .event(try env.decodePayload(LiveEvent.self, data))
-        case "notify": self = .notify(try env.decodePayload(LiveEvent.self, data))
-        case "health": self = .health(try env.decodePayload(Health.self, data))
+        self = try ServerMessage.decoder.decode(ServerMessage.self, from: data)
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, payload }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .type) {
+        case "state": self = .state(try c.decode(WalletState.self, forKey: .payload))
+        case "event": self = .event(try c.decode(LiveEvent.self, forKey: .payload))
+        case "notify": self = .notify(try c.decode(LiveEvent.self, forKey: .payload))
+        case "health": self = .health(try c.decode(Health.self, forKey: .payload))
         case "closed_changed": self = .closedChanged
         default: self = .other
         }
     }
-
-    private struct Envelope: Decodable {
-        let type: String
-        func decodePayload<T: Decodable>(_: T.Type, _ data: Data) throws -> T {
-            try JSONDecoder().decode(PayloadWrapper<T>.self, from: data).payload
-        }
-    }
-    private struct PayloadWrapper<T: Decodable>: Decodable { let payload: T }
 }

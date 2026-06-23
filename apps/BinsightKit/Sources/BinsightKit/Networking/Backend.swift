@@ -20,52 +20,42 @@ public enum Backend {
         return req
     }
 
-    static func get<T: Decodable>(_ path: String) async -> T? {
-        // One retry: a 401 means the JWT expired — drop it and re-login via Auth, then try again.
+    /// Perform `path` with ONE automatic retry on a 401 (the JWT expired → drop it, re-login via Auth,
+    /// try once more). Returns the response bytes + HTTP status, or nil on a build/transport failure.
+    /// The shared retry loop the three callers below used to hand-roll identically.
+    private static func requestWithRetry(_ path: String, method: String = "GET", body: Data? = nil)
+        async -> (data: Data, status: Int)?
+    {
         for attempt in 0..<2 {
-            guard let req = await request(path) else { return nil }
-            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
-            if (resp as? HTTPURLResponse)?.statusCode == 401, attempt == 0 {
-                await Auth.shared.invalidate()
-                continue
-            }
-            return try? JSONDecoder().decode(T.self, from: data)
-        }
-        return nil
-    }
-
-    /// Fetches raw bytes (e.g. a generated PNG share card) from an authenticated endpoint.
-    /// One retry on a 401, mirroring `get`. Nil on any failure (offline, unauthorized, non-2xx).
-    public static func fetchData(_ path: String) async -> Data? {
-        for attempt in 0..<2 {
-            guard let req = await request(path) else { return nil }
+            guard let req = await request(path, method: method, body: body) else { return nil }
             guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401, attempt == 0 {
                 await Auth.shared.invalidate()
                 continue
             }
-            return (200..<300).contains(code) ? data : nil
+            return (data, code)
         }
         return nil
     }
 
+    static func get<T: Decodable>(_ path: String) async -> T? {
+        guard let r = await requestWithRetry(path) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: r.data)
+    }
+
+    /// Fetches raw bytes (e.g. a generated PNG share card) from an authenticated endpoint.
+    /// Nil on any failure (offline, unauthorized, non-2xx).
+    public static func fetchData(_ path: String) async -> Data? {
+        guard let r = await requestWithRetry(path) else { return nil }
+        return (200..<300).contains(r.status) ? r.data : nil
+    }
+
     @discardableResult
     private static func send(_ path: String, method: String, body: Data? = nil) async -> APIOutcome {
-        for attempt in 0..<2 {
-            guard let req = await request(path, method: method, body: body) else { return .failed }
-            guard let (_, resp) = try? await URLSession.shared.data(for: req) else { return .failed }
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 401 {
-                if attempt == 0 {
-                    await Auth.shared.invalidate()
-                    continue
-                }
-                return .unauthorized
-            }
-            return (200..<300).contains(code) ? .ok : .failed
-        }
-        return .failed
+        guard let r = await requestWithRetry(path, method: method, body: body) else { return .failed }
+        if r.status == 401 { return .unauthorized }
+        return (200..<300).contains(r.status) ? .ok : .failed
     }
 
     public static func wallets() async -> [WalletInfo] { await get("/wallets") ?? [] }
