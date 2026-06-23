@@ -282,6 +282,8 @@ export interface WalletFlowRepository {
   ensureDailyBackfilled(): Promise<void>;
   getCursor(wallet: string): Promise<FlowCursor | null>;
   setCursor(wallet: string, cursor: FlowCursor): Promise<void>;
+  /** True iff every wallet has a complete cursor (one COUNT query, not N point-lookups). */
+  allCursorsComplete(wallets: string[]): Promise<boolean>;
 }
 
 /** 100%-on-chain DLMM wallet snapshot + per-position bins/history reader (Solana RPC). */

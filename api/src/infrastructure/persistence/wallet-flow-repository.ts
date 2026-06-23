@@ -138,6 +138,17 @@ export class WalletFlowRepository implements WalletFlowRepositoryPort {
       : null;
   }
 
+  /** True iff EVERY wallet has a complete cursor — one COUNT query instead of N point-lookups. A wallet
+   *  with no cursor row (still backfilling) isn't counted, so it correctly fails the all-complete test. */
+  async allCursorsComplete(wallets: string[]): Promise<boolean> {
+    if (wallets.length === 0) return true;
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(walletFlowCursor)
+      .where(and(inArray(walletFlowCursor.wallet, wallets), eq(walletFlowCursor.complete, true)));
+    return Number(row?.n ?? 0) === wallets.length;
+  }
+
   async setCursor(wallet: string, cursor: FlowCursor): Promise<void> {
     await this.db
       .insert(walletFlowCursor)

@@ -36,6 +36,19 @@ const flow = (
   isTrading,
 });
 
+describe('WalletFlowRepository — allCursorsComplete (O13 batch)', () => {
+  const cur = (complete: boolean) => ({ oldestSig: 'g', newestSig: 'n', complete });
+  it('is true only when EVERY wallet has a complete cursor; missing/partial → false; [] → true', async () => {
+    const repo = await newRepo();
+    await repo.setCursor('w1', cur(true));
+    await repo.setCursor('w2', cur(false));
+    expect(await repo.allCursorsComplete([])).toBe(true);
+    expect(await repo.allCursorsComplete(['w1'])).toBe(true);
+    expect(await repo.allCursorsComplete(['w1', 'w2'])).toBe(false); // w2 not complete
+    expect(await repo.allCursorsComplete(['w1', 'w3'])).toBe(false); // w3 has no cursor row
+  });
+});
+
 describe('WalletFlowRepository — daily aggregation', () => {
   it('sums trading and external flows per UTC day, separately', async () => {
     const repo = await newRepo();

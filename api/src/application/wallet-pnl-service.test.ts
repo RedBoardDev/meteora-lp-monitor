@@ -38,10 +38,12 @@ describe('buildCashflowCurveFromDaily', () => {
 function stubRepo(daily: DailyFlow[], cursors: Record<string, FlowCursor | null>) {
   return {
     dailyFlows: vi.fn(async () => daily),
-    getCursor: vi.fn(async (w: string) => cursors[w] ?? null),
+    allCursorsComplete: vi.fn(async (ws: string[]) =>
+      ws.every((w) => cursors[w]?.complete === true),
+    ),
   } as unknown as WalletFlowRepository & {
     dailyFlows: ReturnType<typeof vi.fn>;
-    getCursor: ReturnType<typeof vi.fn>;
+    allCursorsComplete: ReturnType<typeof vi.fn>;
   };
 }
 
