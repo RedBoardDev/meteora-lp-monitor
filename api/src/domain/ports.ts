@@ -189,6 +189,8 @@ export interface AccountRepository {
   createUser(p: { address: string; passwordHash: string; isOwner: boolean }): Promise<AccountUser>;
   findByAddress(address: string): Promise<{ user: AccountUser; passwordHash: string } | null>;
   findById(id: string): Promise<AccountUser | null>;
+  /** The account for `id` only if its `jti` session is still valid — one JOIN for the auth hot path. */
+  findByIdWithSession(id: string, jti: string): Promise<AccountUser | null>;
   /** Replace a user's password hash AND bump tokenVersion (invalidates existing sessions). */
   resetPassword(id: string, passwordHash: string): Promise<void>;
 

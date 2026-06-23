@@ -80,6 +80,31 @@ export class PostgresAccountRepository implements AccountRepository {
       : null;
   }
 
+  /** The account for `id` ONLY if its `jti` session is still allow-listed + unexpired — one JOIN query
+   *  for the auth hot path (was findById THEN isSessionValid, two sequential round-trips per request). */
+  async findByIdWithSession(id: string, jti: string): Promise<AccountUser | null> {
+    const [r] = await this.db
+      .select({
+        id: usersTable.id,
+        address: usersTable.address,
+        isOwner: usersTable.isOwner,
+        tokenVersion: usersTable.tokenVersion,
+      })
+      .from(usersTable)
+      .innerJoin(authSessions, eq(authSessions.userId, usersTable.id))
+      .where(
+        and(
+          eq(usersTable.id, id),
+          eq(authSessions.jti, jti),
+          gt(authSessions.expiresAt, Date.now()),
+        ),
+      )
+      .limit(1);
+    return r
+      ? { id: r.id, address: r.address, isOwner: r.isOwner, tokenVersion: r.tokenVersion }
+      : null;
+  }
+
   async resetPassword(id: string, passwordHash: string): Promise<void> {
     // Bump tokenVersion in the same statement → every JWT minted before the reset becomes invalid.
     await this.db

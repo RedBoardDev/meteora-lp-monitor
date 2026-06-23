@@ -142,6 +142,16 @@ describe('PostgresAccountRepository — session allowlist', () => {
     expect(await accounts.isSessionValid('jti-old')).toBe(false);
   });
 
+  it('findByIdWithSession returns the account only with a live session for that jti (O07)', async () => {
+    const { accounts } = await setup();
+    const u = await accounts.createUser({ address: 'WSESS', passwordHash: 'h', isOwner: false });
+    await accounts.createSession('jti-x', u.id, Date.now() + 60_000);
+    expect((await accounts.findByIdWithSession(u.id, 'jti-x'))?.id).toBe(u.id);
+    expect(await accounts.findByIdWithSession(u.id, 'nope')).toBeNull(); // unknown jti
+    await accounts.deleteSession('jti-x');
+    expect(await accounts.findByIdWithSession(u.id, 'jti-x')).toBeNull(); // revoked → no account
+  });
+
   it('deleteUserSessions revokes every session of a user (on password reset)', async () => {
     const { accounts } = await setup();
     await accounts.createSession('j1', 'user-1', Date.now() + 60_000);
