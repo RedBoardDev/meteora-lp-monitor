@@ -11,6 +11,6 @@ export const WALLET_BALANCE_REFRESH_MS = 30_000;
 
 export const METEORA_API_BASE = 'https://dlmm.datapi.meteora.ag';
 
-/** PositionV2 Anchor account: discriminator (8) + lb_pair (32) + owner (32). */
-export const POSITION_V2_OWNER_OFFSET = 40;
+/** PositionV2 Anchor account: discriminator (8) + lb_pair (32) + owner (32) — owner is thus at byte 40
+ *  (see POSITION_V2_OWNER_OFFSET in the api dlmm layout, where the memcmp filter that uses it lives). */
 export const POSITION_V2_DISCRIMINATOR = [117, 176, 212, 199, 245, 180, 133, 182] as const;

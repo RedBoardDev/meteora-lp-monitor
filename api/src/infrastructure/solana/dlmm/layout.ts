@@ -13,6 +13,9 @@ import { PublicKey } from '@solana/web3.js';
 export const DLMM_PROGRAM_ID = new PublicKey(DLMM_PROGRAM_ID_STR);
 
 export const POSITION_V2_DISC = POSITION_V2_DISCRIMINATOR;
+/** Byte offset of the `owner` field in a PositionV2 account (disc 8 + lb_pair 32) — the getProgramAccounts
+ *  memcmp filter for "positions owned by X". */
+export const POSITION_V2_OWNER_OFFSET = 40;
 export const LBPAIR_DISC = [33, 11, 49, 98, 181, 101, 177, 13] as const;
 
 export const BINS_PER_ARRAY = 70;

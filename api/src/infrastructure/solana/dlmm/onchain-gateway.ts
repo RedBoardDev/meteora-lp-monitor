@@ -22,6 +22,7 @@ import {
   decodePositionHeader,
   deriveBinArray,
   POSITION_V2_DISC,
+  POSITION_V2_OWNER_OFFSET,
 } from './layout';
 import { fetchPositionBins } from './position-detail';
 import { fetchPositionHistory } from './position-history';
@@ -68,7 +69,7 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
   private async discover(owner: string): Promise<PublicKey[]> {
     const filters: GetProgramAccountsFilter[] = [
       { memcmp: { offset: 0, bytes: minimalBase58(Uint8Array.from(POSITION_V2_DISC)) } },
-      { memcmp: { offset: 40, bytes: owner } },
+      { memcmp: { offset: POSITION_V2_OWNER_OFFSET, bytes: owner } },
     ];
     const accts = await this.conn.getProgramAccounts(DLMM_PROGRAM_ID, {
       commitment: 'confirmed',
