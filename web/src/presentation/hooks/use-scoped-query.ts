@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type QueryResult<T> = {
   data: T | null;
@@ -20,9 +20,19 @@ export function useScopedQuery<T>(fetcher: () => Promise<T>, deps: unknown[]): Q
 
   const refetch = useCallback(() => setTick((t) => t + 1), []);
 
+  const depsKey = JSON.stringify(deps);
+  const prevDepsKey = useRef(depsKey);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: deps are supplied by the caller; tick forces a manual refetch.
   useEffect(() => {
     let alive = true;
+    // On a SCOPE change (deps changed, not a manual refetch) drop the previous scope's data, so a slow
+    // or failing fetch never shows stale data under the new scope's header. A tick-only refetch keeps
+    // it (the "refreshing" dim).
+    if (prevDepsKey.current !== depsKey) {
+      prevDepsKey.current = depsKey;
+      setData(null);
+    }
     setLoading(true);
     setError(false);
     fetcher()

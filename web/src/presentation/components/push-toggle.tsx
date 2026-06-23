@@ -75,14 +75,19 @@ export function PushToggle() {
     try {
       const reg = await activeRegistration();
       const sub = await reg?.pushManager.getSubscription();
-      if (sub) {
-        await api.pushUnsubscribe(sub.endpoint);
-        await sub.unsubscribe();
+      if (!sub) {
+        // SW not ready / no local subscription handle → we can't tell the server which endpoint to drop,
+        // so the backend may still be delivering. DON'T claim disabled — keep 'subscribed' so a retry is
+        // possible (showing 'idle' here lied while pushes kept arriving).
+        setState('subscribed');
+        return;
       }
+      await api.pushUnsubscribe(sub.endpoint);
+      await sub.unsubscribe();
+      setState('idle');
     } catch {
-      /* ignore */
+      setState('subscribed'); // unsubscribe failed — keep the truthful 'subscribed', not a false 'idle'
     }
-    setState('idle');
   }
 
   const note = (text: string) => <p className="text-faint text-xs leading-relaxed">{text}</p>;
