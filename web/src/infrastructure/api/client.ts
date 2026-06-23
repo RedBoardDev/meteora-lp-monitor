@@ -28,10 +28,29 @@ class ApiError extends Error {
   }
 }
 
+// Coalesce concurrent identical GETs into one in-flight request. Several components mount and request
+// the same resource in the same React commit — PerformanceCard + PairsCard both GET /stats (A09), and a
+// closed-set change re-fires every scoped query at once (O10) — so without this each fires its own
+// round-trip through the BFF. Keyed by path and cleared the moment the request settles (resolve OR
+// reject), so it only ever dedupes truly-concurrent calls and never serves a stale response. (Requests
+// with different params — e.g. the period-scoped Net Worth curves, O06 — have different paths and are
+// correctly NOT merged: they are distinct resources.)
+const inflightGets = new Map<string, Promise<unknown>>();
+
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`/api/${path}`, { headers: { accept: 'application/json' } });
-  if (!res.ok) throw new ApiError(`GET ${path} failed (${res.status})`);
-  return (await res.json()) as T;
+  const pending = inflightGets.get(path);
+  if (pending) return pending as Promise<T>;
+  const req = (async (): Promise<T> => {
+    const res = await fetch(`/api/${path}`, { headers: { accept: 'application/json' } });
+    if (!res.ok) throw new ApiError(`GET ${path} failed (${res.status})`);
+    return (await res.json()) as T;
+  })();
+  inflightGets.set(path, req);
+  try {
+    return await req;
+  } finally {
+    inflightGets.delete(path);
+  }
 }
 
 async function send(
