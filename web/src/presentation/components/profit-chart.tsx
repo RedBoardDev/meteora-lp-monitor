@@ -66,9 +66,9 @@ function sourceTitle(source: Source): string {
 /** Explanatory note under the chart for the selected source. */
 function sourceNote(source: Source): string {
   if (source === 'networth')
-    return 'Net Worth = la VALEUR de ton wallet (cash + positions). Tombe à 0 si tu vides, jamais négatif.';
+    return 'Net Worth = your wallet VALUE (cash + positions). Drops to 0 if you empty it, never negative.';
   if (source === 'pnl')
-    return 'PnL réel = ta perf nette de tes apports/retraits. Peut être négatif (ex: tu as injecté plus que ta valeur actuelle). Vérifié on-chain.';
+    return 'Real PnL = your performance net of deposits/withdrawals. Can be negative (you injected more than the current value). Verified on-chain.';
   return 'Realized PnL per closed position (Meteora close value, LPAgent-style). Bars = each period; line = running total. Note: per-position close values can differ from the real wallet cash.';
 }
 
@@ -465,9 +465,6 @@ function TipRow({ label, value, tone }: { label: string; value: string; tone: To
   );
 }
 
-/** Export the chart SVG as a PNG: resolve the CSS-var colours to concrete values, lay it on an opaque
- *  surface, rasterise at 2×. Axis labels are HTML overlays (omitted) — the curve shape is the artifact,
- *  and amounts are hidden anyway when sharing the curve. */
 /** Rasterise the chart SVG to a PNG Blob: resolve the CSS-var colours, lay it on an opaque surface at
  *  2×, then stamp the Binsight watermark bottom-left. Returns a Blob so the share dialog can preview /
  *  copy / download it (instead of forcing an immediate download). */

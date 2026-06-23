@@ -84,9 +84,6 @@ export class ClosedPositionEntity {
   get tone(): Tone {
     return toneOf(this.raw.pnlSol);
   }
-  get isWin(): boolean {
-    return this.raw.pnlSol > 0;
-  }
   get closedAt(): number | null {
     return this.raw.closedAt;
   }
@@ -108,15 +105,6 @@ export class Portfolio {
   }
   get scope(): string {
     return this.state.scope;
-  }
-  get freshness() {
-    return this.state.freshness;
-  }
-  get asOfSlot(): number | null {
-    return this.state.asOfSlot;
-  }
-  get updatedAt(): number {
-    return this.state.updatedAt;
   }
 
   /** Open positions sorted by current size, largest first. */
