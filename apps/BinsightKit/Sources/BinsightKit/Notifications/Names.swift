@@ -12,5 +12,5 @@ public extension Notification.Name {
     /// Posted when the local "Enable notifications" master toggle changes, so the host app can
     /// push a fresh presence heartbeat immediately (muting a device must route to Bark at once,
     /// not after the next 10s heartbeat).
-    static let lpmPresenceShouldRefresh = Notification.Name("BinsightPresenceShouldRefresh")
+    static let presenceShouldRefresh = Notification.Name("BinsightPresenceShouldRefresh")
 }

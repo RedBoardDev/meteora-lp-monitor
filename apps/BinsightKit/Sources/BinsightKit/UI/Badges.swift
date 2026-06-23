@@ -62,7 +62,7 @@ public struct FeesLabel: View {
         return HStack(spacing: 5) {
             Text("Fees")
             Image(systemName: "centsign.circle")
-            Text(abs3(fees))
+            Text(abs4(fees))
             Text("(\(pctOf(fees, position.sizeSol)))")
         }
         .font(.data(11))
