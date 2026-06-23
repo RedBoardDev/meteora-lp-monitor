@@ -1,0 +1,1 @@
+CREATE INDEX "idx_positions_wallet_status_closed_at" ON "positions" USING btree ("wallet","status","closed_at");

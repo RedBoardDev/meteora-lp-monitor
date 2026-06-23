@@ -328,11 +328,18 @@ export class PostgresPositionRepository implements PositionRepository {
       .where(eq(positionsTable.positionAddress, positionAddress));
   }
 
-  async getStrategies(): Promise<Map<string, StrategyFamily>> {
+  async getStrategies(wallet?: string): Promise<Map<string, StrategyFamily>> {
+    // Scope to one wallet on the hot per-sync path (idx_positions_wallet) instead of scanning the whole
+    // positions table; no wallet = the full set (boot-time StrategyService cache seed).
     const rows = await this.db
       .select({ a: positionsTable.positionAddress, s: positionsTable.strategy })
       .from(positionsTable)
-      .where(sql`${positionsTable.strategy} is not null`);
+      .where(
+        and(
+          sql`${positionsTable.strategy} is not null`,
+          wallet ? eq(positionsTable.wallet, wallet) : undefined,
+        ),
+      );
     return new Map(rows.map((r) => [r.a, r.s as StrategyFamily]));
   }
 

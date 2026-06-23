@@ -93,7 +93,7 @@ export class PositionSync {
     const metaMap = await this.metadata.resolve([...mints]);
     const resolver: TokenMetaResolver = (mint) =>
       metaMap.get(mint) ?? { symbol: fallbackSymbol(mint) };
-    const strategy = await this.repo.getStrategies();
+    const strategy = await this.repo.getStrategies(wallet); // scoped: only this wallet's positions
     // The persisted open set right before this sync — the source of truth for open→closed transitions
     // (in on-chain mode `rt.open` is frozen at registration and never refreshed, so it can't be used).
     const prior = await this.repo.getOpen(wallet);

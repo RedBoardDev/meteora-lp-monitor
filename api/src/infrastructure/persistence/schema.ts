@@ -54,6 +54,9 @@ export const positions = pgTable(
     index('idx_positions_wallet_closed_at').on(t.wallet, t.closedAt),
     // Serves the 'all'/stats scope (status='closed' ORDER BY closed_at) without a leading wallet.
     index('idx_positions_status_closed_at').on(t.status, t.closedAt),
+    // Covers statsAggregate's exact filter (wallet IN … AND status='closed' AND closed_at >= since) so
+    // it's an index range, not a heap recheck on a partial-match index.
+    index('idx_positions_wallet_status_closed_at').on(t.wallet, t.status, t.closedAt),
   ],
 );
 
