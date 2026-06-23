@@ -20,7 +20,7 @@ public final class LiveClient {
     private var reconnecting = false
 
     /// Whether this device counts as "present" right now. The host platform injects the real
-    /// logic (macOS: not idle/asleep/locked; iOS: foreground). Default: always present.
+    /// logic (macOS: not idle/asleep/locked). Default: always present.
     public var presenceActive: () -> Bool = { true }
 
     public init(store: PortfolioStore, device: ClientDevice) {

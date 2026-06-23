@@ -9,7 +9,7 @@ public func healthStatusColor(_ status: String) -> Color {
     }
 }
 
-/// Per-service live-status breakdown shown on hover (macOS) / tap (iOS) of the connection dot.
+/// Per-service live-status breakdown shown on hover of the connection dot.
 /// Renders every source the backend reports (rpc / meteora / jupiter / ws) with its
 /// status, why it's degraded, and how long since it was last ok.
 public struct HealthDetailView: View {
