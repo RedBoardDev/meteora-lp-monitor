@@ -68,6 +68,9 @@ export class Engine {
   // Per-wallet guard so the chained-FIFO realized-PnL pass (Enhanced API + price gateway) never runs
   // twice concurrently for the same wallet — it fires async off the close-notification, not the loop.
   private readonly realizedPnlRunning = new Set<string>();
+  // A trigger that arrives mid-run sets this so exactly ONE more pass runs after the current one
+  // finishes (coalesced) — a close-burst no longer gets silently dropped by the single-flight guard.
+  private readonly realizedPnlRerun = new Set<string>();
 
   constructor(
     gateway: PositionsGateway,
@@ -387,24 +390,33 @@ export class Engine {
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
   private async runRealizedPnl(wallet: string): Promise<void> {
-    if (this.realizedPnlRunning.has(wallet)) return;
+    if (this.realizedPnlRunning.has(wallet)) {
+      this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
+      return;
+    }
     this.realizedPnlRunning.add(wallet);
     try {
-      const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
-      // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so a
-      // flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
-      if (pnlByPos == null || pnlByPos.size === 0) return;
-      for (const [pos, pnl] of pnlByPos) await this.repo.setAuthoritativePnl(pos, pnl);
-      // Tell viewers the closed figures changed so the table/stats recompute with the real cash values.
-      this.bus.emit('closedChanged', { wallet });
-      this.logger.info(
-        { wallet, written: pnlByPos.size },
-        'realized-pnl: market_pnl_sol persisted',
-      );
+      do {
+        this.realizedPnlRerun.delete(wallet);
+        const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
+        // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so
+        // a flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
+        if (pnlByPos == null || pnlByPos.size === 0) continue;
+        // One atomic batched UPDATE for the whole wallet (was N sequential single-row writes): a
+        // mid-loop crash can no longer leave mixed old/new market_pnl_sol generations.
+        await this.repo.setAuthoritativePnlMany(pnlByPos);
+        // Tell viewers the closed figures changed so the table/stats recompute with the real cash values.
+        this.bus.emit('closedChanged', { wallet });
+        this.logger.info(
+          { wallet, written: pnlByPos.size },
+          'realized-pnl: market_pnl_sol persisted',
+        );
+      } while (this.realizedPnlRerun.has(wallet));
     } catch (err) {
       this.logger.error({ err, wallet }, 'realized-pnl pass failed — keeping prior market_pnl_sol');
     } finally {
       this.realizedPnlRunning.delete(wallet);
+      this.realizedPnlRerun.delete(wallet);
     }
   }
 

@@ -298,6 +298,20 @@ export class PostgresPositionRepository implements PositionRepository {
       );
   }
 
+  /** Persist market_pnl_sol for many closed positions in ONE atomic statement (UPDATE … FROM VALUES) —
+   *  same effect as setAuthoritativePnl per entry, but a mid-loop crash can't leave mixed generations
+   *  and it's a single write, not N. */
+  async setAuthoritativePnlMany(byPosition: Map<string, number>): Promise<void> {
+    if (byPosition.size === 0) return;
+    const rows = [...byPosition].map(([addr, pnl]) => sql`(${addr}, ${pnl}::double precision)`);
+    await this.db.execute(sql`
+      update ${positionsTable} as p
+      set market_pnl_sol = v.pnl
+      from (values ${sql.join(rows, sql`, `)}) as v(address, pnl)
+      where p.position_address = v.address and p.status = 'closed'
+    `);
+  }
+
   async getClosedByAddress(positionAddress: string): Promise<ClosedPosition | null> {
     const [r] = await this.db
       .select()
