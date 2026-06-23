@@ -65,7 +65,7 @@ public func connectionColor(_ state: ConnectionState, degraded: Bool = false) ->
 func isOut(_ s: RangeStatus) -> Bool { s == .out_up || s == .out_down }
 
 public extension View {
-    /// macOS: show the pointing-hand cursor while hovering a clickable control. No-op on iOS.
+    /// Show the macOS pointing-hand cursor while hovering a clickable control.
     func pointingHandCursor() -> some View {
         onHover { hovering in
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }

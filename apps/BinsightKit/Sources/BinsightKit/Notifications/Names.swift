@@ -1,7 +1,7 @@
 import Foundation
 
-/// Cross-app NotificationCenter names. Shared so both the Mac menu-bar app and the iOS app
-/// reference the same constants instead of redeclaring them per target.
+/// Cross-target NotificationCenter names, shared so every target references the same
+/// constants instead of redeclaring them.
 public extension Notification.Name {
     /// Drop the socket and reconnect (e.g. after Settings saved a new URL/password or a wallet).
     static let reconnect = Notification.Name("BinsightReconnect")

@@ -2,7 +2,7 @@ import Foundation
 import Security
 
 /// Minimal Keychain store for secrets (the auth password, exchanged for a short-lived JWT by
-/// `Auth`). Cross-platform (macOS + iOS).
+/// `Auth`). Uses the cross-platform Security framework.
 enum Keychain {
     private static let service = "com.binsight"
 

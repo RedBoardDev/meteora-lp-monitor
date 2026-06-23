@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Shared open-position card (macOS panel + iOS list). Pair + range badge + quick-links,
+/// Open-position card for the macOS panel. Pair + range badge + quick-links,
 /// PnL (SOL + %), size/age, fees, and the range bar.
 public struct PositionCard: View {
     let p: OpenPosition
@@ -44,6 +44,6 @@ public struct PositionCard: View {
         .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
     }
 
-    // macOS: reveal the quick-links only while the row is hovered (declutter). iOS (touch) always shows.
+    // Reveal the quick-links only while the row is hovered, to declutter the panel.
     private var showLinks: Bool { hovering }
 }
