@@ -1,6 +1,11 @@
 import { and, asc, gte, inArray, sql } from 'drizzle-orm';
+// The Net Worth row contract is owned by the application port (NetworthSnapshotStore); this adapter
+// implements it. Re-exported so existing infra importers keep their import path.
+import type { NetworthCurveRow } from '@/application/networth-recorder';
 import type { Database } from './database';
 import { networthSnapshots } from './schema';
+
+export type { NetworthCurveRow };
 
 /** One reconstructed Net Worth point: the wallet VALUE + the real PnL net of deposits/withdrawals. */
 export interface NetworthReconstructedRow {
@@ -19,14 +24,6 @@ export interface NetworthReconstructedRow {
 
 /** A 15-minute UTC bucket index for an epoch-ms timestamp = floor(unix_seconds / 900). */
 const bucketOf = (ts: number): number => Math.floor(ts / 1000 / 900);
-
-/** One point of the persisted Net Worth curve (the TRUE on-chain wallet total + its split). */
-export interface NetworthCurveRow {
-  ts: number;
-  walletTotalSol: number;
-  tvlSol: number;
-  idleSol: number;
-}
 
 /**
  * Forward-only storage for the TRUE wallet Net Worth (tvl + idle) sampled into 15-min UTC buckets.

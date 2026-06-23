@@ -1,7 +1,15 @@
 import type { WalletState } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { WalletFlowRepository } from '@/domain/ports';
-import type { NetworthCurveRow } from '@/infrastructure/persistence/networth-snapshot-repository';
+
+/** One point of the persisted Net Worth curve (the TRUE on-chain wallet total + its split). The
+ *  application owns this contract; the persistence adapter implements it (no application→infra import). */
+export interface NetworthCurveRow {
+  ts: number;
+  walletTotalSol: number;
+  tvlSol: number;
+  idleSol: number;
+}
 
 /** The slice of NetworthSnapshotRepository this recorder needs (kept narrow so it's trivially stubbable). */
 export interface NetworthSnapshotStore {
