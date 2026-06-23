@@ -66,6 +66,18 @@ function safeJson(raw: string): unknown {
   }
 }
 
+/** The /live auth token. Native clients (URLSessionWebSocketTask) send it in the Authorization header
+ *  so a long-lived JWT never lands in URLs / proxy access logs (S10); browsers can't set WS request
+ *  headers, so they pass a short-lived ws-ticket in ?token=. Prefer the header, fall back to the query. */
+export function liveToken(
+  authHeader: string | undefined,
+  queryToken: string | undefined,
+): string | undefined {
+  if (authHeader?.startsWith('Bearer '))
+    return authHeader.slice('Bearer '.length).trim() || undefined;
+  return queryToken;
+}
+
 export function registerWebSocket(
   app: FastifyInstance,
   secret: string,
@@ -91,7 +103,7 @@ export function registerWebSocket(
     engine.setViewedWallets(viewed);
   };
 
-  // logLevel:silent — the upgrade URL carries ?token=, keep it out of request logs.
+  // logLevel:silent — a browser passes a short-lived ws-ticket in ?token=; keep it out of request logs.
   app.get('/live', { websocket: true, logLevel: 'silent' }, async (socket: WebSocket, req) => {
     // Browsers send Origin on a WS upgrade; reject any that isn't allow-listed (defence-in-depth on top
     // of the SameSite cookie that gates the ws-ticket). Native clients send no Origin → allowed.
@@ -100,7 +112,9 @@ export function registerWebSocket(
       socket.close(1008, 'forbidden origin');
       return;
     }
-    const token = (req.query as { token?: string }).token;
+    // Native clients send the JWT in the Authorization header (kept out of URLs/logs, S10); browsers
+    // can't set WS headers, so they pass a short-lived ws-ticket in ?token=.
+    const token = liveToken(req.headers.authorization, (req.query as { token?: string }).token);
     const payload = token ? verifyJwt(secret, token) : null;
     if (!payload) {
       socket.close(1008, 'unauthorized');

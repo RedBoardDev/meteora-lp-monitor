@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AccountRepository } from '@/domain/ports';
-import { sessionStillValid } from './websocket';
+import { liveToken, sessionStillValid } from './websocket';
 
 /** Minimal AccountRepository stub exposing only what sessionStillValid reads. */
 function accounts(opts: {
@@ -12,6 +12,22 @@ function accounts(opts: {
     isSessionValid: async (jti: string) => opts.validJtis?.has(jti) ?? false,
   } as Pick<AccountRepository, 'findById' | 'isSessionValid'>;
 }
+
+describe('liveToken — /live auth: native Authorization header vs browser ws-ticket (S10)', () => {
+  it('prefers the Authorization: Bearer header (native — keeps the long-lived JWT out of the URL)', () => {
+    expect(liveToken('Bearer abc.def.ghi', 'ticket')).toBe('abc.def.ghi');
+  });
+
+  it('falls back to the ?token= query when there is no Bearer header (browser ws-ticket)', () => {
+    expect(liveToken(undefined, 'ticket')).toBe('ticket');
+    expect(liveToken('Basic xyz', 'ticket')).toBe('ticket'); // non-Bearer scheme → use the ticket
+  });
+
+  it('is undefined when neither a Bearer header nor a query token is present', () => {
+    expect(liveToken(undefined, undefined)).toBeUndefined();
+    expect(liveToken('Bearer   ', undefined)).toBeUndefined(); // empty bearer → not a token
+  });
+});
 
 describe('sessionStillValid — live-socket revocation check (mirrors the Bearer hook /live bypasses)', () => {
   it('true only when account exists, version matches, and the jti is still allow-listed', async () => {

@@ -66,7 +66,7 @@ public final class LiveClient {
         send(#"{"type":"subscribe","scope":"\#(scope)"}"#)
     }
 
-    private func wsURL(token: String) -> URL? {
+    private func wsURL() -> URL? {
         // Anchor the scheme swap to the PREFIX — a blanket http→ws replace would corrupt any host/path
         // that contains "http" into an unconnectable URL.
         let api = Config.apiURL
@@ -78,7 +78,7 @@ public final class LiveClient {
         } else {
             base = api
         }
-        return URL(string: "\(base)/live?token=\(token)")
+        return URL(string: "\(base)/live")
     }
 
     private func connect() {
@@ -91,7 +91,7 @@ public final class LiveClient {
         // Fetch a fresh JWT (re-logins from the stored password if needed) before opening the socket.
         Task { [weak self] in
             guard let self else { return }
-            guard let token = await Auth.shared.token(), let url = self.wsURL(token: token) else {
+            guard let token = await Auth.shared.token(), let url = self.wsURL() else {
                 self.store.setConnection(.unauthorized)
                 self.scheduleReconnect()
                 return
@@ -100,7 +100,12 @@ public final class LiveClient {
             // landed while we fetched the token. Opening a socket now would leak it (a parallel reconnect
             // owns the connection) — bail and let that path drive.
             if self.stopped || self.reconnecting { return }
-            let t = URLSession.shared.webSocketTask(with: url)
+            // Send the JWT in the Authorization header, not the URL query — a long-lived token in the
+            // upgrade URL would persist in nginx/proxy access logs (S10). URLSessionWebSocketTask carries
+            // the URLRequest's headers on the HTTP upgrade.
+            var request = URLRequest(url: url)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let t = URLSession.shared.webSocketTask(with: request)
             self.task = t
             t.resume()
             self.sendPresence()
