@@ -371,8 +371,10 @@ export class PostgresPositionRepository implements PositionRepository {
     };
     if (wallets.length === 0) return empty;
 
+    // UTC midnight — the curve, YTD and reconstructedCurve all bucket by UTC day, so "Today" must too
+    // (server-local midnight made the header disagree with the curve around midnight on non-UTC hosts).
     const startOfToday = new Date();
-    startOfToday.setHours(0, 0, 0, 0);
+    startOfToday.setUTCHours(0, 0, 0, 0);
     const todayStartMs = startOfToday.getTime();
     const where = and(
       eq(positionsTable.status, 'closed'),

@@ -164,7 +164,9 @@ export class NetworthSnapshotRepository {
       ),
       evd as (select day, sum(delta) as delta from ev group by 1),
       days as (
-        select generate_series((select min(day) from flow), floor(extract(epoch from current_date) / 86400)::int) as day
+        -- now() (absolute epoch) not current_date (session-TZ): every other day axis here is UTC, so the
+        -- upper bound must be the UTC epoch-day too, else the last curve point is off by one near midnight.
+        select generate_series((select min(day) from flow), floor(extract(epoch from now()) / 86400)::int) as day
       ),
       curve as (
         select days.day,
