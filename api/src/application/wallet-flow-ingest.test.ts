@@ -9,6 +9,7 @@ const noopLogger = { info: () => {}, warn: () => {} } as unknown as Logger;
 type PageResult = {
   flows: WalletFlowRow[];
   complete: boolean;
+  hitKnownTop?: boolean;
   newestSig: string | null;
   oldestSig: string | null;
 };
@@ -49,6 +50,7 @@ const gateway = (page: (w: string, o: PageOpts) => Promise<PageResult>) =>
       return {
         added: r.flows.length,
         complete: r.complete,
+        hitKnownTop: r.hitKnownTop ?? false,
         newestSig: r.newestSig,
         oldestSig: r.oldestSig,
       };
@@ -84,15 +86,17 @@ describe('WalletFlowIngest — cursor modes', () => {
     expect(res).toEqual({ added: 2, complete: true });
   });
 
-  it('top-up: complete cursor → stops at previous newest and advances it, keeping oldest', async () => {
+  it('top-up that reaches the prior top (hitKnownTop) advances newest, keeping oldest', async () => {
     const { repo, cursor } = fakeRepo({
       newestSig: 'old-top',
       oldestSig: 'genesis',
       complete: true,
     });
+    // Realistic caught-up top-up: it stopped at the known top (hitKnownTop), NOT at genesis.
     const gw = gateway(async () => ({
       flows: [row('new-top')],
-      complete: true,
+      complete: false,
+      hitKnownTop: true,
       newestSig: 'new-top',
       oldestSig: 'old-top',
     }));
@@ -105,6 +109,27 @@ describe('WalletFlowIngest — cursor modes', () => {
     });
     // newest advances to the fresh top; oldest (genesis) is preserved, not clobbered by the top-up.
     expect(cursor()).toEqual({ newestSig: 'new-top', oldestSig: 'genesis', complete: true });
+  });
+
+  it('R01: a top-up that FAILS mid-page (no hitKnownTop) does NOT advance newest past the gap', async () => {
+    const { repo, cursor } = fakeRepo({
+      newestSig: 'old-top',
+      oldestSig: 'genesis',
+      complete: true,
+    });
+    // Page failure before reaching the prior top: ingested some new txs but a gap remains above 'old-top'.
+    const gw = gateway(async () => ({
+      flows: [row('new-top'), row('mid')],
+      complete: false,
+      hitKnownTop: false,
+      newestSig: 'new-top',
+      oldestSig: 'mid',
+    }));
+    await new WalletFlowIngest(gw, repo, noopLogger).ingest('w');
+
+    // newest stays 'old-top' so the NEXT top-up re-pages new-top → old-top and closes the gap; advancing
+    // to 'new-top' here would skip the un-ingested mid→old-top window forever (silent data loss).
+    expect(cursor()).toEqual({ newestSig: 'old-top', oldestSig: 'genesis', complete: true });
   });
 
   it('resume: incomplete cursor → continues from oldestSig and keeps the recorded newest', async () => {

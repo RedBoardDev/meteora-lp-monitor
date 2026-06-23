@@ -330,6 +330,8 @@ export interface EnhancedTxGateway {
   ): Promise<{
     added: number;
     complete: boolean;
+    /** top-up only: the run reached the previously-ingested top signature (no gap left behind). */
+    hitKnownTop: boolean;
     newestSig: string | null;
     oldestSig: string | null;
   }>;

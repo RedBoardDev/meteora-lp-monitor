@@ -246,6 +246,8 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
    *  - untilSig = sig   → top-up: page newest → until that previously-ingested signature, then stop.
    * `startBefore` resumes an interrupted backfill from the last oldest signature reached.
    * `complete` is true only when genesis was reached (full traversal); false on a page failure.
+   * `hitKnownTop` is true when a top-up reached `untilSig` (caught up with no gap) — distinct from a
+   * mid-page failure, which leaves both false so the caller does NOT advance its cursor past the gap.
    */
   async pageFlows(
     wallet: string,
@@ -257,10 +259,12 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
   ): Promise<{
     added: number;
     complete: boolean;
+    hitKnownTop: boolean;
     newestSig: string | null;
     oldestSig: string | null;
   }> {
-    if (!this.apiKey) return { added: 0, complete: false, newestSig: null, oldestSig: null };
+    if (!this.apiKey)
+      return { added: 0, complete: false, hitKnownTop: false, newestSig: null, oldestSig: null };
     const stopSig = opts.untilSig ?? null;
     let added = 0;
     let before: string | undefined = opts.startBefore ?? undefined;
@@ -307,8 +311,8 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     if (page >= this.maxPages && !complete) {
       this.logger.warn({ wallet, maxPages: this.maxPages }, 'pageFlows hit maxPages — INCOMPLETE');
     }
-    this.logger.info({ wallet, added, complete }, 'enhanced: wallet flows paged');
-    return { added, complete, newestSig, oldestSig };
+    this.logger.info({ wallet, added, complete, hitKnownTop }, 'enhanced: wallet flows paged');
+    return { added, complete, hitKnownTop, newestSig, oldestSig };
   }
 
   /** Fetch one page; retry with backoff on 429/5xx/throw. Returns null when it keeps failing. */

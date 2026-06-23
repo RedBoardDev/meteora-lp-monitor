@@ -62,6 +62,10 @@ export class NotificationManager {
   }
 
   private handleClosed(c: ClosedPosition): void {
+    // Reclaim this position's threshold keys: once closed it never re-appears in deriveFromState, so its
+    // pnl/fees keys (and the oord:<addr>:<since> episode keys, which otherwise have no delete path) would
+    // leak forever — unbounded Set growth. A targeted per-position delete is safe; a global sweep is not.
+    this.forgetThresholdKeys(c.positionAddress);
     this.bus.emit('event', {
       id: `${Date.now()}-${this.seq++}`,
       kind: 'position_close',
@@ -132,10 +136,23 @@ export class NotificationManager {
     }
   }
 
+  /** Drop every threshold/episode key for a position (pnl/fees + all oord:<addr>:<since>). */
+  private forgetThresholdKeys(positionAddress: string): void {
+    this.notifiedThreshold.delete(`pnl:${positionAddress}`);
+    this.notifiedThreshold.delete(`fees:${positionAddress}`);
+    const oorPrefix = `oord:${positionAddress}:`;
+    for (const key of this.notifiedThreshold) {
+      if (key.startsWith(oorPrefix)) this.notifiedThreshold.delete(key);
+    }
+  }
+
   private once(key: string, fn: () => void): void {
     if (this.notifiedThreshold.has(key)) return;
-    this.notifiedThreshold.add(key);
+    // Don't MARK during startup grace — only return. Marking-then-skipping would permanently suppress a
+    // breach that already existed at boot (the key is set but the alert never fires). Leaving it unmarked
+    // lets the next post-grace state tick mark + fire it exactly once.
     if (this.inStartupGrace()) return;
+    this.notifiedThreshold.add(key);
     fn();
   }
 
