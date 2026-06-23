@@ -75,7 +75,9 @@ function sourceNote(source: Source): string {
 export function ProfitChart({ bucket }: { bucket: Bucket }) {
   const scope = usePortfolio((s) => s.scope);
   const closedVersion = usePortfolio((s) => s.closedVersion);
-  const netWorth = usePortfolio((s) => s.portfolio?.totals.walletTotalSol ?? 0);
+  // null (not 0) when the wallet total isn't loaded yet — a drained wallet legitimately has 0, and
+  // coalescing both to 0 hid the real realized loss on the chart's last point (see liveNow below).
+  const netWorth = usePortfolio((s) => s.portfolio?.totals.walletTotalSol ?? null);
   const period = useUi((s) => s.period);
   const [source, setSource] = useState<Source>('networth');
 
@@ -97,11 +99,13 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
       // Today (the last point) is reconstructed "at cost" and briefly LAGS the live tx stream: a fresh
       // deposit hits the cash ledger before its position shows up in the legs, so the line would dip.
       const apportsLast = pts.at(-1)?.apports ?? 0;
-      const liveNow = source === 'networth' ? netWorth : netWorth - apportsLast;
+      // null only when the wallet total is unknown (still loading); a drained wallet → 0 / −apportsLast.
+      const liveNow =
+        netWorth == null ? null : source === 'networth' ? netWorth : netWorth - apportsLast;
       let prev: number | null = null;
       return pts.map((p, i) => {
         const base = source === 'networth' ? p.networth : p.realPnl;
-        const value = i === pts.length - 1 && netWorth > 0 ? liveNow : base;
+        const value = i === pts.length - 1 && liveNow != null ? liveNow : base;
         const delta = prev == null ? 0 : value - prev;
         prev = value;
         return { t: Date.parse(`${p.date}T00:00:00Z`), realized: delta, cumulative: value };
@@ -189,7 +193,7 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
             <div className={cn('transition-opacity', stale && 'opacity-60')} aria-busy={stale}>
               <ProfitGraph
                 buckets={data}
-                netWorth={netWorth}
+                netWorth={netWorth ?? 0}
                 showBars={source === 'positions'}
                 mode={source}
                 svgRef={svgRef}

@@ -37,7 +37,19 @@ async function proxy(request: NextRequest, { params }: Context): Promise<Respons
     }
   }
 
-  const upstream = await fetch(target, { method: request.method, headers, body });
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, {
+      method: request.method,
+      headers,
+      body,
+      // Bound the wait: a hung backend would otherwise leak a connection per request (~300s) and turn a
+      // refusal into an opaque 500. Fail fast with a clean 502/504 instead.
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    return Response.json({ error: 'upstream unavailable' }, { status: 502 });
+  }
   // A rejected session token is dead — clear the cookie so the next navigation lands on /login.
   if (upstream.status === 401) cookieStore.delete(SESSION_COOKIE);
   return new Response(upstream.body, {

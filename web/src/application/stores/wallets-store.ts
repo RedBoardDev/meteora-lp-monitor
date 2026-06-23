@@ -17,6 +17,9 @@ type WalletsState = {
 
 const POLL_MS = 3000;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+// Set by stop() so a refresh() whose api.wallets() was already in flight can't resurrect state / re-arm
+// the poll after teardown (which would re-hit /wallets post-logout). Reset at the start of refresh().
+let stopped = false;
 
 const stopPoll = () => {
   if (pollTimer) {
@@ -29,7 +32,9 @@ export const useWallets = create<WalletsState>((set, get) => ({
   wallets: [],
   loaded: false,
   refresh: async () => {
+    stopped = false;
     const wallets = await api.wallets().catch(() => get().wallets);
+    if (stopped) return; // stop() landed during the await — don't resurrect state or re-arm the poll
     set({ wallets, loaded: true });
     // Poll only while something is indexing; stop as soon as everything is ready.
     const indexing = wallets.some((w) => w.ready === false);
@@ -38,6 +43,7 @@ export const useWallets = create<WalletsState>((set, get) => ({
   },
   // Stop polling + drop state on teardown (logout / dashboard unmount) so the timer can't 401-loop.
   stop: () => {
+    stopped = true;
     stopPoll();
     set({ wallets: [], loaded: false });
   },

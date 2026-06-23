@@ -33,20 +33,33 @@ export async function forwardAuthSession(
   body: unknown,
   fallbackError: string,
 ): Promise<NextResponse> {
-  const res = await fetch(`${API_URL}${upstreamPath}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${upstreamPath}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000), // a hung backend must not leak a connection for ~300s
+    });
+  } catch {
+    return NextResponse.json({ error: fallbackError }, { status: 502 });
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     return NextResponse.json({ error: data.error ?? fallbackError }, { status: res.status });
   }
-  const { token, expiresInSeconds } = (await res.json()) as {
-    token: string;
-    expiresInSeconds: number;
-  };
-  (await cookies()).set(SESSION_COOKIE, token, sessionCookieOptions(expiresInSeconds));
+  const parsed = (await res.json().catch(() => null)) as {
+    token?: string;
+    expiresInSeconds?: number;
+  } | null;
+  if (!parsed?.token || typeof parsed.expiresInSeconds !== 'number') {
+    return NextResponse.json({ error: fallbackError }, { status: 502 });
+  }
+  (await cookies()).set(
+    SESSION_COOKIE,
+    parsed.token,
+    sessionCookieOptions(parsed.expiresInSeconds),
+  );
   return NextResponse.json({ ok: true });
 }
 
@@ -58,11 +71,17 @@ export async function forwardAuthPassthrough(
   upstreamPath: string,
   body: unknown,
 ): Promise<NextResponse> {
-  const res = await fetch(`${API_URL}${upstreamPath}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${upstreamPath}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    return NextResponse.json({ error: 'upstream unavailable' }, { status: 502 });
+  }
   const data = (await res.json().catch(() => ({}))) as unknown;
   return NextResponse.json(data, { status: res.status });
 }
