@@ -7,15 +7,17 @@ this app is the always-on desktop glance (menu-bar agent).
 
 ```
 apps/
-  BinsightKit/      shared Swift package (no AppKit in the core)
+  BinsightKit/      shared Swift package (macOS-only; AppKit is fine — see note below)
     Sources/BinsightKit/{Models,Networking,State,Notifications,Formatting,UI}
     Tests/BinsightKitTests
   BinsightMac/      macOS menu-bar app (MenuBarExtra) — thin shell
   project.yml       XcodeGen: the package + the macOS app target
 ```
 
-`BinsightKit` holds everything portable (wire types, WS/REST clients, store, notifier, formatters,
-shared SwiftUI components). `BinsightMac` owns only the menu-bar presentation shell.
+`BinsightKit` holds the reusable core (wire types, WS/REST clients, store, notifier, formatters,
+shared SwiftUI components); `BinsightMac` owns only the menu-bar presentation shell. The kit is
+**macOS-only** (the iOS client was retired — the PWA covers mobile), so it freely uses AppKit
+(`NSWorkspace`, `NSColor`) where convenient; there is no longer a "no-AppKit / portable" constraint.
 
 ## Install (from the repo root)
 
