@@ -1,5 +1,6 @@
 import { SOL_MINT } from '@binsight/shared';
 import type { OnchainPositionValue, OnchainValued, OnchainWalletSnapshot } from './dlmm';
+import { binPriceRaw, LAMPORTS_PER_SOL } from './dlmm-pnl';
 
 const ui = (amount: bigint, decimals: number): number => Number(amount) / 10 ** decimals;
 
@@ -7,7 +8,7 @@ const ui = (amount: bigint, decimals: number): number => Number(amount) / 10 ** 
  *  raw base-unit price = (1+binStep/10000)^activeId; UI price = raw · 10^(decX−decY).
  *  Verified against the datapi `poolActivePrice` (e.g. DRA/SOL: 1.01^-777 · 10^(6-9) = 4.39e-7). */
 function poolPriceXinY(p: OnchainPositionValue): number {
-  return (1 + p.binStep / 10000) ** p.activeId * 10 ** (p.decimalsX - p.decimalsY);
+  return binPriceRaw(p.activeId, p.binStep) * 10 ** (p.decimalsX - p.decimalsY);
 }
 
 /** All non-SOL mints that need a Jupiter SOL price for a snapshot. */
@@ -46,10 +47,10 @@ export function valueSnapshot(
     feeBy.set(p.positionAddress, fee);
     tvl += size;
     fees += fee;
-    rent += Number(p.lamports) / 1e9;
+    rent += Number(p.lamports) / LAMPORTS_PER_SOL;
   }
 
-  let idle = Number(snap.nativeLamports) / 1e9;
+  let idle = Number(snap.nativeLamports) / LAMPORTS_PER_SOL;
   for (const t of snap.idleTokens) idle += ui(t.amount, t.decimals) * priceOf(t.mint, 0);
 
   return {

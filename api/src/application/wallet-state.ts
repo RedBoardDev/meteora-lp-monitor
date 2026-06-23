@@ -90,8 +90,7 @@ export function buildWalletState(
 }
 
 /** Merge several wallets' on-chain valuations into one (for the aggregated "all" scope). */
-export function combineOnchain(values: OnchainValued[]): OnchainValued | null {
-  const present = values;
+export function combineOnchain(present: OnchainValued[]): OnchainValued | null {
   if (present.length === 0) return null;
   const sizeBy = new Map<string, number>();
   const feeBy = new Map<string, number>();

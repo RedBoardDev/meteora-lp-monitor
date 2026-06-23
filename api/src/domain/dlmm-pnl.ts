@@ -12,7 +12,8 @@ import type { DlmmLeg, PoolMeta, PositionEconomics } from './dlmm';
  *   PnL = Σ(withdrawals + claimed fees) − Σ(deposits), each leg at its own bin price.
  */
 
-const LAMPORTS_PER_SOL = 1e9;
+/** Lamports per SOL — the single source of truth, re-used by the application + infra SOL conversions. */
+export const LAMPORTS_PER_SOL = 1e9;
 
 /** SOL side of a pool, or null if neither token is SOL (a non-SOL-quote pool — valued in its quote). */
 export function solSideOf(mintX: string, mintY: string): 'X' | 'Y' | null {
@@ -69,9 +70,4 @@ export function openUnrealizedPnlSol(
   return (
     econ.withdrawSol + econ.claimedFeesSol + live.sizeSol + live.unclaimedFeesSol - econ.depositSol
   );
-}
-
-/** Mark-to-pool realized PnL (SOL) for a position from its decoded legs. */
-export function positionPnlSol(legs: DlmmLeg[], meta: PoolMeta): number {
-  return positionEconomics(legs, meta).pnlSol;
 }

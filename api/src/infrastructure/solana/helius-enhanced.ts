@@ -2,6 +2,7 @@ import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { classifyTradingByType, type WalletTxFlow } from '@/domain/cashflow';
 import type { ResidualSell, WalletFlowRow } from '@/domain/dlmm';
+import { LAMPORTS_PER_SOL } from '@/domain/dlmm-pnl';
 import type { EnhancedTxGateway } from '@/domain/ports';
 import { TokenBucket } from '@/util/cache';
 
@@ -36,7 +37,6 @@ export interface PositionFlow {
   residualAmount: number;
 }
 
-const LAMPORTS_PER_SOL = 1e9;
 const PAGE_SIZE = 100;
 const INTER_PAGE_MS = 120; // gentle on the free-tier Enhanced endpoint
 
