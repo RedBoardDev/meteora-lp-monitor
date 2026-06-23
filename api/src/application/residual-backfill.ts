@@ -1,8 +1,8 @@
 import type { ClosedPosition } from '@binsight/shared';
 import type { Logger } from 'pino';
-import type { EnhancedTxGateway, PositionRepository, PositionsGateway } from '@/domain/ports';
+import type { EnhancedTxGateway, PositionRepository } from '@/domain/ports';
 import type { EventBus } from './event-bus';
-import { onchainRealizedPnl, realizedPnl, reconstructRealized } from './residual-realized';
+import { onchainRealizedPnl, reconstructRealized } from './residual-realized';
 
 /** Exact per-position SOL leg + net residual, decoded from on-chain DLMM events (positionHistory). */
 export type PositionFlow = {
@@ -16,25 +16,20 @@ const DAY_MS = 86_400_000;
 const RECONSTRUCT_CONCURRENCY = 6;
 
 /**
- * Re-marks historical closed positions to their REAL realized PnL. Meteora marks a closed position's
- * leftover non-SOL residual at pool-spot, which OVERSTATES it (selling a large/illiquid bag moves the
- * price down — proven 5–17% on real exits). This backfill instead values each residual at the SOL the
- * wallet REALLY received dumping it on-chain (Helius Enhanced sells + FIFO lot accounting).
+ * One-off, PURELY on-chain recovery of the purged tail: closed positions older than Meteora's ~7-month
+ * datapi retention, which it can no longer price. `RealizedPnlEngine` is the single authoritative
+ * writer of `market_pnl_sol` for every position it can reach (it recomputes the whole wallet's closed
+ * set on each close); this backfill only rebuilds the positions the engine cannot, decoding each
+ * position's exact SOL leg from its on-chain DLMM events + the real cash from selling its residual
+ * (FIFO over the wallet's actual sells, held remainder booked at 0 — old tokens are worthless cash).
  *
- * Any portion NOT matched to a real sell — genuinely still held, or sold in a way we can't attribute
- * (batched multi-token swap, out-of-window, or the wallet independently trades the same token) — is
- * kept at Meteora's close-time pool-spot mark. Crucially it is NEVER marked at a current price: that
- * would re-introduce drift and, for tokens the wallet trades outside the position, fabricate gains
- * (a held bag isn't realized cash). So an unmatched residual just falls back to Meteora's value.
- *
- * Safety: if the sell history came back incomplete (rate-limit / cap), positions older than the
- * oldest fetched sell are LEFT ALONE rather than overwritten from partial data.
+ * It is NOT an automatic path: it runs only when an operator hits `/admin/reconstruct-purged`, and it
+ * never marks a residual at a current price (that would fabricate gains for a held bag).
  */
 export class ResidualBackfill {
   private running = false;
 
   constructor(
-    private readonly gateway: PositionsGateway,
     private readonly enhanced: EnhancedTxGateway,
     private readonly positionFlow: (address: string) => Promise<PositionFlow>,
     private readonly repo: PositionRepository,
@@ -44,103 +39,6 @@ export class ResidualBackfill {
 
   get isRunning(): boolean {
     return this.running;
-  }
-
-  async run(wallet: string, daysBack: number): Promise<{ scanned: number; fixed: number }> {
-    if (this.running) return { scanned: 0, fixed: 0 };
-    if (!this.enhanced.enabled) {
-      this.logger.warn(
-        { wallet },
-        'residual backfill: skipped (no Helius api-key for Enhanced API)',
-      );
-      return { scanned: 0, fixed: 0 };
-    }
-    this.running = true;
-    let scanned = 0;
-    let fixed = 0;
-    let skipped = 0;
-    try {
-      // 1. Collect every closed position in the window (residual fields come from the Meteora datapi).
-      const pools = await this.gateway.listClosedPools(wallet, daysBack);
-      const closed: ClosedPosition[] = [];
-      for (const pool of pools) {
-        const cs = await this.gateway.fetchClosedPositions(wallet, pool).catch(() => []);
-        closed.push(...cs);
-      }
-      const withResidual = closed.filter(
-        (c) =>
-          (c.residualMarkSol ?? 0) > 0 &&
-          (c.residualAmount ?? 0) > 0 &&
-          c.residualMint &&
-          (c.closedAt ?? 0) > 0,
-      );
-      scanned = withResidual.length;
-      if (withResidual.length === 0) {
-        this.logger.info({ wallet }, 'residual backfill: no residual positions to re-mark');
-        return { scanned, fixed };
-      }
-
-      // 2. Fetch the wallet's real token→SOL sells back to the oldest residual close.
-      const oldestClose = Math.min(...withResidual.map((c) => c.closedAt ?? Date.now()));
-      const { sells, complete, oldestTs } = await this.enhanced.fetchSells(
-        wallet,
-        oldestClose - DAY_MS,
-      );
-      const oldestFetchedMs = oldestTs * 1000;
-
-      // 3. FIFO-attribute each residual to its real sells (no double-counting across positions).
-      const realized = reconstructRealized(closed, sells);
-      const byAddr = new Map(realized.map((r) => [r.positionAddress, r]));
-
-      // 4. PnL = pnlSol − pool-spot mark + (real sold proceeds). The residual the wallet REALLY dumped
-      //    (FIFO, 3-day window) is booked at its actual SOL; the remainder it never sold is booked at
-      //    ZERO, not pool-spot. A residual unsold 3 days after close is held/worthless — marking it at
-      //    Meteora's close-time pool-spot overstates dead tokens (the wallet view captures the real SOL
-      //    if/when it's ever dumped). Realized PnL counts only cash that actually came back.
-      for (const c of withResidual) {
-        const r = byAddr.get(c.positionAddress);
-        if (!r) continue;
-        // Incomplete history: trust only positions newer than the oldest sell we actually fetched.
-        if (!complete && (c.closedAt ?? 0) < oldestFetchedMs) {
-          skipped++;
-          continue;
-        }
-        await this.repo.setAuthoritativePnl(c.positionAddress, realizedPnl(c, r, 0));
-        fixed++;
-      }
-
-      // 5. Meteora deposit-underreport bug: some positions show deposit≈0 with a real withdrawal, so
-      //    Meteora's pnlSol is bogusly inflated (it's missing the cost). Recompute the SOL leg PURELY
-      //    on-chain (positionHistory) + the residual real cash. Rare → bounded per-position RPC. This
-      //    runs AFTER step 4 so it also overrides any residual-position that has the bug.
-      // The SOL leg comes from positionHistory (independent of the sell history), so process these
-      // even when the sell fetch was incomplete — the bogus pnlSol must not survive either way.
-      let depFixed = 0;
-      for (const c of closed) {
-        if ((c.depositSol ?? 0) >= 0.01 || (c.withdrawSol ?? 0) <= 0.1) continue;
-        const flow = await this.positionFlow(c.positionAddress);
-        if (!flow) continue;
-        // The SOL leg is exact and self-contained, so we always book it (the bogus pnlSol must not
-        // survive). But the residual real-cash comes from the FIFO sell ledger, which is only
-        // trustworthy when the sell fetch reached this close: under an incomplete fetch an older
-        // position's proceeds are partial, so book the SOL leg ALONE rather than adding partial cash.
-        const residTrusted = complete || (c.closedAt ?? 0) >= oldestFetchedMs;
-        const residCash = residTrusted ? (byAddr.get(c.positionAddress)?.soldProceeds ?? 0) : 0;
-        await this.repo.setAuthoritativePnl(c.positionAddress, flow.solLegSol + residCash);
-        depFixed++;
-      }
-
-      if (fixed > 0 || depFixed > 0) this.bus.emit('closedChanged', { wallet });
-      this.logger.info(
-        { wallet, scanned, fixed, depFixed, skipped, sells: sells.length, complete },
-        'residual backfill: complete (on-chain real cash)',
-      );
-    } catch (err) {
-      this.logger.error({ err, wallet }, 'residual backfill failed');
-    } finally {
-      this.running = false;
-    }
-    return { scanned, fixed };
   }
 
   /**

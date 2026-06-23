@@ -199,23 +199,10 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     return { ok: true };
   });
 
-  // Reconstruct the ACTUAL on-chain realized PnL for the caller's watched wallets (residual sells).
-  // Heavy (RPC per closed position) → runs in the background; the UI fills in via closedChanged.
-  // Deliberately caller-scoped (watchedOf), NOT requireOwner-gated despite the /admin/ prefix.
-  app.post<{ Querystring: { days?: string } }>('/admin/reprice', async (req, reply) => {
-    if (backfill.isRunning) return reply.code(409).send({ error: 'reprice already running' });
-    const days = Math.min(365, Math.max(1, Number(req.query.days) || 365));
-    const wallets = await watchedOf(req.account!.id);
-    // Serialize: run() guards on a single `isRunning` flag, so firing wallets concurrently would let
-    // only the first acquire it and silently drop the rest. Await each in turn (one shared backfill).
-    void (async () => {
-      for (const w of wallets) await backfill.run(w, days);
-    })();
-    return { ok: true, wallets: wallets.length, days };
-  });
-
-  // Whether a reprice/backfill is still running — lets the UI (and ops) know when history is settled.
-  app.get('/admin/reprice/status', async () => ({ running: backfill.isRunning }));
+  // Whether the on-chain backfill (reconstruct-purged) is still running — lets ops know when the
+  // purged-tail recovery is settled. market_pnl_sol for reachable positions is written automatically
+  // by RealizedPnlEngine on every close, so there is no separate manual reprice.
+  app.get('/admin/backfill/status', async () => ({ running: backfill.isRunning }));
 
   // The TRUE wallet PnL curve from on-chain SOL cash-flow (captures rug/slippage losses that the
   // position-level PnL misses). `days` = window length (default 30). 'all' (~3650) spans any wallet's
@@ -288,7 +275,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   // Rebuild closed-position PnL PURELY on-chain (Meteora's datapi has corrupt values, e.g. deposit=0).
   // `?all=1` rebuilds EVERY closed position; default only the purged tail Meteora can't price.
-  // Heavy one-off; runs in the background like /admin/reprice.
+  // Heavy one-off; runs in the background (status via /admin/backfill/status).
   // Deliberately caller-scoped (watchedOf), NOT requireOwner-gated despite the /admin/ prefix.
   app.post<{ Querystring: { all?: string } }>('/admin/reconstruct-purged', async (req, reply) => {
     if (backfill.isRunning) return reply.code(409).send({ error: 'backfill already running' });

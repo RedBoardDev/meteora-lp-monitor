@@ -121,8 +121,9 @@ export class RealizedPnlEngine {
    * not reported). Empty map when the Enhanced API is disabled (no api-key) or the wallet has no legs on
    * a SOL-paired pool — callers leave existing values untouched in that case. Returns `null` when the
    * buy/sell history came back INCOMPLETE (a Helius page kept failing, or the maxPages cap was hit): an
-   * incomplete sell history makes FIFO under-consume inventory → too much leftover "held" → inflation, so
-   * the engine must NOT hand back values to persist (it would overwrite good data with inflated ones).
+   * incomplete buy OR sell history makes FIFO under-consume inventory → too much leftover "held" →
+   * inflation, so the engine must NOT hand back values to persist (it would overwrite good data with
+   * inflated ones). Both legs matter: missing buys lose cost basis, missing sells leave residual unsold.
    */
   async computeForWallet(wallet: string): Promise<Map<string, number> | null> {
     const out = new Map<string, number>();
@@ -218,7 +219,7 @@ export class RealizedPnlEngine {
     if (!buysComplete || !sellsComplete) {
       this.logger.warn(
         { wallet, buysComplete, sellsComplete },
-        'realized-pnl: incomplete sell history — skipping persist to avoid overwriting with inflated held values',
+        'realized-pnl: incomplete buy/sell history — skipping persist to avoid overwriting with inflated held values',
       );
       return null;
     }

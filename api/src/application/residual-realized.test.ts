@@ -1,11 +1,6 @@
 import type { ClosedPosition } from '@binsight/shared';
 import { describe, expect, it } from 'vitest';
-import {
-  flowFromHistory,
-  type ResidualSell,
-  realizedPnl,
-  reconstructRealized,
-} from './residual-realized';
+import { flowFromHistory, type ResidualSell, reconstructRealized } from './residual-realized';
 
 const SOL = 'So11111111111111111111111111111111111111112';
 
@@ -136,34 +131,5 @@ describe('reconstructRealized — FIFO residual lot accounting', () => {
     expect(r.heldAmount).toBe(400);
     expect(r.fillFraction).toBeCloseTo(0.6, 9);
     expect(r.soldAmount + r.heldAmount).toBe(1000); // reconstruct the whole, no double-count
-  });
-});
-
-describe('realizedPnl', () => {
-  it('swaps the pool-spot mark for sold proceeds + held current value', () => {
-    const p = pos({ pnlSol: 0.5, residualMarkSol: 10 }); // pnl includes residual @ pool-spot 10
-    const r = {
-      positionAddress: 'p',
-      soldProceeds: 8.3,
-      soldAmount: 1000,
-      heldAmount: 0,
-      mint: 'TOK',
-      fillFraction: 1,
-    };
-    // real residual was 8.3 (not 10) → PnL drops by 1.7
-    expect(realizedPnl(p, r, 0)).toBeCloseTo(0.5 - 10 + 8.3, 9);
-  });
-
-  it('adds the current market value of a held remainder', () => {
-    const p = pos({ pnlSol: 0.5, residualMarkSol: 10 });
-    const r = {
-      positionAddress: 'p',
-      soldProceeds: 0,
-      soldAmount: 0,
-      heldAmount: 1000,
-      mint: 'TOK',
-      fillFraction: 0,
-    };
-    expect(realizedPnl(p, r, 7.5)).toBeCloseTo(0.5 - 10 + 7.5, 9); // held valued now at 7.5
   });
 });
