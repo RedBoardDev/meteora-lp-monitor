@@ -54,7 +54,7 @@ export class WebPushChannel implements NotificationChannel {
         } catch (err) {
           const code = (err as { statusCode?: number }).statusCode;
           if (code === 404 || code === 410)
-            await this.repo.remove(s.endpoint); // gone — prune
+            await this.repo.pruneEndpoint(s.endpoint); // gone — prune (owner-agnostic)
           else this.logger.warn({ err, tag: payload.tag }, 'web-push delivery failed');
         }
       }),

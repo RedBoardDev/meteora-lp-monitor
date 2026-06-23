@@ -266,7 +266,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
 
   app.post<{ Body: { endpoint?: unknown } }>('/push/unsubscribe', async (req) => {
     const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint : null;
-    if (endpoint) await pushRepo.remove(endpoint);
+    if (endpoint) await pushRepo.remove(req.account!.id, endpoint);
     return { ok: true };
   });
 

@@ -32,12 +32,23 @@ public actor Auth {
         return true
     }
 
-    /// Forget the credentials and any cached token.
-    public func logout() {
+    /// Revoke the backend session (so the JWT can't be replayed within its TTL), then forget the
+    /// credentials and any cached token. Best-effort on the network call — the local credentials are
+    /// always cleared even if the server is unreachable.
+    public func logout() async {
+        if let t = cachedToken { await postLogout(token: t) }
         Keychain.set("authAddress", "")
         Keychain.set("authPassword", "")
         cachedToken = nil
         expiresAt = nil
+    }
+
+    private func postLogout(token: String) async {
+        guard let url = URL(string: Config.apiURL + "/auth/logout") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        _ = try? await URLSession.shared.data(for: req)
     }
 
     /// Drop the cached token so the next `token()` re-logins (call after a 401).
