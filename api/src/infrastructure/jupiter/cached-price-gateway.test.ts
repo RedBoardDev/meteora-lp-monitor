@@ -44,4 +44,15 @@ describe('CachedPriceGateway', () => {
     expect(await g.getSolUsd()).toBe(100);
     expect(inner.calls).toBe(1);
   });
+
+  it('does NOT cache a null getSolUsd — the next call retries instead of being pinned to null (R24)', async () => {
+    let n = 0;
+    const inner = {
+      getPricesSol: async (mints: string[]) => new Map(mints.map((m) => [m, 1])),
+      getSolUsd: async () => (n++ === 0 ? null : 100), // Jupiter miss, then recovers
+    } as unknown as PriceGateway;
+    const g = new CachedPriceGateway(inner, { solUsdTtlMs: 10_000 });
+    expect(await g.getSolUsd()).toBeNull();
+    expect(await g.getSolUsd()).toBe(100); // old code would serve the cached null for the whole TTL
+  });
 });

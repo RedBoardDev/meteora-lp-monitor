@@ -128,7 +128,12 @@ export class SolanaRpcRateLimiter {
   /** web3.js fetch middleware: read the JSON-RPC method, gate on its limits, then let it proceed. */
   middleware(): FetchMiddleware {
     return (info, init, fetch) => {
-      void this.gate(rpcMethodOf(init?.body)).then(() => fetch(info, init));
+      // Proceed with the fetch whether the gate resolves OR rejects (a sleep/abort must never strand
+      // the request — web3.js would then hang forever waiting on a promise that never settles).
+      void this.gate(rpcMethodOf(init?.body)).then(
+        () => fetch(info, init),
+        () => fetch(info, init),
+      );
     };
   }
 }

@@ -40,15 +40,22 @@ export async function sessionStillValid(
   return accounts.isSessionValid(jti);
 }
 
+// Shed frames to a client that isn't draining (bufferedAmount past this) instead of growing the heap
+// unbounded — a 'state' push is fully superseded by the next one, and a degraded socket is better shed
+// than letting one stuck client OOM the process at 50–100 connections.
+const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
+
 function send(socket: WebSocket, data: unknown): void {
-  if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(data));
+  if (socket.readyState === socket.OPEN && socket.bufferedAmount <= MAX_BUFFERED_BYTES)
+    socket.send(JSON.stringify(data));
 }
 
 // Broadcast a payload that is IDENTICAL for every recipient: serialize it ONCE and send the same
 // frame to all matching sockets, instead of re-JSON.stringify-ing per client. During trading bursts
 // (many event/notify across many wallets) this removes N-1 redundant serializations per broadcast.
 function sendRaw(socket: WebSocket, frame: string): void {
-  if (socket.readyState === socket.OPEN) socket.send(frame);
+  if (socket.readyState === socket.OPEN && socket.bufferedAmount <= MAX_BUFFERED_BYTES)
+    socket.send(frame);
 }
 
 function safeJson(raw: string): unknown {

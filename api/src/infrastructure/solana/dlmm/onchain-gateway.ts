@@ -31,6 +31,7 @@ const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xW
 const TOKEN_PROGRAM = new PublicKey(TOKEN_PROGRAM_ID);
 const GMA_CHUNK = 100;
 const HISTORY_TTL_MS = 60_000; // open positions may still accrue events; closed are immutable
+const HISTORY_MAX = 5000; // bound the cache: closed entries have no TTL, so cap total + FIFO-evict
 
 /** base58 encode of a byte array (for getProgramAccounts memcmp filters). */
 const minimalBase58 = (b: Uint8Array): string => utils.bytes.bs58.encode(b);
@@ -147,6 +148,12 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     const hist = await fetchPositionHistory(this.conn, positionAddress);
     if (hist) {
       const closed = hist.events.some((e) => e.kind === 'close');
+      // Bound the (otherwise unbounded) cache: closed histories carry no TTL, so cap the total and
+      // FIFO-evict the oldest. An evicted entry is simply re-fetched on its next miss (immutable).
+      if (this.historyCache.size >= HISTORY_MAX && !this.historyCache.has(positionAddress)) {
+        const oldest = this.historyCache.keys().next().value;
+        if (oldest !== undefined) this.historyCache.delete(oldest);
+      }
       this.historyCache.set(positionAddress, { hist, at: Date.now(), closed });
     }
     return hist;

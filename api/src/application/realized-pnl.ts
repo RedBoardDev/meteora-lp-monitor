@@ -192,7 +192,12 @@ export class RealizedPnlEngine {
     const dec = (mint: string) => decMap.get(mint) ?? 9;
 
     // 4. Buys + sells from the wallet's earliest leg minus a day.
-    const oldestLegSec = Math.min(...legRows.map((l) => l.blockTime ?? Number.POSITIVE_INFINITY));
+    // O(n) reduce, NOT Math.min(...spread): at ~15k closed × ≥2 legs the spread crosses V8's argument
+    // ceiling (~124k) and throws RangeError, rejecting the whole pass for the heaviest wallets.
+    const oldestLegSec = legRows.reduce(
+      (m, l) => Math.min(m, l.blockTime ?? Number.POSITIVE_INFINITY),
+      Number.POSITIVE_INFINITY,
+    );
     const sinceMs = (Number.isFinite(oldestLegSec) ? oldestLegSec : 0) * 1000 - DAY_MS;
     const [{ buys, complete: buysComplete }, { sells, complete: sellsComplete }] =
       await Promise.all([

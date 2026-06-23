@@ -97,7 +97,10 @@ export class HeliusTokenMetadataGateway implements TokenMetadataGateway {
       const chunk = missing.slice(i, i + DAS_BATCH);
       let fetched: Map<string, TokenMeta>;
       try {
-        fetched = await this.flight(`${chunk[0]}:${chunk.length}`, () => this.transport(chunk));
+        // Key on the FULL sorted mint set — `${chunk[0]}:${len}` collided across wallets sharing the
+        // first mint + length, collapsing two distinct fetches into one and caching the loser's mints
+        // with truncated fallback symbols for 24h.
+        fetched = await this.flight([...chunk].sort().join(','), () => this.transport(chunk));
       } catch (err) {
         this.logger.warn(
           { err, n: chunk.length },
