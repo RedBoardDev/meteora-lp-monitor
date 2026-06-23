@@ -10,7 +10,7 @@ export interface RealizedResidual {
   soldProceeds: number;
   /** residual tokens accounted as sold. */
   soldAmount: number;
-  /** residual tokens still unsold — caller values these at the CURRENT market (Jupiter quote). */
+  /** residual tokens still unsold — production callers book these at 0 (held cash isn't realized). */
   heldAmount: number;
   mint: string;
   /** soldAmount / residualAmount — 1 = fully realized, 0 = entirely held. */
@@ -36,7 +36,8 @@ const DEFAULT_WINDOW_SEC = 3 * 86_400;
  * one swap, with no double-counting (a sell's tokens are consumed once). Pure & deterministic.
  *
  * Returns, per position, the SOL really received for the sold part and the still-held remainder.
- * The held remainder carries no realized value — the caller prices it at the current market.
+ * The held remainder carries no realized value — production callers book it at 0 (an unsold residual
+ * is held/worthless cash, not realized), NOT at a current-market quote.
  */
 export function reconstructRealized(
   positions: Pick<
@@ -102,20 +103,6 @@ export function reconstructRealized(
     });
   }
   return out;
-}
-
-/**
- * Real-cash closed PnL for one position: replace Meteora's pool-spot residual mark with the SOL
- * really received (sold part) plus the current market value of any still-held remainder.
- *   pnl_real = pnlSol − residualMarkSol + soldProceeds + heldValue
- * `heldValue` is the caller's current Jupiter quote for `heldAmount` (0 if none/no route).
- */
-export function realizedPnl(
-  closed: ClosedPosition,
-  r: RealizedResidual,
-  heldValue: number,
-): number {
-  return closed.pnlSol - (closed.residualMarkSol ?? 0) + r.soldProceeds + heldValue;
 }
 
 /**

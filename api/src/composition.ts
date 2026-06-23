@@ -139,7 +139,7 @@ export function compose(config: AppConfig): App {
     const hist = await onchain.positionHistory(address);
     return hist ? flowFromHistory(hist) : null;
   };
-  const backfill = new ResidualBackfill(gateway, enhanced, positionFlow, positionRepo, bus, logger);
+  const backfill = new ResidualBackfill(enhanced, positionFlow, positionRepo, bus, logger);
   // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + Helius buys/sells,
   // held residual marked via the shared price gateway). Triggered by the engine after a wallet's closed
   // set changes — the production port of scripts/fifo-cost-basis.ts.
