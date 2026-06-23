@@ -67,7 +67,17 @@ public final class LiveClient {
     }
 
     private func wsURL(token: String) -> URL? {
-        let base = Config.apiURL.replacingOccurrences(of: "http", with: "ws")
+        // Anchor the scheme swap to the PREFIX — a blanket http→ws replace would corrupt any host/path
+        // that contains "http" into an unconnectable URL.
+        let api = Config.apiURL
+        let base: String
+        if api.hasPrefix("https") {
+            base = "wss" + api.dropFirst("https".count)
+        } else if api.hasPrefix("http") {
+            base = "ws" + api.dropFirst("http".count)
+        } else {
+            base = api
+        }
         return URL(string: "\(base)/live?token=\(token)")
     }
 
@@ -86,7 +96,10 @@ public final class LiveClient {
                 self.scheduleReconnect()
                 return
             }
-            if self.stopped { return }
+            // Re-check AFTER the await: stop() or a heartbeat-triggered scheduleReconnect() may have
+            // landed while we fetched the token. Opening a socket now would leak it (a parallel reconnect
+            // owns the connection) — bail and let that path drive.
+            if self.stopped || self.reconnecting { return }
             let t = URLSession.shared.webSocketTask(with: url)
             self.task = t
             t.resume()
@@ -120,7 +133,16 @@ public final class LiveClient {
     }
 
     private func handle(_ data: Data) {
-        guard let msg = try? ServerMessage(from: data) else { return }
+        let msg: ServerMessage
+        do {
+            msg = try ServerMessage(from: data)
+        } catch {
+            // Don't silently swallow a decode failure: the socket stays .live but the numbers would
+            // freeze (a renamed/null backend field drops the whole non-optional state message). Log it
+            // so the schema drift is diagnosable instead of an invisible freeze.
+            NSLog("[LiveClient] failed to decode server message: %@", String(describing: error))
+            return
+        }
         switch msg {
         case .state(let state): store.apply(state)
         case .event:
