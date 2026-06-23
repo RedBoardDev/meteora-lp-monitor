@@ -77,7 +77,9 @@ export class CachedPriceGateway implements PriceGateway {
       try {
         await this.bucket.acquire();
         const v = await this.inner.getSolUsd();
-        this.solUsd = { v, exp: Date.now() + this.solUsdTtlMs };
+        // Do NOT cache a null (Jupiter miss) — caching it would pin SOL/USD to null for the whole TTL
+        // even after Jupiter recovers. Leave the cache empty so the next call retries immediately.
+        if (v != null) this.solUsd = { v, exp: Date.now() + this.solUsdTtlMs };
         return v;
       } finally {
         this.solUsdFlight = null;

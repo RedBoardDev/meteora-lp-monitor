@@ -387,6 +387,7 @@ export class PostgresPositionRepository implements PositionRepository {
       .select({
         closedCount: sql<number>`count(*)::int`,
         wins: sql<number>`count(*) filter (where ${PNL} > 0)::int`,
+        losses: sql<number>`count(*) filter (where ${PNL} < 0)::int`,
         totalPnlSol: sql<number>`coalesce(sum(${PNL}), 0)::double precision`,
         todayPnlSol: sql<number>`coalesce(sum(${PNL}) filter (where ${positionsTable.closedAt} >= ${todayStartMs}), 0)::double precision`,
         totalFeesSol: sql<number>`coalesce(sum(${positionsTable.claimedFeesSol}), 0)::double precision`,
@@ -403,6 +404,7 @@ export class PostgresPositionRepository implements PositionRepository {
     const closedCount = n(agg?.closedCount);
     if (!agg || closedCount === 0) return empty;
     const wins = n(agg.wins);
+    const losses = n(agg.losses);
     const totalPnl = n(agg.totalPnlSol);
     const totalVolume = n(agg.totalVolumeSol);
     const span =
@@ -436,8 +438,10 @@ export class PostgresPositionRepository implements PositionRepository {
     return {
       closedCount,
       wins,
-      losses: closedCount - wins,
-      winRate: (wins / closedCount) * 100,
+      losses,
+      // win rate over DECISIVE trades only — a break-even (PnL exactly 0, reachable for un-enriched
+      // closes) is neither a win nor a loss, so it must not be counted as a loss nor dilute the rate.
+      winRate: wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0,
       totalPnlSol: totalPnl,
       todayPnlSol: n(agg.todayPnlSol),
       totalFeesSol: n(agg.totalFeesSol),

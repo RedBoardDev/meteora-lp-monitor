@@ -66,7 +66,9 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(cors, {
     origin: deps.config.WEB_ORIGINS.split(',').map((o) => o.trim()),
   });
-  await app.register(websocket);
+  // maxPayload caps inbound WS frames — client messages (subscribe/presence/ping) are tiny, so 1 MB is
+  // generous; it stops a hostile client from pushing huge frames into the server's receive buffer.
+  await app.register(websocket, { options: { maxPayload: 1024 * 1024 } });
 
   // Catch-all error handler: log the real error, return a clean shape (no stack/internals leaked).
   app.setErrorHandler((err, req, reply) => {

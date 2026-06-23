@@ -267,6 +267,20 @@ describe('PostgresPositionRepository — statsAggregate (SQL, no row transfer)',
     }
   });
 
+  it('excludes break-even closes (PnL exactly 0) from winRate and the loss count (R20)', async () => {
+    const repo = await newRepo();
+    await repo.upsertClosed([
+      { ...base, positionAddress: 'W1', pnlSol: 2, closedAt: DAY, pnlSource: 'pool' }, // win
+      { ...base, positionAddress: 'L1', pnlSol: -1, closedAt: DAY, pnlSource: 'pool' }, // loss
+      { ...base, positionAddress: 'B1', pnlSol: 0, closedAt: DAY, pnlSource: 'pool' }, // break-even
+    ]);
+    const s = await repo.statsAggregate(['w'], 0);
+    expect(s.closedCount).toBe(3);
+    expect(s.wins).toBe(1);
+    expect(s.losses).toBe(1); // break-even is NOT a loss (the old closedCount−wins would say 2)
+    expect(s.winRate).toBeCloseTo(50); // 1 / (1 win + 1 loss); old code diluted it to 1/3 ≈ 33%
+  });
+
   it('windows by sinceMs (closed_at >= since)', async () => {
     const repo = await newRepo();
     await repo.upsertClosed([
