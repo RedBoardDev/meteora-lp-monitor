@@ -1,4 +1,4 @@
-import { forwardAuthSession } from '@/infrastructure/config';
+import { forwardAuthSession } from '@/infrastructure/auth-flow';
 
 // Password-reset step 2: prove wallet ownership + set a new password. On success the backend returns a
 // fresh session token (carrying the bumped version, so old sessions are dead) — log the user straight in.
