@@ -1,12 +1,24 @@
 'use client';
 
 import type { ClosedPosition, StrategyFamily } from '@binsight/shared';
+import dynamic from 'next/dynamic';
 import { type KeyboardEvent, type MouseEvent, type ReactNode, useState } from 'react';
 import type { Tone } from '@/domain/position';
 import { useMoney } from '@/presentation/hooks/use-money';
 import { Badge, cn, IconChartToggle, Skeleton, toneText } from '@/presentation/ui';
-import { PositionChart, type PositionChartInput } from './position-chart';
+import type { PositionChartInput } from './position-chart';
 import { ShareCardButton } from './share-card-button';
+
+// Lazy-load the chart (and its heavy klinecharts dep) only when a row's chart is opened — keeps
+// klinecharts out of the dashboard's initial client bundle.
+const PositionChart = dynamic(() => import('./position-chart').then((m) => m.PositionChart), {
+  ssr: false,
+  loading: () => (
+    <div className="border-border border-t bg-bg p-6">
+      <Skeleton className="h-64 w-full" />
+    </div>
+  ),
+});
 
 /** Token logo URLs from the datapi are often slow/flaky sources (ipfs.io gateways, the archived
  *  solana-labs token-list on raw.githubusercontent). Route them through the wsrv.nl image proxy,
