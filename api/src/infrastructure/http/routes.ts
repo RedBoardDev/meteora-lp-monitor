@@ -226,7 +226,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     const days = Math.min(3650, Math.max(1, Number(req.query.days) || 30));
     const wallets = await scopeWallets(req.account!.id, req.query.wallet);
     const sinceSec = days >= 3650 ? 0 : Math.floor((Date.now() - days * 86_400_000) / 1000);
-    return { points: await networthSnapshots.reconstructedCurve(wallets, sinceSec) };
+    // Cache + coalesce like the sibling /wallet/pnl-curve: same 30s TTL (bumped per wallet on a close),
+    // so a herd of viewers collapses to ONE reconstruction scan instead of N.
+    return curveCache.wrap(`networth|${req.query.wallet ?? 'all'}|${days}`, wallets, async () => ({
+      points: await networthSnapshots.reconstructedCurve(wallets, sinceSec),
+    }));
   });
 
   // OHLCV candles for a pool's position price chart (GeckoTerminal, in SOL = our range unit). Cached

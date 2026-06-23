@@ -30,8 +30,8 @@ export class WalletPnlService {
     // `complete` = every requested wallet has finished its full-history flow ingest. A wallet still
     // backfilling (no cursor yet, or cursor.complete=false) makes the curve partial — surfaced so the
     // UI can keep showing its "indexing…" state instead of presenting a half-built curve as final.
-    const cursors = await Promise.all(wallets.map((w) => this.flowRepo.getCursor(w)));
-    const complete = cursors.every((c) => c?.complete === true);
+    // One COUNT query rather than N per-wallet getCursor point-lookups (the wallet=all N+1).
+    const complete = await this.flowRepo.allCursorsComplete(wallets);
 
     const daily = await this.flowRepo.dailyFlows(wallets, sinceSec);
     const { days, totalTradingSol, totalExternalSol } = buildCashflowCurveFromDaily(daily);
