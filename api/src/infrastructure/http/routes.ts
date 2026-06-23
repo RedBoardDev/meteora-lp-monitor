@@ -362,7 +362,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
     return reply
       .header('content-type', 'text/csv; charset=utf-8')
-      .header('content-disposition', 'attachment; filename="meteora-closed-positions.csv"')
+      .header('content-disposition', 'attachment; filename="binsight-closed-positions.csv"')
       .send(lines.join('\n'));
   });
 

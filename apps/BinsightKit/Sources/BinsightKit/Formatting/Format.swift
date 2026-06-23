@@ -10,7 +10,7 @@ public extension Font {
 }
 
 public func signed(_ n: Double) -> String { (n >= 0 ? "+" : "") + String(format: "%.4f", n) }
-public func abs3(_ n: Double) -> String { String(format: "%.4f", abs(n)) }
+public func abs4(_ n: Double) -> String { String(format: "%.4f", abs(n)) }
 public func pct2(_ n: Double) -> String { String(format: "%+.2f%%", n) }
 public func short(_ a: String) -> String { a.count > 8 ? "\(a.prefix(4))…\(a.suffix(4))" : a }
 

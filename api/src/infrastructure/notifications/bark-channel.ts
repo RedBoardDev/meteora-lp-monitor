@@ -15,7 +15,7 @@ export class BarkChannel implements NotificationChannel {
   async deliver(event: LiveEvent): Promise<void> {
     const key = this.getKey();
     if (!key) return; // disabled
-    const group = event.wallet ? `Meteora ${event.wallet.slice(0, 4)}` : 'Meteora';
+    const group = event.wallet ? `Binsight ${event.wallet.slice(0, 4)}` : 'Binsight';
     const url =
       `${this.baseUrl}/${encodeURIComponent(key)}` +
       `/${encodeURIComponent(event.title)}` +

@@ -36,7 +36,7 @@ struct BinsightMacApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .refresh)) { _ in
                     client.refreshNow()
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .lpmPresenceShouldRefresh)) { _ in
+                .onReceive(NotificationCenter.default.publisher(for: .presenceShouldRefresh)) { _ in
                     client.refreshPresence() // notif toggle flipped → update routing now
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .setScope)) { note in

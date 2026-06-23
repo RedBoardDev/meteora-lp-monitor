@@ -68,7 +68,7 @@ public struct NotificationsEditor: View {
                 Config.notificationsEnabled = v
                 // Drop/restore this device's presence at once so routing (native vs Bark) updates
                 // immediately instead of waiting for the next heartbeat.
-                NotificationCenter.default.post(name: .lpmPresenceShouldRefresh, object: nil)
+                NotificationCenter.default.post(name: .presenceShouldRefresh, object: nil)
                 if v { Task { await ensurePermission() } }
             },
         )

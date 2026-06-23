@@ -30,7 +30,7 @@ public struct PositionCard: View {
             }
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Size \(abs3(p.sizeSol)) SOL · \(ageString(p.openedAt))")
+                    Text("Size \(abs4(p.sizeSol)) SOL · \(ageString(p.openedAt))")
                         .font(.data(11)).foregroundStyle(.secondary)
                     FeesLabel(position: p)
                 }

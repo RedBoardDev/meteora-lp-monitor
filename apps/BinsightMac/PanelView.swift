@@ -80,7 +80,7 @@ struct PanelView: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text("WALLET").font(.system(size: 10, weight: .semibold))
                     .tracking(0.5).foregroundStyle(.secondary)
-                Text("\(abs3(t.walletTotalSol)) SOL")
+                Text("\(abs4(t.walletTotalSol)) SOL")
                     .font(.data(15, weight: .semibold))
             }
         }
@@ -88,11 +88,11 @@ struct PanelView: View {
 
     private func statStrip(_ t: PortfolioTotals) -> some View {
         HStack(alignment: .top, spacing: 0) {
-            statCol("Fees", value: "\(abs3(t.feesSol)) SOL") {
+            statCol("Fees", value: "\(abs4(t.feesSol)) SOL") {
                 Text(pctOf(t.claimedFeesSol + t.unclaimedFeesSol, t.tvlSol))
                     .font(.data(11)).foregroundStyle(.secondary)
             }
-            statCol("TVL", value: "\(abs3(t.tvlSol)) SOL") {
+            statCol("TVL", value: "\(abs4(t.tvlSol)) SOL") {
                 EmptyView()
             }
             todayCol
@@ -229,9 +229,7 @@ struct PanelView: View {
         // Tap opens the health popover with an explicit Reconnect button (parity with iOS) — a bare
         // tap no longer reconnects accidentally.
         .onTapGesture { showHealthDetail = true }
-        .onHover { hovering in
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-        }
+        .pointingHandCursor()
         .popover(isPresented: $showHealthDetail, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 12) {
                 HealthDetailView(health: store.health)
@@ -277,7 +275,7 @@ private struct ClosedRow: View {
                 .foregroundStyle(pnlColor(c.pnlPctSol))
             HStack(spacing: 3) {
                 Image(systemName: "centsign.circle")
-                Text(abs3(c.feesSol))
+                Text(abs4(c.feesSol))
             }
             .font(.data(11))
             .foregroundStyle(.secondary)
