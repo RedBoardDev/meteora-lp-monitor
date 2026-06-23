@@ -3,9 +3,12 @@ import SwiftUI
 
 @main
 struct BinsightMacApp: App {
-    @State private var store = PortfolioStore()
+    // No inline initializers: init() builds the wired instances. Inline `= PortfolioStore()` /
+    // `= MacPresence()` would construct THROWAWAY instances (the MacPresence one registering — then
+    // leaking — its 4 system observers) before init() overwrites the backing State.
+    @State private var store: PortfolioStore
     @State private var client: LiveClient
-    @State private var presence = MacPresence()
+    @State private var presence: MacPresence
 
     init() {
         let store = PortfolioStore()
