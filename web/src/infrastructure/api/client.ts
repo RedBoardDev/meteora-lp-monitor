@@ -154,6 +154,14 @@ async function postJson(path: string, body: unknown): Promise<Response> {
   });
 }
 
+/** POST to an auth endpoint and normalise the {ok}|{ok:false,error} result (login/register/reset). */
+async function postAuth(path: string, body: unknown): Promise<{ ok: boolean; error?: string }> {
+  const res = await postJson(path, body);
+  if (res.ok) return { ok: true };
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return { ok: false, error: data.error };
+}
+
 /**
  * Auth endpoints live outside the proxy (they manage the httpOnly cookie directly). Identity is the
  * Solana wallet address; the one-time signature is required only at register and password reset.
@@ -181,35 +189,26 @@ export const authApi = {
     };
   },
 
-  async login(address: string, password: string): Promise<{ ok: boolean; error?: string }> {
-    const res = await postJson('/api/auth/login', { address, password });
-    if (res.ok) return { ok: true };
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, error: data.error };
+  login(address: string, password: string): Promise<{ ok: boolean; error?: string }> {
+    return postAuth('/api/auth/login', { address, password });
   },
 
-  async register(p: {
+  register(p: {
     address: string;
     signature: string;
     nonce: string;
     password: string;
   }): Promise<{ ok: boolean; error?: string }> {
-    const res = await postJson('/api/auth/register', p);
-    if (res.ok) return { ok: true };
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, error: data.error };
+    return postAuth('/api/auth/register', p);
   },
 
-  async reset(p: {
+  reset(p: {
     address: string;
     signature: string;
     nonce: string;
     password: string;
   }): Promise<{ ok: boolean; error?: string }> {
-    const res = await postJson('/api/auth/reset', p);
-    if (res.ok) return { ok: true };
-    const data = (await res.json().catch(() => ({}))) as { error?: string };
-    return { ok: false, error: data.error };
+    return postAuth('/api/auth/reset', p);
   },
 
   async logout(): Promise<void> {

@@ -3,15 +3,12 @@
 import type { NetworthCurvePoint } from '@binsight/shared';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
-import { PERIOD_OPTIONS, type Period, sinceMs } from '@/domain/period';
+import { ALL_TIME_DAYS, PERIOD_OPTIONS, type Period, sinceMs } from '@/domain/period';
 import { toneOf } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';
 import { useMoney } from '@/presentation/hooks/use-money';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import { Badge, Card, cn, Skeleton, SolMark, Stat, TickFlash } from '@/presentation/ui';
-
-/** Days window for the all-time Net Worth curve (sliced client-side per the selected period). */
-const ALL_TIME_DAYS = 3650;
 
 /** Short label for the selected period (e.g. "1M") — used in the "Gain (1M)" stat caption. */
 function periodLabel(period: Period): string {

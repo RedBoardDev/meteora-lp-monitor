@@ -2,6 +2,10 @@ export type Period = '24h' | '7d' | '1m' | '3m' | '1y' | 'ytd' | 'all';
 
 const DAY_MS = 86_400_000;
 
+/** All-time window in days: ~10y > Solana's age, so it effectively means "no limit" — the curve stops
+ *  at the wallet's first tx. Single source of truth (the API caps to the same value). */
+export const ALL_TIME_DAYS = 3650;
+
 /** Fixed look-back windows in ms. 'ytd' and 'all' are dynamic and resolved in `sinceMs`. */
 const WINDOW_MS: Record<Exclude<Period, 'ytd' | 'all'>, number> = {
   '24h': DAY_MS,
@@ -40,9 +44,7 @@ export function periodDays(period: Period, now: number): number {
     case 'ytd':
       return Math.max(1, Math.ceil((now - startOfYearMs(now)) / DAY_MS));
     default:
-      // 'all' — span the whole chain (~10y > Solana's age). The curve stops at the wallet's actual
-      // first tx, so this is effectively "no limit": it covers ANY wallet whatever its age.
-      return 3650;
+      return ALL_TIME_DAYS; // 'all'
   }
 }
 

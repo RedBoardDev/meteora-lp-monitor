@@ -72,7 +72,7 @@ export function PnlBridge({ positionsPnl }: { positionsPnl: number }) {
     <div className="grid grid-cols-2 gap-x-6 gap-y-5 sm:grid-cols-3 lg:grid-cols-4">
       <div className="col-span-2 sm:col-span-3 lg:col-span-2">
         <span className="font-medium text-faint text-xs uppercase tracking-wide">
-          PnL réel ({periodLabel(period)}){curve && !curve.complete && ' · indexing…'}
+          Real PnL ({periodLabel(period)}){curve && !curve.complete && ' · indexing…'}
           <span
             title="Your REAL PnL over the period: realPnl(now) − realPnl(start), where real PnL = your wallet value NET of apports (deposits/withdrawals). It can be negative (you injected more than your current value). Verified on-chain."
             role="img"
