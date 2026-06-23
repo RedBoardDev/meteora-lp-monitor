@@ -26,6 +26,7 @@ describe('OnchainDlmmGateway — Layer A discovery gating', () => {
 
     const fresh = await g.snapshotWallet(OWNER);
     expect(conn.gpaCalls).toBe(1); // discovery (gPA) ran on the fresh path
+    expect(fresh.complete).toBe(true); // no positions → nothing could be under-counted
 
     const reused = await g.snapshotWallet(OWNER, fresh.plan);
     expect(conn.gpaCalls).toBe(1); // discovery SKIPPED — the 10-credit gPA is gated away

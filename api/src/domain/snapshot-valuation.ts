@@ -28,7 +28,15 @@ export function valueSnapshot(
 ): OnchainValued {
   const priceOf = (mint: string, fallback: number): number =>
     mint === SOL_MINT ? 1 : (priceSol.get(mint) ?? fallback);
+  // A non-SOL mint is "priced" only when Jupiter quoted it (the map omits misses, and every quote is
+  // >0) OR the on-chain pool gives a real (>0) fallback. A held mint that resolves to neither is
+  // silently valued at 0 → the total is deflated → the valuation is incomplete (not persisted as fresh).
+  const priced = (mint: string, fallback: number): boolean =>
+    mint === SOL_MINT || priceSol.has(mint) || fallback > 0;
 
+  // Start from the chain-read completeness (unfetched bin-array / unknown decimals — see snapshotWallet),
+  // then fold in price completeness below.
+  let complete = snap.complete;
   let tvl = 0;
   let fees = 0;
   let rent = 0;
@@ -39,8 +47,13 @@ export function valueSnapshot(
     const yIsSol = p.tokenYMint === SOL_MINT;
     // Fallbacks from the on-chain pool price: X-in-SOL when Y is SOL; Y-in-SOL when X is SOL.
     const poolXinY = poolPriceXinY(p);
-    const pX = priceOf(p.tokenXMint, yIsSol ? poolXinY : 0);
-    const pY = priceOf(p.tokenYMint, p.tokenXMint === SOL_MINT && poolXinY > 0 ? 1 / poolXinY : 0);
+    const fbX = yIsSol ? poolXinY : 0;
+    const fbY = p.tokenXMint === SOL_MINT && poolXinY > 0 ? 1 / poolXinY : 0;
+    const pX = priceOf(p.tokenXMint, fbX);
+    const pY = priceOf(p.tokenYMint, fbY);
+    // Only a side that actually holds value (tokens or unclaimed fees) can deflate the total.
+    if ((p.amountX > 0n || p.feeX > 0n) && !priced(p.tokenXMint, fbX)) complete = false;
+    if ((p.amountY > 0n || p.feeY > 0n) && !priced(p.tokenYMint, fbY)) complete = false;
     const size = ui(p.amountX, p.decimalsX) * pX + ui(p.amountY, p.decimalsY) * pY;
     const fee = ui(p.feeX, p.decimalsX) * pX + ui(p.feeY, p.decimalsY) * pY;
     sizeBy.set(p.positionAddress, size);
@@ -51,7 +64,10 @@ export function valueSnapshot(
   }
 
   let idle = Number(snap.nativeLamports) / LAMPORTS_PER_SOL;
-  for (const t of snap.idleTokens) idle += ui(t.amount, t.decimals) * priceOf(t.mint, 0);
+  for (const t of snap.idleTokens) {
+    idle += ui(t.amount, t.decimals) * priceOf(t.mint, 0);
+    if (t.amount > 0n && !priced(t.mint, 0)) complete = false;
+  }
 
   return {
     slot: snap.slot,
@@ -62,6 +78,7 @@ export function valueSnapshot(
     lockedRentSol: rent,
     walletTotalSol: tvl + idle + fees + rent,
     positionCount: snap.positions.length,
+    complete,
     sizeSolByPosition: sizeBy,
     feeSolByPosition: feeBy,
   };

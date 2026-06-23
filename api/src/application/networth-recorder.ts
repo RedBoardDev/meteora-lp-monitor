@@ -50,6 +50,10 @@ export class NetworthRecorder {
     // persist a double-counted total under a non-address key.
     const wallet = state.scope;
     if (wallet === 'all') return;
+    // Only persist a COMPLETE, slot-consistent snapshot. An incomplete valuation (missing Jupiter price,
+    // unfetched bin-array, unknown decimals — all surfaced as freshness!=='fresh') would deflate/inflate
+    // the total; skip it WITHOUT consuming the bucket so a later fresh sample records the real number.
+    if (state.freshness !== 'fresh') return;
 
     const ts = Date.now();
     const bucket = Math.floor(ts / 1000 / BUCKET_SECONDS);

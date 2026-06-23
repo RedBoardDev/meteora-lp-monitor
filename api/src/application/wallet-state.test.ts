@@ -59,6 +59,7 @@ const onchain = (over: Partial<OnchainValued> = {}): OnchainValued => ({
   lockedRentSol: 0,
   walletTotalSol: 0,
   positionCount: 0,
+  complete: true,
   sizeSolByPosition: new Map(),
   feeSolByPosition: new Map(),
   ...over,

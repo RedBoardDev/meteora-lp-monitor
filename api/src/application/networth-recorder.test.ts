@@ -7,13 +7,14 @@ import { NetworthRecorder, type NetworthSnapshotStore } from './networth-recorde
 function stateFor(
   scope: string,
   totals: { walletTotalSol: number; tvlSol: number; idleSol: number },
+  freshness: 'fresh' | 'syncing' = 'fresh',
 ) {
   return {
     scope,
     totals: { ...totals },
     openPositions: [],
     asOfSlot: null,
-    freshness: 'fresh',
+    freshness,
     updatedAt: Date.now(),
   } as unknown as WalletState;
 }
@@ -75,6 +76,23 @@ describe('NetworthRecorder', () => {
 
     expect(snapRepo.record).toHaveBeenCalledTimes(2);
     expect(snapRepo.record.mock.calls.map((c) => c[0])).toEqual(['walletA', 'walletB']);
+  });
+
+  it('skips an incomplete valuation (freshness !== "fresh") WITHOUT consuming the bucket', async () => {
+    const { snapRepo, flowRepo, logger } = deps();
+    const bus = busStub();
+    new NetworthRecorder(bus, snapRepo, flowRepo, logger).start();
+
+    // An incomplete snapshot (missing price / null bin-array / unknown decimals → 'syncing') would
+    // deflate/inflate the wallet total — it must NOT be persisted as a Net Worth point.
+    await bus.emit(stateFor('walletA', { walletTotalSol: 3, tvlSol: 3, idleSol: 0 }, 'syncing'));
+    expect(snapRepo.record).not.toHaveBeenCalled();
+
+    // …and skipping must NOT consume walletA's 15-min bucket: the next FRESH sample in the same bucket
+    // records the real number. (Guards against placing the freshness gate after the bucket throttle.)
+    await bus.emit(stateFor('walletA', { walletTotalSol: 7, tvlSol: 7, idleSol: 0 }, 'fresh'));
+    expect(snapRepo.record).toHaveBeenCalledTimes(1);
+    expect(snapRepo.record.mock.calls[0]![1]).toMatchObject({ walletTotalSol: 7 });
   });
 
   it('ignores the aggregated "all" scope (never persisted under a non-address key)', async () => {
