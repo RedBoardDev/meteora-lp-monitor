@@ -184,6 +184,12 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       if (INTER_PAGE_MS) await new Promise((r) => setTimeout(r, INTER_PAGE_MS));
     }
     if (reachedFloor) complete = true;
+    if (page >= this.maxPages && !complete) {
+      this.logger.warn(
+        { wallet, maxPages: this.maxPages },
+        'enhanced API (buys) hit maxPages — INCOMPLETE',
+      );
+    }
     this.logger.info({ wallet, buys: buys.length, complete }, 'enhanced: buys fetched');
     return { buys, complete, oldestTs };
   }
@@ -202,7 +208,8 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     let before: string | undefined;
     let reachedFloor = false;
     let complete = false;
-    for (let page = 0; page < this.maxPages && !reachedFloor; page++) {
+    let page = 0;
+    for (; page < this.maxPages && !reachedFloor; page++) {
       const url =
         `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
         `?api-key=${this.apiKey}&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
@@ -233,6 +240,12 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       if (INTER_PAGE_MS) await new Promise((r) => setTimeout(r, INTER_PAGE_MS));
     }
     if (reachedFloor) complete = true;
+    if (page >= this.maxPages && !complete) {
+      this.logger.warn(
+        { wallet, maxPages: this.maxPages },
+        'enhanced API (wallet flows) hit maxPages — INCOMPLETE',
+      );
+    }
     this.logger.info({ wallet, flows: flows.length, complete }, 'enhanced: wallet flows fetched');
     return { flows, complete };
   }
@@ -499,7 +512,7 @@ export function parseSwapSell(tx: EnhancedTx, wallet: string): ResidualSell | nu
  * to a position's deposited tokens exactly like it attributes sells to residuals — i.e. the real SOL
  * entry cost of pre-bought deposited tokens (the missing piece for token/mixed-deposit positions).
  */
-function parseSwapBuy(tx: EnhancedTx, wallet: string): ResidualSell | null {
+export function parseSwapBuy(tx: EnhancedTx, wallet: string): ResidualSell | null {
   const tts = tx.tokenTransfers ?? [];
   const candidates = [
     ...new Set(
