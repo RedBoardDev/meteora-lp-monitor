@@ -5,7 +5,6 @@ import {
   legValueSol,
   openUnrealizedPnlSol,
   positionEconomics,
-  positionPnlSol,
   solSideOf,
 } from './dlmm-pnl';
 
@@ -54,7 +53,7 @@ describe('positionPnlSol — validated against Meteora on real on-chain data', (
   ];
 
   it('reproduces Meteora pnl 0.2415 to the cent', () => {
-    expect(positionPnlSol(legs, meta)).toBeCloseTo(0.2415, 3);
+    expect(positionEconomics(legs, meta).pnlSol).toBeCloseTo(0.2415, 3);
   });
 
   it('values the deposit leg = Meteora deposit_sol 6.0393', () => {
@@ -85,7 +84,7 @@ describe('positionPnlSol — orientation + direction', () => {
       leg('withdraw', 0, 0n, 1_500_000_000n),
       leg('claim', 0, 0n, 100_000_000n),
     ];
-    expect(positionPnlSol(legs, meta)).toBeCloseTo(0.6, 9);
+    expect(positionEconomics(legs, meta).pnlSol).toBeCloseTo(0.6, 9);
   });
 
   it('values the non-SOL leg via price for a SOL-as-X pool (inverted)', () => {

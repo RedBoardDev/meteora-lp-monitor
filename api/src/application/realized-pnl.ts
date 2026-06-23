@@ -1,7 +1,7 @@
 import { SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { LoadedPoolMeta, ResidualSell } from '@/domain/dlmm';
-import { binPriceRaw } from '@/domain/dlmm-pnl';
+import { binPriceRaw, LAMPORTS_PER_SOL } from '@/domain/dlmm-pnl';
 import type {
   EnhancedTxGateway,
   LegRepository,
@@ -33,7 +33,6 @@ import type {
  *   PnL(P) = solLeg[P] − entryCost[P] + exitCredit[P] + realizedGain[P] + heldValue[P]
  */
 
-const LAMPORTS_PER_SOL = 1e9;
 const EPS = 1e-9;
 const DAY_MS = 86_400_000;
 const CAP_WINDOW_SEC = 7 * 86_400;
