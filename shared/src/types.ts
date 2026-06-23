@@ -1,11 +1,19 @@
 import { z } from 'zod';
 
+/** A Solana address in the base58 alphabet (no 0/O/I/l), 32–44 chars. Defence-in-depth at the wire
+ *  edge: the write path already calls isValidSolanaAddress, but the schemas accepted arbitrary chars. */
+const Base58Address = z
+  .string()
+  .min(32)
+  .max(44)
+  .regex(/^[1-9A-HJ-NP-Za-km-z]+$/, 'must be a base58 Solana address');
+
 /* ────────────────────────────────────────────────────────────────────────
  * Wallets
  * ──────────────────────────────────────────────────────────────────────── */
 
 export const WalletSchema = z.object({
-  address: z.string().min(32).max(44),
+  address: Base58Address,
   label: z.string().max(64).default(''),
   color: z.string().max(32).optional(),
   createdAt: z.number().int(),
@@ -342,7 +350,8 @@ export type ProfitBucket = z.infer<typeof ProfitBucketSchema>;
 
 /** Client → server messages. */
 export const ClientMessageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('subscribe'), scope: z.string() }),
+  // scope is the whole watchlist ('all') or a single base58 wallet address — never arbitrary text.
+  z.object({ type: z.literal('subscribe'), scope: z.union([z.literal('all'), Base58Address]) }),
   z.object({
     type: z.literal('presence'),
     device: z.enum(['mac', 'web']),
