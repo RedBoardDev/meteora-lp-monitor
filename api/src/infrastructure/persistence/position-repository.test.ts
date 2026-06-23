@@ -96,6 +96,25 @@ describe('PostgresPositionRepository — closed PnL', () => {
     ]);
     expect((await read(repo)).pnlSol).toBeCloseTo(-0.19174);
   });
+
+  it('setAuthoritativePnlMany writes market_pnl_sol for many positions in one statement (O04/R13)', async () => {
+    const repo = await newRepo();
+    const closedAt = Date.now() - 300_000; // past the settle/freeze window
+    await repo.upsertClosed([
+      { ...base, positionAddress: 'M1', closedAt, pnlSol: -0.01, pnlSource: 'pool' },
+      { ...base, positionAddress: 'M2', closedAt, pnlSol: -0.02, pnlSource: 'pool' },
+    ]);
+    await repo.setAuthoritativePnlMany(
+      new Map([
+        ['M1', 1.5],
+        ['M2', -3.25],
+      ]),
+    );
+    const rows = (await repo.getClosed(['w'], { page: 1, pageSize: 10 })).rows;
+    const byAddr = new Map(rows.map((r) => [r.positionAddress, r.pnlSol]));
+    expect(byAddr.get('M1')).toBeCloseTo(1.5);
+    expect(byAddr.get('M2')).toBeCloseTo(-3.25);
+  });
 });
 
 describe('PostgresPositionRepository — strategy', () => {

@@ -112,6 +112,8 @@ export interface PositionRepository {
   /** Overwrite the authoritative closed PnL (residual revalued at the real on-chain sell proceeds) for
    *  one position, bypassing the settle-freeze — a deliberate enrichment, not a pool-price resync. */
   setAuthoritativePnl(positionAddress: string, pnlSol: number): Promise<void>;
+  /** Same as setAuthoritativePnl for many positions at once, in ONE atomic statement (engine batch). */
+  setAuthoritativePnlMany(byPosition: Map<string, number>): Promise<void>;
   /** status + closedAt for EVERY position (open + closed) of a wallet, keyed by address. The realized-PnL
    *  FIFO needs open positions too (their deposits consume token inventory), but reports only closed ones. */
   positionStatusForWallet(
