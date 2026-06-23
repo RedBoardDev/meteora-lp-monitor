@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { Database } from './database';
 import { pushSubscriptions, userWatchedWallets } from './schema';
 
@@ -27,10 +27,22 @@ export class PushRepository {
       .onConflictDoUpdate({
         target: pushSubscriptions.endpoint,
         set: { userId, p256dh: sub.p256dh, auth: sub.auth, createdAt: Date.now() },
+        // Only the endpoint's current owner may refresh it — an attacker who learns another user's
+        // endpoint cannot reassign (take over) the subscription by re-subscribing under their own id.
+        where: eq(pushSubscriptions.userId, userId),
       });
   }
 
-  async remove(endpoint: string): Promise<void> {
+  /** Remove THIS user's subscription by endpoint — the userId predicate blocks cross-user unsubscribe. */
+  async remove(userId: string, endpoint: string): Promise<void> {
+    await this.db
+      .delete(pushSubscriptions)
+      .where(and(eq(pushSubscriptions.userId, userId), eq(pushSubscriptions.endpoint, endpoint)));
+  }
+
+  /** Internal prune of an endpoint the push service reported gone (404/410). Owner-agnostic on
+   *  purpose — a dead endpoint belongs to no one — so it is NOT exposed on a user-facing route. */
+  async pruneEndpoint(endpoint: string): Promise<void> {
     await this.db.delete(pushSubscriptions).where(eq(pushSubscriptions.endpoint, endpoint));
   }
 

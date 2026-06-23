@@ -10,11 +10,34 @@ import { verifyJwt } from './auth';
 interface WsClient {
   socket: WebSocket;
   userId: string;
+  /** The connecting token's jti + version — re-checked on a timer so revocation reaches a live socket. */
+  jti: string;
+  ver: number;
   /** Resolved once at connect — only the owner's heartbeats gate Bark (notifications are owner-only). */
   isOwner: boolean;
   watched: Set<string>;
   /** What the client is viewing: 'all' (its whole watchlist) or one watched address. */
   view: string;
+}
+
+/** How often live sockets are re-checked against the account store (revocation + watchlist drift). */
+const REVALIDATE_MS = 30_000;
+
+/**
+ * A live socket stays authorized only while its account still exists, its token version still matches
+ * (a password reset bumps it), and its session jti is still allow-listed (logout / owner-revoke deletes
+ * it). The HTTP Bearer hook enforces exactly this, but /live bypasses that hook and authenticates once
+ * at upgrade — so without re-checking, a revoked token would keep streaming until the JWT's exp.
+ */
+export async function sessionStillValid(
+  accounts: Pick<AccountRepository, 'findById' | 'isSessionValid'>,
+  userId: string,
+  ver: number,
+  jti: string,
+): Promise<boolean> {
+  const u = await accounts.findById(userId);
+  if (!u || u.tokenVersion !== ver) return false;
+  return accounts.isSessionValid(jti);
 }
 
 function send(socket: WebSocket, data: unknown): void {
@@ -78,10 +101,18 @@ export function registerWebSocket(
     }
     const userId = payload.sub;
     const me = await accounts.findById(userId);
+    // /live bypasses the Bearer hook, so enforce the SAME revocation checks here (token version + jti
+    // allowlist), not just the JWT signature — else a logged-out / reset / revoked token streams to exp.
+    if (!me || me.tokenVersion !== payload.ver || !(await accounts.isSessionValid(payload.jti))) {
+      socket.close(1008, 'unauthorized');
+      return;
+    }
     const client: WsClient = {
       socket,
       userId,
-      isOwner: me?.isOwner ?? false,
+      jti: payload.jti,
+      ver: payload.ver,
+      isOwner: me.isOwner,
       watched: await watchedOf(userId),
       view: 'all',
     };
@@ -159,5 +190,31 @@ export function registerWebSocket(
         payload: { ...health, wallets: health.wallets.filter((w) => c.watched.has(w.wallet)) },
       });
     }
+  });
+
+  // Revocation + watchlist changes don't reach an already-open socket (it authenticates once at
+  // upgrade), so re-check every client on a timer: close any whose account/session was revoked, and
+  // refresh each client's watched set so a removed wallet stops streaming (a newly-added one starts).
+  const revalidate = setInterval(async () => {
+    if (clients.size === 0) return;
+    const watchedByUser = new Map<string, Set<string>>();
+    for (const c of [...clients]) {
+      if (c.socket.readyState !== c.socket.OPEN) continue;
+      if (!(await sessionStillValid(accounts, c.userId, c.ver, c.jti))) {
+        c.socket.close(1008, 'session revoked');
+        continue;
+      }
+      let watched = watchedByUser.get(c.userId);
+      if (!watched) {
+        watched = await watchedOf(c.userId);
+        watchedByUser.set(c.userId, watched);
+      }
+      c.watched = watched;
+    }
+    pushViewers();
+  }, REVALIDATE_MS);
+  revalidate.unref(); // never keep the process alive just for the revalidation timer
+  app.addHook('onClose', async () => {
+    clearInterval(revalidate);
   });
 }
