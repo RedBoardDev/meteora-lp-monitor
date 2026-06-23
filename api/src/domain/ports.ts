@@ -124,8 +124,9 @@ export interface PositionRepository {
   walletOfPosition(positionAddress: string): Promise<string | null>;
   /** Persist a position's strategy family (decoded once from its on-chain open tx; immutable). */
   setStrategy(positionAddress: string, family: StrategyFamily): Promise<void>;
-  /** Every position with a known strategy → family. Seeds the StrategyService cache on boot. */
-  getStrategies(): Promise<Map<string, StrategyFamily>>;
+  /** Positions with a known strategy → family. Scoped to `wallet` when given (the hot per-sync path);
+   *  no arg = every wallet (seeds the StrategyService cache on boot). */
+  getStrategies(wallet?: string): Promise<Map<string, StrategyFamily>>;
   /** Closed positions whose strategy hasn't been resolved yet — for the background backfill. */
   addressesMissingStrategy(limit: number): Promise<string[]>;
 }
