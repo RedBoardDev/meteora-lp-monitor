@@ -12,6 +12,8 @@ export interface PositionAmounts {
   amountY: bigint;
   feeX: bigint;
   feeY: bigint;
+  /** false when a share>0 bin's bin-array was null/absent, so its amounts were skipped (under-counted). */
+  complete: boolean;
 }
 
 /**
@@ -29,6 +31,7 @@ export function valuePosition(
   let amountY = 0n;
   let feeX = 0n;
   let feeY = 0n;
+  let complete = true;
   for (let b = pos.lowerBinId; b <= pos.upperBinId; b++) {
     const j = b - pos.lowerBinId;
     const share = pos.shares[j]!;
@@ -47,12 +50,17 @@ export function valuePosition(
         const sShift = share >> 64n;
         nfx = (sShift * wrapU128(bin.feeXPerTokenStored - fi.completeX)) >> 64n;
         nfy = (sShift * wrapU128(bin.feeYPerTokenStored - fi.completeY)) >> 64n;
+      } else {
+        // A share is held in this bin but its bin-array account wasn't fetched (null/absent), so its
+        // token amounts are silently dropped → the position value is under-counted. Flag incomplete so
+        // the snapshot is treated as not-fresh and never persisted as a real Net Worth point.
+        complete = false;
       }
     }
     feeX += nfx + fi.pendingX;
     feeY += nfy + fi.pendingY;
   }
-  return { amountX, amountY, feeX, feeY };
+  return { amountX, amountY, feeX, feeY, complete };
 }
 
 /** Distinct bin-array indices covering [lowerBinId, upperBinId]. */

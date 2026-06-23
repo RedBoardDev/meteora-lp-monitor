@@ -50,6 +50,7 @@ const valued = (over: Partial<OnchainValued> = {}): OnchainValued => ({
   lockedRentSol: 0,
   walletTotalSol: 5.1,
   positionCount: 1,
+  complete: true,
   sizeSolByPosition: new Map([['OPEN', 5]]),
   feeSolByPosition: new Map([['OPEN', 0.1]]),
   ...over,
@@ -94,6 +95,7 @@ describe('PositionSync — chain → positions table', () => {
       nativeLamports: 0n,
       idleTokens: [],
       positions: [opv('OPEN')],
+      complete: true,
     };
 
     const sync = new PositionSync(legPnl, metadata, repo, silent);
@@ -150,6 +152,7 @@ describe('PositionSync — chain → positions table', () => {
       nativeLamports: 0n,
       idleTokens: [],
       positions: [{ ...opv('OPEN'), activeId: 50 }],
+      complete: true,
     };
     // biome-ignore lint/suspicious/noExplicitAny: partial repo stub for a focused unit test
     await new PositionSync(legPnl, metadata, repo as any, silent).sync('W', snapshot, valued());
@@ -181,6 +184,7 @@ describe('PositionSync — chain → positions table', () => {
       nativeLamports: 0n,
       idleTokens: [],
       positions: [opv('OPEN')],
+      complete: true,
     };
     const open = await new PositionSync(
       legPnl,
@@ -229,6 +233,7 @@ describe('PositionSync — close-notification wiring (no backfill spam, no dupli
     nativeLamports: 0n,
     idleTokens: [],
     positions: openAddrs.map((a) => opv(a)),
+    complete: true,
   });
 
   /** Mirror of the engine seam: capture reconciled state, sync, then emit one `closed` per newly-closed

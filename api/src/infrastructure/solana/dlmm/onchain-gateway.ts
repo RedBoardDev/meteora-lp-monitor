@@ -208,19 +208,34 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     await this.decimalsFor([...mintSet.values()]);
 
     const positions: OnchainPositionValue[] = [];
+    // Track whether the chain read fully covered every held position. An under/over-stated snapshot
+    // (missing pool data, unfetched bin-array, unknown decimals) must NOT be persisted as a real Net
+    // Worth point — it surfaces as `complete: false` → freshness 'syncing' → skipped by the recorder.
+    let complete = true;
     positionKeys.forEach((pk, i) => {
       const info = posInfos[i];
-      if (!info) return; // closed between rounds
+      if (!info) return; // position account absent → closed between rounds (benign; not a data miss)
       const lbPair = lbPairByPos.get(pk.toBase58());
-      if (!lbPair) return;
-      const lb = lbByKey.get(lbPair.toBase58());
-      if (!lb) return;
+      const lb = lbPair && lbByKey.get(lbPair.toBase58());
+      if (!lbPair || !lb) {
+        // The position exists on-chain but its pool (lbPair) data wasn't read — its value would be
+        // dropped, deflating the total. Flag incomplete rather than silently under-count.
+        complete = false;
+        return;
+      }
       const pos = decodePosition(info.data);
       const baMap = new Map<number, Uint8Array | null>();
       for (const idx of coverageByPos.get(pk.toBase58()) ?? []) {
         baMap.set(idx, baByMeta.get(`${lbPair.toBase58()}:${idx}`) ?? null);
       }
       const v = valuePosition(pos, baMap);
+      if (!v.complete) complete = false; // a share>0 bin's bin-array was absent → amounts under-counted
+      const dX = this.decimalsCache.get(lb.tokenXMint.toBase58());
+      const dY = this.decimalsCache.get(lb.tokenYMint.toBase58());
+      // R23: a NULL decimals (transient RPC miss — deliberately not cached) makes ui(amount,0) =
+      // Number(amount), inflating a 6/9-dp token by 10^6–10^9. Flag incomplete instead of persisting
+      // the mis-scaled amount; the next snapshot retries the mint and resolves it.
+      if (dX === undefined || dY === undefined) complete = false;
       positions.push({
         positionAddress: pk.toBase58(),
         lbPair: lbPair.toBase58(),
@@ -230,8 +245,8 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
         amountY: v.amountY,
         feeX: v.feeX,
         feeY: v.feeY,
-        decimalsX: this.decimalsCache.get(lb.tokenXMint.toBase58()) ?? 0,
-        decimalsY: this.decimalsCache.get(lb.tokenYMint.toBase58()) ?? 0,
+        decimalsX: dX ?? 0,
+        decimalsY: dY ?? 0,
         activeId: lb.activeId,
         binStep: lb.binStep,
         lowerBinId: pos.lowerBinId,
@@ -261,6 +276,7 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
       nativeLamports: walletInfo ? BigInt(walletInfo.lamports) : 0n,
       idleTokens,
       positions,
+      complete,
       plan,
     };
   }

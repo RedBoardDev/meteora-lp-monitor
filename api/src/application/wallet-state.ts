@@ -84,7 +84,9 @@ export function buildWalletState(
     totals,
     openPositions: sorted,
     asOfSlot: onchain.slot,
-    freshness: onchain.slotSkew > SYNCING_SKEW_SLOTS ? 'syncing' : 'fresh',
+    // An incomplete valuation (missing price, unfetched bin-array, unknown decimals) is under/over-stated
+    // → report 'syncing' so the UI signals it AND the Net Worth recorder skips persisting a wrong point.
+    freshness: !onchain.complete || onchain.slotSkew > SYNCING_SKEW_SLOTS ? 'syncing' : 'fresh',
     updatedAt: Date.now(),
   };
 }
@@ -123,6 +125,8 @@ export function combineOnchain(present: OnchainValued[]): OnchainValued | null {
     lockedRentSol,
     walletTotalSol,
     positionCount,
+    // The aggregate is complete only if every contributing wallet's valuation was complete.
+    complete: present.every((v) => v.complete),
     sizeSolByPosition: sizeBy,
     feeSolByPosition: feeBy,
   };

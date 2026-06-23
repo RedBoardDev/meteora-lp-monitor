@@ -52,6 +52,10 @@ export interface OnchainWalletSnapshot {
   /** wSOL / USDC / USDT ATA balances (raw), present only when the account exists & is non-zero. */
   idleTokens: { mint: string; amount: bigint; decimals: number }[];
   positions: OnchainPositionValue[];
+  /** false when the chain read was under/over-stated: a token's decimals was unknown (RPC miss → would
+   *  mis-scale the amount) or a share>0 bin's bin-array was absent (amounts under-counted). Bubbles up
+   *  to `OnchainValued.complete` → freshness → and gates Net Worth persistence. */
+  complete: boolean;
 }
 
 /**
@@ -81,6 +85,10 @@ export interface OnchainValued {
   /** tvl + idle + unclaimed fees + locked rent ("tout inclus"). */
   walletTotalSol: number;
   positionCount: number;
+  /** false when the snapshot was incomplete (see OnchainWalletSnapshot.complete) OR a non-SOL holding
+   *  had no Jupiter quote and no pool-price fallback (priced at 0 → deflated total). Gates Net Worth
+   *  persistence: an incomplete valuation is surfaced as freshness!=='fresh' and never recorded. */
+  complete: boolean;
   /** per-position liquidity value in SOL (excludes unclaimed fees), keyed by positionAddress. */
   sizeSolByPosition: Map<string, number>;
   feeSolByPosition: Map<string, number>;
