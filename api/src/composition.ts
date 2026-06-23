@@ -176,24 +176,24 @@ export function compose(config: AppConfig): App {
     logger,
   );
 
-  const engine = new Engine(
+  const engine = new Engine({
     gateway,
     prices,
     subscriber,
     onchain,
     health,
     strategy,
-    positionRepo,
-    configRepo,
+    repo: positionRepo,
+    config: configRepo,
     accounts,
     bus,
     logger,
-    config,
+    appConfig: config,
     dlmmIngest,
     positionSync,
     walletFlowIngest,
     realizedPnl,
-  );
+  });
   const notifications = new NotificationManager(bus, configRepo, presence, bark, webPush, logger);
 
   return {

@@ -49,6 +49,26 @@ const SYNC_INTERVAL_MS = 60_000;
 // strand a missed open/close indefinitely. Catches what the live WS path misses.
 const BACKSTOP_INGEST_MS = 300_000;
 
+/** Engine dependencies — one options object instead of 16 positional ctor args. */
+export interface EngineDeps {
+  gateway: PositionsGateway;
+  prices: PriceGateway;
+  subscriber: RpcSubscriber;
+  onchain: OnchainDlmmGateway;
+  health: HealthMonitor;
+  strategy: StrategyService;
+  repo: PositionRepository;
+  config: ConfigRepository;
+  accounts: AccountRepository;
+  bus: EventBus;
+  logger: Logger;
+  appConfig: AppConfig;
+  dlmmIngest: DlmmIngest;
+  positionSync: PositionSync;
+  walletFlowIngest: WalletFlowIngest;
+  realizedPnl: RealizedPnlEngine;
+}
+
 export class Engine {
   private readonly wallets = new Map<string, WalletRuntime>();
   private readonly emitter: StateEmitter;
@@ -72,24 +92,40 @@ export class Engine {
   // finishes (coalesced) — a close-burst no longer gets silently dropped by the single-flight guard.
   private readonly realizedPnlRerun = new Set<string>();
 
-  constructor(
-    gateway: PositionsGateway,
-    private readonly prices: PriceGateway,
-    private readonly subscriber: RpcSubscriber,
-    private readonly onchain: OnchainDlmmGateway,
-    private readonly health: HealthMonitor,
-    private readonly strategy: StrategyService,
-    private readonly repo: PositionRepository,
-    private readonly config: ConfigRepository,
-    private readonly accounts: AccountRepository,
-    private readonly bus: EventBus,
-    private readonly logger: Logger,
-    private readonly appConfig: AppConfig,
-    private readonly dlmmIngest: DlmmIngest,
-    private readonly positionSync: PositionSync,
-    private readonly walletFlowIngest: WalletFlowIngest,
-    private readonly realizedPnl: RealizedPnlEngine,
-  ) {
+  private readonly prices: PriceGateway;
+  private readonly subscriber: RpcSubscriber;
+  private readonly onchain: OnchainDlmmGateway;
+  private readonly health: HealthMonitor;
+  private readonly strategy: StrategyService;
+  private readonly repo: PositionRepository;
+  private readonly config: ConfigRepository;
+  private readonly accounts: AccountRepository;
+  private readonly bus: EventBus;
+  private readonly logger: Logger;
+  private readonly appConfig: AppConfig;
+  private readonly dlmmIngest: DlmmIngest;
+  private readonly positionSync: PositionSync;
+  private readonly walletFlowIngest: WalletFlowIngest;
+  private readonly realizedPnl: RealizedPnlEngine;
+
+  constructor(deps: EngineDeps) {
+    // gateway is only needed to build the refresher/reconciler below — it's not a field.
+    const { gateway, prices, subscriber, bus, logger, repo, appConfig } = deps;
+    this.prices = prices;
+    this.subscriber = subscriber;
+    this.onchain = deps.onchain;
+    this.health = deps.health;
+    this.strategy = deps.strategy;
+    this.repo = repo;
+    this.config = deps.config;
+    this.accounts = deps.accounts;
+    this.bus = bus;
+    this.logger = logger;
+    this.appConfig = appConfig;
+    this.dlmmIngest = deps.dlmmIngest;
+    this.positionSync = deps.positionSync;
+    this.walletFlowIngest = deps.walletFlowIngest;
+    this.realizedPnl = deps.realizedPnl;
     this.emitter = new StateEmitter(this.wallets, subscriber, bus, this.health);
     this.refresher = new PositionRefresher(
       gateway,
