@@ -2,17 +2,7 @@ import { randomBytes } from 'node:crypto';
 import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import Fastify from 'fastify';
-import type { Engine } from '@/application/engine';
-import type { EventBus } from '@/application/event-bus';
-import type { NotificationManager } from '@/application/notification/manager';
-import type { ResidualBackfill } from '@/application/residual-backfill';
-import type { WalletPnlService } from '@/application/wallet-pnl-service';
 import type { AppConfig } from '@/config/env';
-import type { AccountRepository, ConfigRepository, PositionRepository } from '@/domain/ports';
-import type { GeckoTerminalGateway } from '@/infrastructure/geckoterminal/geckoterminal-gateway';
-import type { PresenceTracker } from '@/infrastructure/notifications/presence';
-import type { NetworthSnapshotRepository } from '@/infrastructure/persistence/networth-snapshot-repository';
-import type { PushRepository } from '@/infrastructure/persistence/push-repository';
 import {
   buildSiwsMessage,
   createJwt,
@@ -23,7 +13,7 @@ import {
   verifyPassword,
   verifyWalletSignature,
 } from './auth';
-import { registerRoutes } from './routes';
+import { type RouteDeps, registerRoutes } from './routes';
 import { registerWebSocket } from './websocket';
 
 declare module 'fastify' {
@@ -41,23 +31,8 @@ const LOGIN_BACKOFF_BASE_MS = 1000;
 const LOGIN_LOCKOUT_MAX_MS = 300_000; // 5 min
 const LOGIN_FAIL_DELAY_MS = 300;
 
-export type ServerDeps = {
-  config: AppConfig;
-  bus: EventBus;
-  engine: Engine;
-  repo: PositionRepository;
-  configRepo: ConfigRepository;
-  accounts: AccountRepository;
-  backfill: ResidualBackfill;
-  walletPnl: WalletPnlService;
-  networthSnapshots: NetworthSnapshotRepository;
-  notifications: NotificationManager;
-  presence: PresenceTracker;
-  pushRepo: PushRepository;
-  gecko: GeckoTerminalGateway;
-  vapidPublicKey: string;
-  sendTestPush: (userId: string) => Promise<number>;
-};
+/** Everything registerRoutes needs (RouteDeps) plus the server-only app config. */
+export type ServerDeps = RouteDeps & { config: AppConfig };
 
 export async function buildServer(deps: ServerDeps) {
   const app = Fastify({ logger: { level: deps.config.LOG_LEVEL } });
@@ -368,22 +343,8 @@ export async function buildServer(deps: ServerDeps) {
     };
   });
 
-  registerRoutes(app, {
-    bus: deps.bus,
-    engine: deps.engine,
-    repo: deps.repo,
-    configRepo: deps.configRepo,
-    accounts: deps.accounts,
-    backfill: deps.backfill,
-    walletPnl: deps.walletPnl,
-    networthSnapshots: deps.networthSnapshots,
-    notifications: deps.notifications,
-    presence: deps.presence,
-    pushRepo: deps.pushRepo,
-    gecko: deps.gecko,
-    vapidPublicKey: deps.vapidPublicKey,
-    sendTestPush: deps.sendTestPush,
-  });
+  // ServerDeps ⊇ RouteDeps, so hand the deps straight through (no field-by-field re-listing).
+  registerRoutes(app, deps);
   registerWebSocket(
     app,
     secret,

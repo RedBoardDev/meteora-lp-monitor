@@ -7,8 +7,7 @@ import type {
 } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
-import type { ConfigRepository, NotificationChannel } from '@/domain/ports';
-import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import type { ConfigRepository, NotificationChannel, PresenceReader } from '@/domain/ports';
 import { BulkBuffer } from './buffer';
 
 const STARTUP_GRACE_MS = 10_000;
@@ -25,7 +24,7 @@ export class NotificationManager {
   constructor(
     private readonly bus: EventBus,
     private readonly config: ConfigRepository,
-    private readonly presence: PresenceTracker,
+    private readonly presence: PresenceReader,
     // Owner's external fallback (Bark) — fires only when no client is actively viewing.
     private readonly channel: NotificationChannel,
     // Universal per-account channel (Web Push / PWA) — fires for every subscriber of the event's wallet.

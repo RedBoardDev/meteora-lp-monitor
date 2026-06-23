@@ -284,11 +284,18 @@ export interface WalletFlowRepository {
 }
 
 /** 100%-on-chain DLMM wallet snapshot + per-position bins/history reader (Solana RPC). */
+/** A presence signal the notification manager reads (is any client actively viewing right now?). */
+export interface PresenceReader {
+  isAnyClientActive(): boolean;
+}
+
 export interface OnchainDlmmGateway {
   /** Per-bin liquidity distribution of one open position (Price-Bin histogram). */
   positionBins(positionAddress: string): Promise<PositionBins | null>;
   /** On-chain event timeline of a position (History drawer). */
   positionHistory(positionAddress: string): Promise<PositionHistory | null>;
+  /** Token decimals for a mint (cached) — needed to scale residual amounts for valuation. */
+  decimalsOf(mint: string): Promise<number>;
   /** Pinned-slot snapshot of a wallet's positions + idle balances; returns the reusable discovery plan. */
   snapshotWallet(
     ownerStr: string,

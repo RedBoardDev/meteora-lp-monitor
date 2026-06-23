@@ -1,8 +1,7 @@
 import type { ClosedPosition, NotifRule, WalletState } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { describe, expect, it, vi } from 'vitest';
-import type { ConfigRepository, NotificationChannel } from '@/domain/ports';
-import type { PresenceTracker } from '@/infrastructure/notifications/presence';
+import type { ConfigRepository, NotificationChannel, PresenceReader } from '@/domain/ports';
 import { EventBus } from '../event-bus';
 import { NotificationManager } from './manager';
 
@@ -43,7 +42,7 @@ function breachState(positionAddress: string, pnlSol: number): WalletState {
 function makeManager(rules: NotifRule[]) {
   const bus = new EventBus();
   const config = { listNotifRules: () => rules } as unknown as ConfigRepository;
-  const presence = { isAnyClientActive: () => false } as unknown as PresenceTracker;
+  const presence: PresenceReader = { isAnyClientActive: () => false };
   const push = { deliver: vi.fn(async () => {}) };
   const bark = { deliver: vi.fn(async () => {}) };
   const mgr = new NotificationManager(
