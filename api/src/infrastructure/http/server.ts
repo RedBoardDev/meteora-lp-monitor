@@ -323,14 +323,10 @@ export async function buildServer(deps: ServerDeps) {
       reply.code(401).send({ error: 'unauthorized' });
       return;
     }
-    const user = await deps.accounts.findById(payload.sub);
+    // One JOIN: the account AND its jti session must both be valid. The session allowlist is the real
+    // revocation (logout/reset deletes the jti), so a revoked token is rejected despite a valid signature.
+    const user = await deps.accounts.findByIdWithSession(payload.sub, payload.jti);
     if (!user || user.tokenVersion !== payload.ver) {
-      reply.code(401).send({ error: 'unauthorized' });
-      return;
-    }
-    // The token's session must still be in the allowlist — logout / reset deletes it (real revocation,
-    // not just a TTL wait). A token whose jti was revoked is rejected even though its signature is valid.
-    if (!(await deps.accounts.isSessionValid(payload.jti))) {
       reply.code(401).send({ error: 'unauthorized' });
       return;
     }
