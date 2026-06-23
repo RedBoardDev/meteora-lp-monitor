@@ -1,36 +1,14 @@
 'use client';
 
-import type { NetworthCurvePoint } from '@binsight/shared';
 import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
-import { ALL_TIME_DAYS, PERIOD_OPTIONS, type Period, sinceMs } from '@/domain/period';
+import { ALL_TIME_DAYS } from '@/domain/period';
+import { periodLabel, realPnlGain } from '@/domain/pnl';
 import { toneOf } from '@/domain/position';
 import { api } from '@/infrastructure/api/client';
 import { useMoney } from '@/presentation/hooks/use-money';
 import { useScopedQuery } from '@/presentation/hooks/use-scoped-query';
 import { Badge, Card, cn, Skeleton, SolMark, Stat, TickFlash } from '@/presentation/ui';
-
-/** Short label for the selected period (e.g. "1M") — used in the "Gain (1M)" stat caption. */
-function periodLabel(period: Period): string {
-  return PERIOD_OPTIONS.find((o) => o.value === period)?.label ?? period.toUpperCase();
-}
-
-/** Real PnL at a curve point = networth − apports = the PERFORMANCE net of deposits/withdrawals. */
-function realPnlAt(point: NetworthCurvePoint): number {
-  return point.realPnl;
-}
-
-/** The curve point at the start of `period` = the first point on/after the period floor (the baseline
- *  the real-PnL gain is measured against). Null when the curve has no point in the window. */
-function startPointOf(
-  points: NetworthCurvePoint[],
-  period: Period,
-  now: number,
-): NetworthCurvePoint | null {
-  const floor = sinceMs(period, now);
-  if (floor <= 0) return points[0] ?? null;
-  return points.find((p) => Date.parse(`${p.date}T00:00:00Z`) >= floor) ?? null;
-}
 
 export function SummaryCard() {
   const portfolio = usePortfolio((s) => s.portfolio);
@@ -53,20 +31,12 @@ export function SummaryCard() {
   const t = portfolio.totals;
   const pnlTone = toneOf(t.uPnlSol);
   const points = curve?.points ?? [];
-  // NOW = the LIVE real PnL = walletTotalSol − cumulative apports. walletTotalSol (idle + open TVL) is the
-  // live, on-chain-reconciled net worth, NOT the curve's last point: today's at-cost reconstruction lags
-  // the live tx stream (a fresh deposit hits the cash ledger before its position shows up in the legs).
-  // apportsLast = the cumulative net deposits as of the last curve point (apports change slowly — they're
-  // funding moves, not intraday trading — so the last persisted value is the right "now" baseline).
-  const apportsLast = points.at(-1)?.apports ?? 0;
-  const realPnlNow = t.walletTotalSol - apportsLast;
   // TODAY = realized PnL from positions CLOSED since midnight — computed once by the backend
-  // (/stats.todayPnlSol) and shared verbatim with the macOS/iOS apps. Not re-derived here.
+  // (/stats.todayPnlSol) and shared verbatim with the macOS app. Not re-derived here.
   const today = stats?.todayPnlSol ?? null;
-  // GAIN (period) = realPnl(now) − realPnl(start of the selected period). The REAL performance, net of
-  // apports — CAN be negative (e.g. a lifetime trading loss). On-chain verified.
-  const startPoint = startPointOf(points, period, Date.now());
-  const gain = startPoint != null ? realPnlNow - realPnlAt(startPoint) : null;
+  // GAIN (period) = realPnl(now) − realPnl(start) — the shared headline formula (domain/pnl), so this
+  // number and the PnL-bridge hero can never drift.
+  const gain = realPnlGain(points, period, Date.now(), t.walletTotalSol);
 
   return (
     <Card
