@@ -2,7 +2,7 @@ import type { ClosedPosition, OpenPosition } from '@binsight/shared';
 import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Database } from './database';
 import { PostgresPositionRepository } from './position-repository';
 import * as schema from './schema';
@@ -228,6 +228,43 @@ describe('PostgresPositionRepository — statsAggregate (SQL, no row transfer)',
       { pair: 'BBB/SOL', pnlSol: 5, count: 1 },
       { pair: 'AAA/SOL', pnlSol: 1, count: 2 },
     ]);
+  });
+
+  it('buckets todayPnl by UTC midnight, not the server-local day (regression: R08)', async () => {
+    // Only observable on a non-UTC host: with server-LOCAL midnight, a close that is "yesterday" in
+    // UTC but still after the local midnight of a behind-UTC zone wrongly folds into Today. Pin the
+    // TZ + the clock so the assertion can actually fail if the boundary regresses to setHours().
+    const repo = await newRepo();
+    const origTz = process.env.TZ;
+    process.env.TZ = 'America/New_York'; // UTC−4 in June
+    vi.useFakeTimers({ toFake: ['Date'] }); // fake Date only — leave PGlite's real timers alone
+    vi.setSystemTime(new Date('2025-06-15T03:00:00Z')); // 23:00 on Jun 14 local (NY)
+    try {
+      await repo.upsertClosed([
+        // Jun 15 01:00 UTC — genuinely "today" (UTC).
+        {
+          ...base,
+          positionAddress: 'TDY',
+          pnlSol: 2,
+          closedAt: Date.parse('2025-06-15T01:00:00Z'),
+          pnlSource: 'pool',
+        },
+        // Jun 14 12:00 UTC — "yesterday" (UTC), but after local-NY midnight of Jun 14.
+        {
+          ...base,
+          positionAddress: 'YST',
+          pnlSol: 9,
+          closedAt: Date.parse('2025-06-14T12:00:00Z'),
+          pnlSource: 'pool',
+        },
+      ]);
+      const s = await repo.statsAggregate(['w'], 0);
+      expect(s.todayPnlSol).toBeCloseTo(2); // the local-midnight bug would yield 11 (folds YST in)
+    } finally {
+      vi.useRealTimers();
+      if (origTz === undefined) delete process.env.TZ;
+      else process.env.TZ = origTz;
+    }
   });
 
   it('windows by sinceMs (closed_at >= since)', async () => {

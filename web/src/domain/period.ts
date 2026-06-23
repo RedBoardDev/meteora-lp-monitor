@@ -11,9 +11,10 @@ const WINDOW_MS: Record<Exclude<Period, 'ytd' | 'all'>, number> = {
   '1y': 365 * DAY_MS,
 };
 
-/** Epoch-ms of Jan 1 (local) for the year containing `now` — the floor for year-to-date. */
+/** Epoch-ms of Jan 1 (UTC) for the year containing `now` — the YTD floor. UTC to match the curve's
+ *  UTC day buckets (local time made the YTD baseline off by a day for non-UTC users). */
 function startOfYearMs(now: number): number {
-  return new Date(new Date(now).getFullYear(), 0, 1).getTime();
+  return Date.UTC(new Date(now).getUTCFullYear(), 0, 1);
 }
 
 /** Epoch-ms floor for a period (0 = all-time). Pass `now` from the caller (avoids render-time clocks). */
