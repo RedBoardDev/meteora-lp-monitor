@@ -17,6 +17,9 @@ public final class RestClient {
         async let walletsT: [WalletInfo]? = Backend.get("/wallets")
         let (page, stats, wallets) = await (pageT, statsT, walletsT)
         await MainActor.run {
+            // A scope switch mid-flight must not get overwritten with the old scope's data: bail if the
+            // store's scope changed while these three fetches were in flight.
+            guard store.scope == scope else { return }
             if let page {
                 store.closed = page.rows
                 store.closedTotal = page.total

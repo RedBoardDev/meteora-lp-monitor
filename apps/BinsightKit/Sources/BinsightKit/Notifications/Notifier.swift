@@ -1,3 +1,4 @@
+import Foundation
 import UserNotifications
 
 public final class Notifier: NSObject, UNUserNotificationCenterDelegate {
@@ -27,6 +28,12 @@ public final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         content.threadIdentifier = event.pair ?? "portfolio"
         content.sound = .default
         let request = UNNotificationRequest(identifier: event.id, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        UNUserNotificationCenter.current().add(request) { error in
+            // Don't black-hole a failed alert (e.g. authorization revoked) — log it so a lost
+            // notification is diagnosable rather than silently dropped.
+            if let error {
+                NSLog("[Notifier] failed to schedule notification: %@", error.localizedDescription)
+            }
+        }
     }
 }
