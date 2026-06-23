@@ -24,11 +24,8 @@ declare module 'fastify' {
 
 const WS_TICKET_TTL_SECONDS = 60;
 
-// Login brute-force throttle: after this many fails an IP is locked out with exponential backoff
-// (2^n × base), capped; every failed attempt also pauses to slow credential stuffing.
-const LOGIN_LOCKOUT_AFTER = 5;
-const LOGIN_BACKOFF_BASE_MS = 1000;
-const LOGIN_LOCKOUT_MAX_MS = 300_000; // 5 min
+// Fixed pause after every failed auth attempt — slows credential stuffing without any lockout state
+// that could be weaponised (see slowFail in buildServer for why the hard lockout was removed).
 const LOGIN_FAIL_DELAY_MS = 300;
 
 /** Everything registerRoutes needs (RouteDeps) plus the server-only app config. */
@@ -73,36 +70,12 @@ export async function buildServer(deps: ServerDeps) {
   const challengeFor = (address: string, nonce: string): string =>
     buildSiwsMessage({ domain: siwsDomain, uri: primaryOrigin, address, nonce });
 
-  // Brute-force throttle across ALL auth routes, keyed BOTH by source IP and by the targeted account
-  // address. The per-account key is the real defence: every browser request reaches the API via the
-  // BFF's single server-side IP, so an IP-only counter would either be useless (shared) or DoS the whole
-  // web frontend on one user's failures. A request is blocked if EITHER key is locked out; on a fail we
-  // record both and pause; on success we clear both.
-  const loginFails = new Map<string, { count: number; until: number }>();
-  const tooMany = (key: string): boolean => {
-    const rec = loginFails.get(key);
-    return rec !== undefined && rec.until > Date.now();
-  };
-  const recordFail = (key: string): void => {
-    const count = (loginFails.get(key)?.count ?? 0) + 1;
-    const until =
-      count >= LOGIN_LOCKOUT_AFTER
-        ? Date.now() +
-          Math.min(LOGIN_LOCKOUT_MAX_MS, 2 ** (count - LOGIN_LOCKOUT_AFTER) * LOGIN_BACKOFF_BASE_MS)
-        : 0;
-    loginFails.set(key, { count, until });
-  };
-  // Throttle keys for a request: always the IP, plus the account address when one is supplied.
-  const keysFor = (ip: string, address?: unknown): string[] =>
-    typeof address === 'string' && address.length > 0 ? [ip, `acct:${address}`] : [ip];
-  const lockedOut = (keys: string[]): boolean => keys.some(tooMany);
-  const slowFail = async (keys: string[]): Promise<void> => {
-    for (const k of keys) recordFail(k);
-    await new Promise((r) => setTimeout(r, LOGIN_FAIL_DELAY_MS));
-  };
-  const clearFails = (keys: string[]): void => {
-    for (const k of keys) loginFails.delete(k);
-  };
+  // Every failed auth attempt pauses for a fixed delay — that, plus the whitelist gate and slow scrypt,
+  // is the credential-stuffing friction. There is deliberately NO hard lockout: behind the BFF every
+  // browser request shares one server-side IP, so an IP lockout 429'd ALL web users on one user's
+  // failures (S04), and a per-account key let an attacker lock out any victim by their public address
+  // (S05) — both DoS vectors, and the keyed Map grew unbounded (S06). A pause has none of those.
+  const slowFail = (): Promise<void> => new Promise((r) => setTimeout(r, LOGIN_FAIL_DELAY_MS));
   // A fixed dummy hash so /auth/login runs scrypt even for an unknown address — equalises response
   // timing so the endpoint can't be used to enumerate which addresses are registered (L2).
   const DUMMY_PASSWORD_HASH = hashPassword(randomBytes(16).toString('hex'));
@@ -122,14 +95,12 @@ export async function buildServer(deps: ServerDeps) {
   // address (non-approved wallets can't even start, and the UI gets a clean "not approved" signal).
   app.post('/auth/nonce', async (req, reply) => {
     const address = (req.body as { address?: unknown } | undefined)?.address;
-    const keys = keysFor(req.ip, address);
-    if (lockedOut(keys)) return reply.code(429).send({ error: 'too many attempts, retry later' });
     if (!isValidSolanaAddress(address)) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(400).send({ error: 'invalid Solana address' });
     }
     if (!(await deps.accounts.isWhitelisted(address))) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(403).send({ error: 'not approved', notWhitelisted: true });
     }
     if (await deps.accounts.findByAddress(address)) {
@@ -147,8 +118,6 @@ export async function buildServer(deps: ServerDeps) {
       | { address?: unknown; signature?: unknown; password?: unknown; nonce?: unknown }
       | undefined;
     const address = body?.address;
-    const keys = keysFor(req.ip, address);
-    if (lockedOut(keys)) return reply.code(429).send({ error: 'too many attempts, retry later' });
     const signature = body?.signature;
     const nonce = body?.nonce;
     const password = typeof body?.password === 'string' ? body.password : '';
@@ -158,13 +127,13 @@ export async function buildServer(deps: ServerDeps) {
       typeof nonce !== 'string' ||
       password.length < 8
     ) {
-      await slowFail(keys);
+      await slowFail();
       return reply
         .code(400)
         .send({ error: 'address, signature, nonce and password (≥8) required' });
     }
     if (!(await deps.accounts.isWhitelisted(address))) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(403).send({ error: 'not approved', notWhitelisted: true });
     }
     if (await deps.accounts.findByAddress(address)) {
@@ -172,14 +141,13 @@ export async function buildServer(deps: ServerDeps) {
     }
     // Consume the nonce FIRST (single-use) so a replay can't pass even with an otherwise-valid signature.
     if (!(await deps.accounts.consumeNonce(address, nonce, 'register'))) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(401).send({ error: 'expired or invalid challenge, restart' });
     }
     if (!verifyWalletSignature(challengeFor(address, nonce), signature, address)) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(401).send({ error: 'signature verification failed' });
     }
-    clearFails(keys);
     const user = await deps.accounts.createUser({
       address,
       passwordHash: hashPassword(password),
@@ -194,11 +162,9 @@ export async function buildServer(deps: ServerDeps) {
   app.post('/auth/login', async (req, reply) => {
     const body = req.body as { address?: unknown; password?: unknown } | undefined;
     const address = body?.address;
-    const keys = keysFor(req.ip, address);
-    if (lockedOut(keys)) return reply.code(429).send({ error: 'too many attempts, retry later' });
     const password = body?.password;
     if (!isValidSolanaAddress(address) || typeof password !== 'string') {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(400).send({ error: 'address and password required' });
     }
     const found = await deps.accounts.findByAddress(address);
@@ -206,10 +172,9 @@ export async function buildServer(deps: ServerDeps) {
     // reveal whether the address is registered (L2 enumeration guard).
     const ok = verifyPassword(password, found ? found.passwordHash : DUMMY_PASSWORD_HASH);
     if (!found || !ok) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(401).send({ error: 'invalid address or password' });
     }
-    clearFails(keys);
     return reply.send(await issueSession(found.user.id, found.user.tokenVersion));
   });
 
@@ -217,10 +182,8 @@ export async function buildServer(deps: ServerDeps) {
   // the endpoint cannot be used to enumerate which addresses are registered).
   app.post('/auth/reset/nonce', async (req, reply) => {
     const address = (req.body as { address?: unknown } | undefined)?.address;
-    const keys = keysFor(req.ip, address);
-    if (lockedOut(keys)) return reply.code(429).send({ error: 'too many attempts, retry later' });
     if (!isValidSolanaAddress(address)) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(400).send({ error: 'invalid Solana address' });
     }
     const nonce = newNonce();
@@ -235,8 +198,6 @@ export async function buildServer(deps: ServerDeps) {
       | { address?: unknown; signature?: unknown; password?: unknown; nonce?: unknown }
       | undefined;
     const address = body?.address;
-    const keys = keysFor(req.ip, address);
-    if (lockedOut(keys)) return reply.code(429).send({ error: 'too many attempts, retry later' });
     const signature = body?.signature;
     const nonce = body?.nonce;
     const password = typeof body?.password === 'string' ? body.password : '';
@@ -246,28 +207,26 @@ export async function buildServer(deps: ServerDeps) {
       typeof nonce !== 'string' ||
       password.length < 8
     ) {
-      await slowFail(keys);
+      await slowFail();
       return reply
         .code(400)
         .send({ error: 'address, signature, nonce and password (≥8) required' });
     }
     if (!(await deps.accounts.consumeNonce(address, nonce, 'reset'))) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(401).send({ error: 'expired or invalid challenge, restart' });
     }
     if (!verifyWalletSignature(challengeFor(address, nonce), signature, address)) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(401).send({ error: 'signature verification failed' });
     }
     const found = await deps.accounts.findByAddress(address);
     if (!found) {
-      await slowFail(keys);
+      await slowFail();
       return reply.code(404).send({ error: 'no account for this wallet' });
     }
     await deps.accounts.resetPassword(found.user.id, hashPassword(password));
-    await deps.accounts.deleteUserSessions(found.user.id); // revoke every existing session
-    clearFails(keys);
-    // Re-fetch so the freshly-minted token carries the bumped version (keeping this new session valid).
+    await deps.accounts.deleteUserSessions(found.user.id); // revoke every existing session    // Re-fetch so the freshly-minted token carries the bumped version (keeping this new session valid).
     const fresh = await deps.accounts.findById(found.user.id);
     return reply.send(
       await issueSession(found.user.id, fresh?.tokenVersion ?? found.user.tokenVersion + 1),
