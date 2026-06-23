@@ -400,19 +400,13 @@ export function accumulatePositionFlow(
   wallet: string,
   mint: string,
 ): PositionFlow {
-  let lamports = 0;
-  let wsol = 0;
+  let solLegSol = 0;
   let received = 0;
   let sent = 0;
   for (const tx of txs) {
-    for (const ad of tx.accountData ?? []) {
-      if (ad.account === wallet) lamports += ad.nativeBalanceChange ?? 0;
-      for (const tb of ad.tokenBalanceChanges ?? []) {
-        if (tb.userAccount === wallet && tb.mint === SOL_MINT) {
-          wsol += Number(tb.rawTokenAmount.tokenAmount) / 10 ** tb.rawTokenAmount.decimals;
-        }
-      }
-    }
+    // Same native + WSOL netting as the standalone walletSolFlow — summed per tx (Σ(a/1e9 + b) is
+    // identical to (Σa)/1e9 + Σb), so this is one source of truth for the SOL-leg accounting.
+    solLegSol += walletSolFlow(tx, wallet);
     for (const tt of tx.tokenTransfers ?? []) {
       if (tt.mint !== mint) continue;
       if (tt.toUserAccount === wallet) received += tt.tokenAmount;
@@ -420,7 +414,7 @@ export function accumulatePositionFlow(
     }
   }
   return {
-    solLegSol: lamports / LAMPORTS_PER_SOL + wsol,
+    solLegSol,
     residualAmount: Math.max(0, received - sent),
   };
 }
