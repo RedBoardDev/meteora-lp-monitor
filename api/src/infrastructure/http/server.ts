@@ -330,7 +330,7 @@ export async function buildServer(deps: ServerDeps) {
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0];
     if (
-      req.url.startsWith('/live') ||
+      path === '/live' || // exact match (self-authenticates) — a prefix match would exempt /live-*
       path === '/health' ||
       path === '/auth/nonce' ||
       path === '/auth/register' ||
