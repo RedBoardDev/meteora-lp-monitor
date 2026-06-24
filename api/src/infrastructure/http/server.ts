@@ -99,7 +99,7 @@ export async function buildServer(deps: ServerDeps) {
       await slowFail();
       return reply.code(400).send({ error: 'invalid Solana address' });
     }
-    if (!(await deps.accounts.isWhitelisted(address))) {
+    if (!deps.openAccess && !(await deps.accounts.isWhitelisted(address))) {
       await slowFail();
       return reply.code(403).send({ error: 'not approved', notWhitelisted: true });
     }
@@ -118,9 +118,30 @@ export async function buildServer(deps: ServerDeps) {
       | { address?: unknown; signature?: unknown; password?: unknown; nonce?: unknown }
       | undefined;
     const address = body?.address;
+    const password = typeof body?.password === 'string' ? body.password : '';
+
+    // Open-access mode: address + password only — no whitelist, no nonce, no signature. The wallet is
+    // NOT proven to belong to the caller (first-come binding); intentional for read-access viewing.
+    if (deps.openAccess) {
+      if (!isValidSolanaAddress(address) || password.length < 8) {
+        await slowFail();
+        return reply.code(400).send({ error: 'address and password (≥8) required' });
+      }
+      if (await deps.accounts.findByAddress(address)) {
+        return reply.code(409).send({ error: 'account already exists, sign in instead' });
+      }
+      const openUser = await deps.accounts.createUser({
+        address,
+        passwordHash: hashPassword(password),
+        isOwner: address === deps.config.OWNER_ADDRESS,
+      });
+      await deps.accounts.addWatch(openUser.id, { address });
+      await deps.engine.addWallet(address);
+      return reply.send(await issueSession(openUser.id, openUser.tokenVersion));
+    }
+
     const signature = body?.signature;
     const nonce = body?.nonce;
-    const password = typeof body?.password === 'string' ? body.password : '';
     if (
       !isValidSolanaAddress(address) ||
       typeof signature !== 'string' ||
@@ -239,6 +260,10 @@ export async function buildServer(deps: ServerDeps) {
     return { ok: true };
   });
 
+  // Public feature flags for the web. No auth: the login page must read it before any session exists,
+  // to decide whether registration is the SIWS flow or the simple address + password form.
+  app.get('/config/app', async () => ({ openAccess: deps.openAccess }));
+
   // Short-lived WebSocket ticket (behind the Bearer hook) — encodes the caller's identity so the
   // socket scopes to that account's watchlist. The web BFF mints one per connection.
   app.get('/auth/ws-ticket', async (req) => ({
@@ -268,6 +293,7 @@ export async function buildServer(deps: ServerDeps) {
     if (
       path === '/live' || // exact match (self-authenticates) — a prefix match would exempt /live-*
       path === '/health' ||
+      path === '/config/app' || // public feature flags (read before any session exists)
       path === '/auth/nonce' ||
       path === '/auth/register' ||
       path === '/auth/login' ||

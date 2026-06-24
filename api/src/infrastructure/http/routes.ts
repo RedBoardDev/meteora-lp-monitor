@@ -45,6 +45,8 @@ export type RouteDeps = {
   vapidPublicKey: string;
   /** Send a test push to an account's own subscriptions; returns how many were targeted. */
   sendTestPush: (userId: string) => Promise<number>;
+  /** Open-access mode (env OPEN_ACCESS_MODE): single-wallet accounts + notifications disabled. */
+  openAccess: boolean;
 };
 
 /** Owner-only guard for operational/notification routes. Returns false (and replies 403) otherwise. */
@@ -70,6 +72,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     gecko,
     vapidPublicKey,
     sendTestPush,
+    openAccess,
   } = deps;
 
   // A watchlist changes only on add/remove (which invalidate below), so cache it briefly instead of
@@ -155,8 +158,11 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     }
     const already = await accounts.isWatching(me.id, address);
     if (!already && !me.isOwner) {
-      if ((await accounts.countWatched(me.id)) >= MAX_WALLETS_PER_ACCOUNT) {
-        return reply.code(409).send({ error: `wallet limit reached (${MAX_WALLETS_PER_ACCOUNT})` });
+      // Open-access accounts are single-wallet (the registration address is auto-watched), so any
+      // second wallet is rejected. The owner is exempt in either mode.
+      const cap = openAccess ? 1 : MAX_WALLETS_PER_ACCOUNT;
+      if ((await accounts.countWatched(me.id)) >= cap) {
+        return reply.code(409).send({ error: `wallet limit reached (${cap})` });
       }
       const monitored = await accounts.monitoredWallets();
       if (!monitored.includes(address) && monitored.length >= GLOBAL_WALLET_CAP) {
@@ -256,6 +262,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
   app.post<{ Body: { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } } }>(
     '/push/subscribe',
     async (req, reply) => {
+      // Open-access mode disables notifications entirely — refuse subscriptions so no web push is ever
+      // routed to these accounts (the UI also hides the toggle; this is the server-side guarantee).
+      if (openAccess) return reply.code(403).send({ error: 'notifications disabled' });
       const b = req.body;
       const endpoint = typeof b?.endpoint === 'string' ? b.endpoint : null;
       const p256dh = typeof b?.keys?.p256dh === 'string' ? b.keys.p256dh : null;

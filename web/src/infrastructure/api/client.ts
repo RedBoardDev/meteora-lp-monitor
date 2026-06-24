@@ -212,11 +212,12 @@ export const authApi = {
     return postAuth('/api/auth/login', { address, password });
   },
 
+  // In open-access mode the backend ignores signature/nonce, so the simplified signup omits them.
   register(p: {
     address: string;
-    signature: string;
-    nonce: string;
     password: string;
+    signature?: string;
+    nonce?: string;
   }): Promise<{ ok: boolean; error?: string }> {
     return postAuth('/api/auth/register', p);
   },
