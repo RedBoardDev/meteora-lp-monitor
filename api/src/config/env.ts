@@ -19,6 +19,15 @@ const EnvSchema = z.object({
       'OWNER_ADDRESS must be a base58 Solana address',
     ),
 
+  /** Open-access mode. When 'true', registration is address + password only — NO wallet signature and
+   *  NO whitelist (anyone can create an account for any address), accounts are single-wallet, and
+   *  notifications are disabled. The default 'false' keeps the secure SIWS + whitelist + multi-wallet
+   *  behavior. Reversible per deployment; the SIWS/whitelist code stays in place either way. */
+  OPEN_ACCESS_MODE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
   SOLANA_WS_URL: z.string().url(),
   SOLANA_HTTP_URL: z.string().url().optional(),
 
