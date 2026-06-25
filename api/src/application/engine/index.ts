@@ -30,7 +30,7 @@ import { Reconciler } from './reconciler';
 import { PositionRefresher } from './refresher';
 import { makeRuntime, type WalletRuntime } from './runtime';
 import type { StrategyService } from './strategy-service';
-import { clamp } from './utils';
+import { clamp, shouldRefreshRealized } from './utils';
 
 const INITIAL_LAG_MS = 1500;
 const RETRY_DELAYS_MS = [2000, 2500];
@@ -48,6 +48,12 @@ const SYNC_INTERVAL_MS = 60_000;
 // On-chain source: periodic delta-ingest backstop so a dropped WS notification (socket stayed up) can't
 // strand a missed open/close indefinitely. Catches what the live WS path misses.
 const BACKSTOP_INGEST_MS = 300_000;
+// After a close the residual is usually market-sold within seconds; Helius indexes that swap in ~1-2s
+// (measured), so the realized pass fired at close-detection can run BEFORE the sell exists and overstate
+// PnL (residual still marked as held). Re-run it on a small front-loaded schedule after each close so the
+// real sale value converges without waiting for the wallet's next close. Bounded → ≤ this many extra
+// passes per close. Front-loaded because the bottleneck is the close→sell delay, not indexing.
+const REALIZED_REFRESH_OFFSETS_MS = [25_000, 60_000, 150_000];
 
 /** Engine dependencies — one options object instead of 16 positional ctor args. */
 export interface EngineDeps {
@@ -389,7 +395,12 @@ export class Engine {
           // The closed set moved → (re)compute the authoritative on-chain realized market_pnl_sol for
           // this wallet's closed positions. Runs async (Enhanced API + price gateway) so it never blocks
           // the snapshot loop; the UI fills in via a second closedChanged when it persists.
+          rt.lastRealizedRunAt = Date.now();
           void this.runRealizedPnl(rt.address);
+          // Arm the BOUNDED deferred refresh (below) ONLY for a genuine LIVE close — post-reconcile with
+          // newly-closed rows. NEVER the initial backfill count-establishment (wasReconciled=false) or a
+          // bulk catch-up, which would otherwise fan out N extra realized passes per wallet on cold-start.
+          if (wasReconciled && res.closedRows.length > 0) rt.lastCloseAt = Date.now();
         }
       } else if (
         this.onchainSource &&
@@ -399,6 +410,25 @@ export class Engine {
         const open = await this.positionSync.refreshOpen(rt.address, snap, valued);
         rt.lastSyncAt = Date.now();
         this.applyOpenPositions(rt, open);
+      }
+
+      // Deferred convergence: independent of a new close, keep re-running the realized pass for a bounded
+      // window after the last close so a freshly market-sold residual's REAL value lands once Helius
+      // indexes the swap — instead of showing the stale pool-spot mark until the wallet's next close.
+      if (
+        this.onchainSource &&
+        rt.reconciled &&
+        shouldRefreshRealized({
+          now: Date.now(),
+          lastCloseAt: rt.lastCloseAt,
+          lastRealizedRunAt: rt.lastRealizedRunAt,
+          offsetsMs: REALIZED_REFRESH_OFFSETS_MS,
+        })
+      ) {
+        rt.lastRealizedRunAt = Date.now();
+        // Incremental: the close-time pass already seeded the full history; a refresh only needs the
+        // recent delta (the residual sell) — cheap, so it converges fast even for huge wallets.
+        void this.runRealizedPnl(rt.address, { incremental: true });
       }
     } catch (err) {
       this.health.record('rpc', false, err instanceof Error ? err.message : String(err));
@@ -425,16 +455,20 @@ export class Engine {
    * single-flight per wallet so it can never pile up. Errors are swallowed — a failed pass must not
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
-  private async runRealizedPnl(wallet: string): Promise<void> {
+  private async runRealizedPnl(wallet: string, opts: { incremental?: boolean } = {}): Promise<void> {
     if (this.realizedPnlRunning.has(wallet)) {
       this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
       return;
     }
     this.realizedPnlRunning.add(wallet);
     try {
+      // First pass honors the requested mode (deferred refresh = incremental → cheap delta fetch); any
+      // COALESCED rerun falls back to a full pass (rare, since passes are spaced, and always safe).
+      let incremental = opts.incremental ?? false;
       do {
         this.realizedPnlRerun.delete(wallet);
-        const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
+        const pnlByPos = await this.realizedPnl.computeForWallet(wallet, { incremental });
+        incremental = false;
         // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so
         // a flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
         if (pnlByPos == null || pnlByPos.size === 0) continue;
