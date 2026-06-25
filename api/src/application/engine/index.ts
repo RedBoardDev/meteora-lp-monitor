@@ -426,7 +426,9 @@ export class Engine {
         })
       ) {
         rt.lastRealizedRunAt = Date.now();
-        void this.runRealizedPnl(rt.address);
+        // Incremental: the close-time pass already seeded the full history; a refresh only needs the
+        // recent delta (the residual sell) — cheap, so it converges fast even for huge wallets.
+        void this.runRealizedPnl(rt.address, { incremental: true });
       }
     } catch (err) {
       this.health.record('rpc', false, err instanceof Error ? err.message : String(err));
@@ -453,16 +455,20 @@ export class Engine {
    * single-flight per wallet so it can never pile up. Errors are swallowed — a failed pass must not
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
-  private async runRealizedPnl(wallet: string): Promise<void> {
+  private async runRealizedPnl(wallet: string, opts: { incremental?: boolean } = {}): Promise<void> {
     if (this.realizedPnlRunning.has(wallet)) {
       this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
       return;
     }
     this.realizedPnlRunning.add(wallet);
     try {
+      // First pass honors the requested mode (deferred refresh = incremental → cheap delta fetch); any
+      // COALESCED rerun falls back to a full pass (rare, since passes are spaced, and always safe).
+      let incremental = opts.incremental ?? false;
       do {
         this.realizedPnlRerun.delete(wallet);
-        const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
+        const pnlByPos = await this.realizedPnl.computeForWallet(wallet, { incremental });
+        incremental = false;
         // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so
         // a flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
         if (pnlByPos == null || pnlByPos.size === 0) continue;
