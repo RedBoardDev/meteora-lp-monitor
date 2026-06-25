@@ -36,15 +36,37 @@ export function symmetricDiffSize(a: Set<string>, b: Set<string>): number {
  * deliberately time-bounded: once `windowMs` has elapsed since the close, indexing is assumed settled
  * and we stop, so a quiet-but-viewed wallet never re-fetches Helius indefinitely.
  */
+/**
+ * Decide whether to re-run the authoritative realized-PnL pass for a wallet right now.
+ *
+ * WHY this exists: the realized pass (which writes `market_pnl_sol` from the wallet's REAL Helius
+ * buys/sells) is normally only (re)triggered when the wallet's closed-position COUNT changes. But a
+ * freshly-closed position's residual is typically market-sold within seconds of close, so the pass
+ * fired at close-detection time can run BEFORE that sell exists and marks the residual as still-held at
+ * pool-spot — overstating PnL (e.g. shows -0.11 instead of the real -0.42). Without a re-trigger that
+ * stale value would persist until the wallet's NEXT close.
+ *
+ * Helius indexes parsed transactions within ~1-2s of confirmation (measured), so the bottleneck is the
+ * close→sell delay, not indexing. We therefore re-run on a small FRONT-LOADED schedule of offsets after
+ * the close (e.g. ~25s, ~60s, ~150s): the first pass already catches the common case, the later ones
+ * cover a delayed sell or congestion. The schedule is finite → bounded cost (≤ offsets.length extra
+ * passes per close); once the last offset has fired we stop, so a quiet-but-viewed wallet never
+ * re-fetches Helius indefinitely.
+ *
+ * `lastRealizedRunAt` is set equal to `lastCloseAt` at close-detection time, so the close-time pass
+ * counts as offset 0 and the first scheduled refresh is the first offset > 0.
+ */
 export function shouldRefreshRealized(args: {
   now: number;
   lastCloseAt: number;
   lastRealizedRunAt: number;
-  windowMs: number;
-  intervalMs: number;
+  offsetsMs: number[];
 }): boolean {
-  const { now, lastCloseAt, lastRealizedRunAt, windowMs, intervalMs } = args;
+  const { now, lastCloseAt, lastRealizedRunAt, offsetsMs } = args;
   if (lastCloseAt <= 0) return false; // no close ever seen → nothing to converge
-  if (now - lastCloseAt > windowMs) return false; // past the indexing-lag window → stop refreshing
-  return now - lastRealizedRunAt >= intervalMs; // throttle to at most one pass per interval
+  const ageNow = now - lastCloseAt; // ms since the close
+  const ageLastRun = lastRealizedRunAt - lastCloseAt; // ms-after-close of the last pass (close pass = 0)
+  // Fire iff a scheduled checkpoint falls in (ageLastRun, ageNow] — i.e. one we're due for but haven't
+  // run yet. Past the last offset, none qualify → we stop.
+  return offsetsMs.some((o) => o > ageLastRun && o <= ageNow);
 }

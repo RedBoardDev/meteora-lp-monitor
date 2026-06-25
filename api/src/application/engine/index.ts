@@ -48,13 +48,12 @@ const SYNC_INTERVAL_MS = 60_000;
 // On-chain source: periodic delta-ingest backstop so a dropped WS notification (socket stayed up) can't
 // strand a missed open/close indefinitely. Catches what the live WS path misses.
 const BACKSTOP_INGEST_MS = 300_000;
-// After a close, the residual is usually market-sold within seconds but Helius indexes that swap with a
-// lag — so the realized pass fired at close-time overstates PnL (residual still marked as held). Re-run
-// it on the snapshot cadence for this window after each close so the real sale value converges without
-// waiting for the wallet's next close.
-const REALIZED_REFRESH_WINDOW_MS = 600_000; // 10 min — covers Helius enhanced-API indexing lag
-// Throttle the post-close refresh so a quiet-but-viewed wallet doesn't re-fetch Helius every tick.
-const REALIZED_REFRESH_INTERVAL_MS = 120_000; // ≤ ~5 extra realized passes per close (window / interval)
+// After a close the residual is usually market-sold within seconds; Helius indexes that swap in ~1-2s
+// (measured), so the realized pass fired at close-detection can run BEFORE the sell exists and overstate
+// PnL (residual still marked as held). Re-run it on a small front-loaded schedule after each close so the
+// real sale value converges without waiting for the wallet's next close. Bounded → ≤ this many extra
+// passes per close. Front-loaded because the bottleneck is the close→sell delay, not indexing.
+const REALIZED_REFRESH_OFFSETS_MS = [25_000, 60_000, 150_000];
 
 /** Engine dependencies — one options object instead of 16 positional ctor args. */
 export interface EngineDeps {
@@ -420,8 +419,7 @@ export class Engine {
           now: Date.now(),
           lastCloseAt: rt.lastCloseAt,
           lastRealizedRunAt: rt.lastRealizedRunAt,
-          windowMs: REALIZED_REFRESH_WINDOW_MS,
-          intervalMs: REALIZED_REFRESH_INTERVAL_MS,
+          offsetsMs: REALIZED_REFRESH_OFFSETS_MS,
         })
       ) {
         rt.lastRealizedRunAt = Date.now();

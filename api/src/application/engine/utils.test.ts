@@ -1,27 +1,38 @@
 import { describe, expect, it } from 'vitest';
 import { shouldRefreshRealized } from './utils';
 
-// Mirrors the production tunables (engine/index.ts) so the WHY is encoded against real values.
-const WINDOW_MS = 600_000; // 10 min indexing-lag window after a close
-const INTERVAL_MS = 120_000; // ≥ 2 min between refresh passes
-const base = { windowMs: WINDOW_MS, intervalMs: INTERVAL_MS };
+// Mirrors the production schedule (engine/index.ts) so the WHY is encoded against real values:
+// front-loaded offsets after a close — Helius indexes parsed txs in ~1-2s, so the bottleneck is the
+// close→sell delay, not indexing.
+const OFFSETS = [25_000, 60_000, 150_000];
+const base = { offsetsMs: OFFSETS };
 
-describe('shouldRefreshRealized — bounded post-close realized-PnL refresh', () => {
+describe('shouldRefreshRealized — front-loaded post-close realized-PnL refresh', () => {
   it('never refreshes a wallet that has not closed anything (no stale value to converge)', () => {
-    // WHY: the refresh only exists to converge a freshly-closed position's residual value. With no
-    // close, re-fetching Helius on every snapshot tick would be pure waste.
     expect(
       shouldRefreshRealized({ now: 1_000_000, lastCloseAt: 0, lastRealizedRunAt: 0, ...base }),
     ).toBe(false);
   });
 
-  it('refreshes once the interval has elapsed within the post-close window', () => {
-    // WHY: this is the whole point — keep recomputing so the residual's REAL sale value (once Helius
-    // indexes the swap) replaces the stale pool-spot mark without waiting for the next close.
+  it('does not fire before the first offset (avoids a useless pass while the sell is still pending)', () => {
     const close = 1_000_000;
     expect(
       shouldRefreshRealized({
-        now: close + INTERVAL_MS, // exactly one interval since the close-time pass
+        now: close + OFFSETS[0]! - 1, // just before 25s — sell/indexing chain not settled yet
+        lastCloseAt: close,
+        lastRealizedRunAt: close, // close-time pass counts as offset 0
+        ...base,
+      }),
+    ).toBe(false);
+  });
+
+  it('fires the FIRST refresh as soon as the first offset is reached (~25s, not minutes)', () => {
+    // WHY the redesign: a fixed 2-min interval made the user stare at the stale -0.11 far too long;
+    // indexing is ~1-2s, so converge fast.
+    const close = 1_000_000;
+    expect(
+      shouldRefreshRealized({
+        now: close + OFFSETS[0]!,
         lastCloseAt: close,
         lastRealizedRunAt: close,
         ...base,
@@ -29,41 +40,49 @@ describe('shouldRefreshRealized — bounded post-close realized-PnL refresh', ()
     ).toBe(true);
   });
 
-  it('throttles to one pass per interval (no Helius re-fetch every tick)', () => {
-    // WHY: snapshots tick far faster than the interval; without throttling a viewed wallet would hammer
-    // the Enhanced API for the entire window.
+  it('does not double-fire the same checkpoint (throttle: a pass already ran at this offset)', () => {
     const close = 1_000_000;
     expect(
       shouldRefreshRealized({
-        now: close + INTERVAL_MS - 1, // just under one interval since the last pass
+        now: close + OFFSETS[0]! + 1_000, // 1s after the first pass ran
         lastCloseAt: close,
-        lastRealizedRunAt: close,
+        lastRealizedRunAt: close + OFFSETS[0]!, // first checkpoint already consumed
         ...base,
       }),
     ).toBe(false);
   });
 
-  it('stops refreshing once the window has elapsed (bounded cost — indexing assumed settled)', () => {
-    // WHY: the lag is seconds-to-minutes; past the window we must stop or a quiet-but-viewed wallet
-    // re-fetches Helius forever.
+  it('fires the next checkpoint once its offset is reached', () => {
     const close = 1_000_000;
     expect(
       shouldRefreshRealized({
-        now: close + WINDOW_MS + 1, // just past the window
+        now: close + OFFSETS[1]!,
         lastCloseAt: close,
-        lastRealizedRunAt: 0, // interval long elapsed, yet still must not fire
+        lastRealizedRunAt: close + OFFSETS[0]!, // first done, second now due
+        ...base,
+      }),
+    ).toBe(true);
+  });
+
+  it('stops after the last offset (bounded cost — no indefinite Helius re-fetch)', () => {
+    const close = 1_000_000;
+    expect(
+      shouldRefreshRealized({
+        now: close + OFFSETS[2]! + 600_000, // long past the last checkpoint
+        lastCloseAt: close,
+        lastRealizedRunAt: close + OFFSETS[2]!, // all checkpoints consumed
         ...base,
       }),
     ).toBe(false);
   });
 
-  it('still fires on the last tick inside the window when the interval has elapsed', () => {
-    // Boundary: now - lastCloseAt == windowMs is INSIDE the window (strict >), so the interval gate
-    // decides — guards against an off-by-one that would drop the final convergence pass.
+  it('catches up multiple missed checkpoints in one fire (snapshot cadence slower than offsets)', () => {
+    // If the snapshot loop was busy, several offsets may have elapsed since the last pass — one fire is
+    // enough to converge (computeForWallet uses the latest data regardless of how many we skipped).
     const close = 1_000_000;
     expect(
       shouldRefreshRealized({
-        now: close + WINDOW_MS,
+        now: close + OFFSETS[2]!, // 150s in, but only the close-time pass has run
         lastCloseAt: close,
         lastRealizedRunAt: close,
         ...base,
