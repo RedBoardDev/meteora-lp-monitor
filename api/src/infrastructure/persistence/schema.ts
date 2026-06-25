@@ -90,6 +90,86 @@ export const dlmmLegs = pgTable(
   ],
 );
 
+// Copy-bot — audit log of detected LEADER DLMM actions (one row per leader tx). Unique on `signature` =
+// idempotent: the live WS and the completeness poll both surface the same tx, but only one row is ever
+// written (onConflictDoNothing), and a re-run never double-counts. This is the P1 audit trail; the copy
+// decision/execution columns come in later phases.
+export const leaderActivity = pgTable(
+  'leader_activity',
+  {
+    id: serial('id').primaryKey(),
+    signature: text('signature').notNull(),
+    leader: text('leader').notNull(), // the followed leader wallet
+    instruction: text('instruction').notNull(), // raw DLMM instruction name (headline)
+    action: text('action'), // classified: open | close | add | remove | claim (null if unclassified)
+    depositSol: doublePrecision('deposit_sol').notNull().default(0), // capital in (open/add)
+    withdrawSol: doublePrecision('withdraw_sol').notNull().default(0), // capital out (close/remove)
+    claimSol: doublePrecision('claim_sol').notNull().default(0), // fees claimed
+    pool: text('pool'), // lbPair
+    nonSolMint: text('non_sol_mint'),
+    nonSolSymbol: text('non_sol_symbol'),
+    blockTime: bigint('block_time', { mode: 'number' }), // unix seconds (tx.blockTime)
+    source: text('source').notNull(), // replay | ws | poll
+    detectedAt: ms('detected_at').notNull(), // when WE recorded it (Date.now)
+  },
+  (t) => [
+    uniqueIndex('uq_leader_activity_signature').on(t.signature),
+    index('idx_leader_activity_leader').on(t.leader),
+  ],
+);
+
+// Copy-bot · P2 paper shadow-log : ce qu'on AURAIT fait pour chaque entrée leader (aucune signature, aucun
+// fonds). Table paper dédiée, volontairement minimale — pas de champs multi-tenant tant que les utilisateurs
+// (J2-web) n'existent pas ; convergera vers `copies`/`activity_log` (spec 11 §2.3-2.4) à ce moment-là.
+export const copyDecisions = pgTable(
+  'copy_decisions',
+  {
+    id: serial('id').primaryKey(),
+    signature: text('signature').notNull(), // tx leader qui a déclenché la décision
+    leader: text('leader').notNull(),
+    pool: text('pool'),
+    position: text('position'), // pubkey de la position DLMM
+    eventKind: text('event_kind').notNull(), // 'open' (entrée) — étendu plus tard (add/close/claim)
+    outcome: text('outcome').notNull(), // mirrored | reduced | skipped
+    skipReason: text('skip_reason'), // non_sol_paired | below_min_floor | insufficient_balance (si skipped)
+    leaderSizeSol: doublePrecision('leader_size_sol').notNull().default(0), // taille de l'open leader
+    ourSizeSol: doublePrecision('our_size_sol'), // taille qu'on aurait ouverte (null si skipped)
+    blockTime: bigint('block_time', { mode: 'number' }), // unix seconds (tx.blockTime)
+    decidedAt: ms('decided_at').notNull(), // quand NOUS avons décidé (Date.now)
+  },
+  (t) => [
+    uniqueIndex('uq_copy_decisions_signature').on(t.signature),
+    index('idx_copy_decisions_leader').on(t.leader),
+  ],
+);
+
+// Copy-bot · coffre — registre d'idempotence des exécutions. Le coffre claim `command_id` via INSERT ON
+// CONFLICT DO NOTHING AVANT de signer → un re-jeu (crash/redelivery) ne double-signe jamais (spec 10 §3.3).
+export const executions = pgTable('executions', {
+  commandId: text('command_id').primaryKey(),
+  eventKey: text('event_key').notNull(),
+  state: text('state').notNull(), // claimed | signed | landed | failed | skipped
+  deadlineSlot: bigint('deadline_slot', { mode: 'number' }),
+  createdAt: ms('created_at').notNull(),
+  updatedAt: ms('updated_at').notNull(),
+});
+
+// Copy-bot · brain — positions qu'on COPIE (source de vérité PERSISTANTE, survit aux redémarrages). Sans ça
+// le registre en mémoire serait perdu au restart → positions DORMANTES (ouvertes chez nous alors que le leader
+// a fermé). Le failsafe reconcilie ces lignes (status='open') vs l'état on-chain du leader.
+export const copyPositions = pgTable('copy_positions', {
+  leaderPosition: text('leader_position').primaryKey(),
+  ourPosition: text('our_position').notNull(),
+  pool: text('pool').notNull(),
+  nonSolSymbol: text('non_sol_symbol'),
+  sizeSol: doublePrecision('size_sol').notNull(),
+  lowerBin: integer('lower_bin').notNull(),
+  upperBin: integer('upper_bin').notNull(),
+  status: text('status').notNull(), // open | closed
+  openedAt: ms('opened_at').notNull(),
+  closedAt: ms('closed_at'),
+});
+
 // Per-pool DLMM metadata (binStep / SOL side / mints), decoded once from the LbPair account. These are
 // immutable on-chain, so caching them here lets the projection skip the per-pool getAccountInfo on every
 // boot — the dominant first-sync RPC cost. `sol_side` is null for a non-SOL-quote pool.
