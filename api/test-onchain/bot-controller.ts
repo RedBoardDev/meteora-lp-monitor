@@ -38,9 +38,15 @@ export async function startCoffre(): Promise<void> {
   if (coffre && coffre.exitCode === null) return;
   coffre = await spawnUntil('coffre', ['--import', 'tsx', 'src/copybot/coffre/coffre-main.ts'], { ...process.env, SIGNING_ENABLED: 'true' }, '🔐 vault started', 30_000);
 }
-export async function startBrain(): Promise<void> {
+export async function startBrain(extraEnv: NodeJS.ProcessEnv = {}): Promise<void> {
   if (brain && brain.exitCode === null) return;
-  brain = await spawnUntil('brain', ['dist/copybot/src/copybot/brain/brain-main.cjs'], brainEnv(), 'replay done', 40_000);
+  brain = await spawnUntil('brain', ['dist/copybot/src/copybot/brain/brain-main.cjs'], { ...brainEnv(), ...extraEnv }, 'replay done', 40_000);
+}
+/** Restart the brain with EXTRA env (e.g. COPYBOT_KILL_SWITCH=true) to exercise a runtime config. The caller is
+ *  responsible for restoring the default brain (restartBrain) afterwards — the test's afterEach does this. */
+export async function restartBrainWithEnv(extraEnv: NodeJS.ProcessEnv): Promise<void> {
+  await killBrain();
+  await startBrain(extraEnv);
 }
 /** Idempotent: start both if not already running. */
 export async function ensureBotStarted(): Promise<void> {

@@ -108,6 +108,25 @@ export class Harness {
   leaderShape(pos: string, pool: string): ReturnType<Harness['shape']> {
     return this.shape(LEADER_TEST, pos, pool);
   }
+  /** Bot REACTION latency (ms): from when the brain SAW the leader event ("👁️ event routed") to when the coffre
+   *  LANDED our copy ("🚀 signed + landed"), correlated by kind. This is the controllable end-to-end SLA — the RPC
+   *  WS-propagation BEFORE "event routed" is infra latency, not the bot. Returns null if a marker is missing. */
+  copyLatencyMs(kind: 'open' | 'close'): number | null {
+    const stamp = (path: string, msg: string): number | null => {
+      let log: string;
+      try {
+        log = readFileSync(path, 'utf8');
+      } catch {
+        return null;
+      }
+      const line = log.split('\n').filter((l) => l.includes(msg) && l.includes(`"kind":"${kind}"`)).at(-1);
+      const m = line?.match(/"time":(\d+)/);
+      return m ? Number(m[1]) : null;
+    };
+    const routed = stamp('/tmp/bench-brain.log', '👁️ event routed');
+    const landed = stamp('/tmp/bench-coffre.log', '🚀 signed + landed');
+    return routed != null && landed != null ? landed - routed : null;
+  }
   /** Compare on-chain fidelity. Retries on a transient "missing" (the SDK position enumerator can lag a freshly
    *  landed copy by a few seconds — the account exists [waitForCopy confirmed it], it's just not indexed yet). */
   async fidelity(pool: string, leaderPos: string, copyPos: string): Promise<FidelityResult> {
@@ -138,6 +157,15 @@ export class Harness {
     }
     const m = [...log.matchAll(/"kind":"open"[^\n]*?"our":"([1-9A-HJ-NP-Za-km-z]{32,44})"/g)];
     return m.length ? (m[m.length - 1]?.[1] ?? null) : null;
+  }
+  /** Does the brain's tee'd log currently contain `substr`? (Used to corroborate a decision, e.g. an open BLOCKED
+   *  by the kill-switch vs a missed event.) */
+  brainLogIncludes(substr: string): boolean {
+    try {
+      return readFileSync('/tmp/bench-brain.log', 'utf8').includes(substr);
+    } catch {
+      return false;
+    }
   }
   /** Does a position/account exist on-chain (direct read — no enumerator lag)? */
   async accountExists(pubkey: string): Promise<boolean> {
