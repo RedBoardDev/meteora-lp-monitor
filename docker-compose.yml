@@ -22,6 +22,21 @@ services:
       timeout: 5s
       retries: 5
 
+  # Copy-bot bus (brain → coffre). Notre propre conteneur Redis (≠ autres Redis locaux).
+  redis:
+    image: redis:7-alpine
+    container_name: meteora-redis
+    restart: unless-stopped
+    # 6385 sur l'hôte pour éviter tout clash (6379 d'autres projets).
+    ports:
+      - '6385:6379'
+    command: ['redis-server', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   api:
     build:
       context: .

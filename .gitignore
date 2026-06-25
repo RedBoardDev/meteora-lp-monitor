@@ -15,6 +15,7 @@ dist/
 out/
 *.tsbuildinfo
 .turbo/
+coverage/
 
 # data & logs
 data/
@@ -50,9 +51,18 @@ DerivedData/
 # internal docs & planning — kept local, not for the public repo
 docs/
 TODO.md
+**/TEST-PLAN.md
 
-# spike / validation scripts (scratch + local .secrets.env — NEVER committed)
-scripts/
+# spike / validation scripts (scratch + local .secrets.env — NEVER committed), EXCEPT the on-chain bench CLIs the
+# committed bench depends on (the harness execs them, bundled): leader-control (drives the leader-test wallet) and
+# bench-reader (reads positions/fidelity). Everything else in api/scripts/ stays local scratch.
+/scripts/
+api/scripts/*
+!api/scripts/leader-control.ts
+!api/scripts/bench-reader.ts
+
+# copy-bot test wallet keypairs — NEVER committed (real keys, gitignored)
+.wallets/
 
 # local research dumps (scratch, never committed)
 lpagent_*
