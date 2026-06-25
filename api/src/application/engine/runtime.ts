@@ -32,6 +32,13 @@ export interface WalletRuntime {
   /** on-chain positions source: txs ingested so far during the initial backfill — drives the UI's
    *  "indexing… (N txs)" onboarding state. `reconciled` flips true once the first projection lands. */
   ingestedTxs: number;
+  /** epoch ms of the most recent close detected for this wallet (0 = none). Drives the bounded
+   *  post-close realized-PnL refresh so a market-sold residual's REAL value converges without waiting
+   *  for the wallet's NEXT close (the only other re-trigger). */
+  lastCloseAt: number;
+  /** epoch ms the realized-PnL pass was last triggered — throttles the post-close refresh to one
+   *  pass per interval so a quiet-but-viewed wallet doesn't re-fetch Helius every snapshot tick. */
+  lastRealizedRunAt: number;
 }
 
 export function makeRuntime(address: string, openPositions: OpenPosition[]): WalletRuntime {
@@ -58,5 +65,7 @@ export function makeRuntime(address: string, openPositions: OpenPosition[]): Wal
     lastIngestAt: 0,
     lastClosedCount: -1,
     ingestedTxs: 0,
+    lastCloseAt: 0,
+    lastRealizedRunAt: 0,
   };
 }

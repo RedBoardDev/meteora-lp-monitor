@@ -30,7 +30,7 @@ import { Reconciler } from './reconciler';
 import { PositionRefresher } from './refresher';
 import { makeRuntime, type WalletRuntime } from './runtime';
 import type { StrategyService } from './strategy-service';
-import { clamp } from './utils';
+import { clamp, shouldRefreshRealized } from './utils';
 
 const INITIAL_LAG_MS = 1500;
 const RETRY_DELAYS_MS = [2000, 2500];
@@ -48,6 +48,13 @@ const SYNC_INTERVAL_MS = 60_000;
 // On-chain source: periodic delta-ingest backstop so a dropped WS notification (socket stayed up) can't
 // strand a missed open/close indefinitely. Catches what the live WS path misses.
 const BACKSTOP_INGEST_MS = 300_000;
+// After a close, the residual is usually market-sold within seconds but Helius indexes that swap with a
+// lag — so the realized pass fired at close-time overstates PnL (residual still marked as held). Re-run
+// it on the snapshot cadence for this window after each close so the real sale value converges without
+// waiting for the wallet's next close.
+const REALIZED_REFRESH_WINDOW_MS = 600_000; // 10 min — covers Helius enhanced-API indexing lag
+// Throttle the post-close refresh so a quiet-but-viewed wallet doesn't re-fetch Helius every tick.
+const REALIZED_REFRESH_INTERVAL_MS = 120_000; // ≤ ~5 extra realized passes per close (window / interval)
 
 /** Engine dependencies — one options object instead of 16 positional ctor args. */
 export interface EngineDeps {
@@ -389,6 +396,8 @@ export class Engine {
           // The closed set moved → (re)compute the authoritative on-chain realized market_pnl_sol for
           // this wallet's closed positions. Runs async (Enhanced API + price gateway) so it never blocks
           // the snapshot loop; the UI fills in via a second closedChanged when it persists.
+          rt.lastCloseAt = Date.now();
+          rt.lastRealizedRunAt = Date.now();
           void this.runRealizedPnl(rt.address);
         }
       } else if (
@@ -399,6 +408,24 @@ export class Engine {
         const open = await this.positionSync.refreshOpen(rt.address, snap, valued);
         rt.lastSyncAt = Date.now();
         this.applyOpenPositions(rt, open);
+      }
+
+      // Deferred convergence: independent of a new close, keep re-running the realized pass for a bounded
+      // window after the last close so a freshly market-sold residual's REAL value lands once Helius
+      // indexes the swap — instead of showing the stale pool-spot mark until the wallet's next close.
+      if (
+        this.onchainSource &&
+        rt.reconciled &&
+        shouldRefreshRealized({
+          now: Date.now(),
+          lastCloseAt: rt.lastCloseAt,
+          lastRealizedRunAt: rt.lastRealizedRunAt,
+          windowMs: REALIZED_REFRESH_WINDOW_MS,
+          intervalMs: REALIZED_REFRESH_INTERVAL_MS,
+        })
+      ) {
+        rt.lastRealizedRunAt = Date.now();
+        void this.runRealizedPnl(rt.address);
       }
     } catch (err) {
       this.health.record('rpc', false, err instanceof Error ? err.message : String(err));
