@@ -395,9 +395,12 @@ export class Engine {
           // The closed set moved → (re)compute the authoritative on-chain realized market_pnl_sol for
           // this wallet's closed positions. Runs async (Enhanced API + price gateway) so it never blocks
           // the snapshot loop; the UI fills in via a second closedChanged when it persists.
-          rt.lastCloseAt = Date.now();
           rt.lastRealizedRunAt = Date.now();
           void this.runRealizedPnl(rt.address);
+          // Arm the BOUNDED deferred refresh (below) ONLY for a genuine LIVE close — post-reconcile with
+          // newly-closed rows. NEVER the initial backfill count-establishment (wasReconciled=false) or a
+          // bulk catch-up, which would otherwise fan out N extra realized passes per wallet on cold-start.
+          if (wasReconciled && res.closedRows.length > 0) rt.lastCloseAt = Date.now();
         }
       } else if (
         this.onchainSource &&
