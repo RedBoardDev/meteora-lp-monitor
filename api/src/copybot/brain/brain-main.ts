@@ -76,6 +76,14 @@ const cfg = {
   jupiterBaseUrl: process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL,
 };
 const SIZING = { tradeRatioPct: 50, maxTradeSizeSol: 1.0, minPositionSizeSol: Number(process.env.COPYBOT_MIN_POSITION_SOL ?? '0.05'), solReserveSol: 0.05, onInsufficient: 'skip' as const, skipNonSolPaired: true };
+// Safety envelope (P2.6) — runtime-configurable so a kill-switch / cap can actually HALT new copies (proven by the
+// kill-switch on-chain test). The kill-switch blocks ENTRIES only; exits + reconciliation keep running (caps.ts).
+const CAPS = {
+  ...CAPS_DEFAULTS,
+  killSwitchGlobal: process.env.COPYBOT_KILL_SWITCH === 'true',
+  killSwitchLeader: process.env.COPYBOT_KILL_SWITCH_LEADER === 'true',
+  maxOpenPositions: process.env.COPYBOT_MAX_OPEN_POSITIONS ? Number(process.env.COPYBOT_MAX_OPEN_POSITIONS) : CAPS_DEFAULTS.maxOpenPositions,
+};
 const COPY_RATIO = (SIZING.tradeRatioPct ?? 0) / 100; // re-sync target = COPY_RATIO × leader current size (0 = fixed-size mode → no resync)
 const { config: FILTER_CONFIG, shadow: FILTER_SHADOW } = parseFilterConfig(process.env); // entry filters (env; all OFF + shadow ON by default)
 const FILTERS_ACTIVE =
@@ -160,20 +168,25 @@ async function main(): Promise<void> {
     log.info({ position: e.position, pool: e.pool, depositSol: e.depositSol }, '🔨 handleOpen start');
     const decision = decideEntry(e, SIZING, { availableBalanceSol: cfg.balanceSol });
     if (decision.outcome === 'skipped') return log.info({ reason: decision.reason }, 'open skipped');
-    const cap = checkCaps(CAPS_DEFAULTS, capsState(), decision.sizeSol, Date.now());
+    const cap = checkCaps(CAPS, capsState(), decision.sizeSol, Date.now());
     if (cap.action === 'block') return log.warn({ reason: cap.reason }, 'open blocked (cap)');
 
     const poolPk = new PublicKey(e.pool);
-    const meta = await poolReader.loadPoolMeta(e.pool);
-    if (!meta?.solSide) return log.info('non-SOL pool → skip');
-
-    // Entry-filter data — fetched IN PARALLEL with the on-chain reads below (overlap ⇒ ~0ms added; nothing is
-    // fetched at all when only local/leader-shape filters are enabled). `neededSources` dedups to one call.
+    // Latency budget (≤3s SLA): fire the INDEPENDENT reads in PARALLEL — the DLMM pair (~300ms, DLMM.create), the
+    // slot fetch, and the entry-filter data all overlap the pool-meta read instead of running after it. (The pair
+    // doesn't depend on meta; the only sequential link is shape ← pair and build ← shape.) `filterDataP` fetches
+    // nothing when only local/leader-shape filters are enabled. ONE shared DLMM instance serves the read AND build.
+    const pairP = createDlmmPair(conn, poolPk);
+    const slotsP = slots();
     const filterDataP = resolveFilterContext(e.nonSolMint, neededSources(FILTER_CONFIG), filterDeps, { nowMs: Date.now(), timeoutMs: FILTER_TIMEOUT_MS });
 
-    // ONE shared DLMM instance for the read AND the build (skips a 2nd DLMM.create ≈ −300ms); slot fetch in parallel.
-    const pair = await createDlmmPair(conn, poolPk);
-    const slotsP = slots();
+    const meta = await poolReader.loadPoolMeta(e.pool);
+    if (!meta?.solSide) {
+      void pairP.catch(() => undefined); // non-SOL skip → discard the in-flight pair read (no unhandled rejection)
+      return log.info('non-SOL pool → skip');
+    }
+
+    const pair = await pairP;
     const shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
     if (!shape) return log.warn({ position: e.position }, 'leader position not found on-chain → skip');
 
