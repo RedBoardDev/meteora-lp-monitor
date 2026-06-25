@@ -1,0 +1,143 @@
+import { utils } from '@coral-xyz/anchor';
+import { DLMM_PROGRAM_ID } from '@binsight/shared';
+import type { ParsedTransactionWithMeta } from '@solana/web3.js';
+import { describe, expect, it } from 'vitest';
+import type { LoadedPoolMeta } from '../dlmm';
+import { type PoolMetaLookup, buildDetectedEvent, poolsOf } from './classify-dlmm-tx';
+
+// --- Event-CPI event builders at the REAL byte layout (same technique as dlmm-event-decoder.test.ts:
+// [8 self-CPI tag][8 disc][borsh]) → we exercise the real decoding path, without the network. lb_pair = PK(1). ---
+const PK = (b: number) => Buffer.alloc(32, b);
+const cpi = (disc: number[], body: Buffer): string =>
+  utils.bytes.bs58.encode(Buffer.concat([Buffer.alloc(8), Buffer.from(disc), body]));
+const amounts = (x: bigint, y: bigint): Buffer => {
+  const b = Buffer.alloc(16);
+  b.writeBigUInt64LE(x, 0);
+  b.writeBigUInt64LE(y, 8);
+  return b;
+};
+const binBuf = (bin: number): Buffer => {
+  const b = Buffer.alloc(4);
+  b.writeInt32LE(bin, 0);
+  return b;
+};
+const addLiquidity = (x: bigint, y: bigint, bin: number): string =>
+  cpi([31, 94, 125, 90, 227, 52, 61, 186], Buffer.concat([PK(1), PK(2), PK(3), amounts(x, y), binBuf(bin)]));
+const removeLiquidity = (x: bigint, y: bigint, bin: number): string =>
+  cpi([116, 244, 97, 232, 103, 31, 152, 58], Buffer.concat([PK(1), PK(2), PK(3), amounts(x, y), binBuf(bin)]));
+const claimFee2 = (fx: bigint, fy: bigint, bin: number): string =>
+  cpi([232, 171, 242, 97, 58, 77, 35, 45], Buffer.concat([PK(1), PK(3), PK(9), amounts(fx, fy), binBuf(bin)]));
+
+const LB_PAIR = utils.bytes.bs58.encode(PK(1)); // the lb_pair carried by the events above
+const POSITION = utils.bytes.bs58.encode(PK(3)); // the position pubkey (3rd pubkey field of the events above)
+
+const SOL = 'So11111111111111111111111111111111111111112';
+const NONSOL = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+// SOL on side Y + bin 0 (price = 1) → legValueSol equals exactly amountY/1e9. Deterministic, no bin math.
+const SOL_Y: LoadedPoolMeta = { binStep: 1, solSide: 'Y', mintX: NONSOL, mintY: SOL };
+const lookupSolY: PoolMetaLookup = () => SOL_Y;
+
+// minimal parsed tx: logs (for the DLMM filter + parseInstruction) + innerInstructions (the CPI events).
+function tx(instr: string, datas: string[], blockTime: number | null = 1_700_000_000): ParsedTransactionWithMeta {
+  return {
+    blockTime,
+    transaction: { signatures: ['SIG1'] },
+    meta: {
+      logMessages: [
+        `Program ${DLMM_PROGRAM_ID} invoke [1]`,
+        `Program log: Instruction: ${instr}`,
+        `Program ${DLMM_PROGRAM_ID} success`,
+      ],
+      innerInstructions: [{ index: 0, instructions: datas.map((d) => ({ programId: DLMM_PROGRAM_ID, data: d })) }],
+    },
+  } as unknown as ParsedTransactionWithMeta;
+}
+
+describe('buildDetectedEvent — routing DLMM legs into SOL (golden: open/close/claim/partial withdrawal)', () => {
+  it('OPEN (AddLiquidity) → all the capital in depositSol, nothing elsewhere', () => {
+    const e = buildDetectedEvent('sigOpen', tx('InitializePositionPda', [addLiquidity(0n, 1_500_000_000n, 0)]), lookupSolY);
+    expect(e).not.toBeNull();
+    expect(e?.instruction).toBe('InitializePositionPda');
+    expect(e?.depositSol).toBeCloseTo(1.5, 9);
+    expect(e?.withdrawSol).toBe(0);
+    expect(e?.claimSol).toBe(0);
+    expect(e?.pool).toBe(LB_PAIR);
+    expect(e?.position).toBe(POSITION); // surfaced from the leg → P2 tracker key
+    expect(e?.nonSolMint).toBe(NONSOL); // SOL is on side Y → the non-SOL is mintX
+    expect(e?.blockTime).toBe(1_700_000_000);
+  });
+
+  it('CLOSE (RemoveLiquidity + ClaimFee2) → capital out in withdrawSol AND fees in claimSol, no deposit', () => {
+    const e = buildDetectedEvent(
+      'sigClose',
+      tx('ClosePosition2', [removeLiquidity(0n, 2_000_000_000n, 0), claimFee2(0n, 125_000_000n, 0)]),
+      lookupSolY,
+    );
+    expect(e?.depositSol).toBe(0);
+    expect(e?.withdrawSol).toBeCloseTo(2, 9);
+    expect(e?.claimSol).toBeCloseTo(0.125, 9); // the close fees do NOT mix with the withdrawn capital
+    expect(e?.position).toBe(POSITION); // remove + claim of the same position → consistent key
+  });
+
+  it('CLAIM alone (ClaimFee2) → only claimSol', () => {
+    const e = buildDetectedEvent('sigClaim', tx('ClaimFee2', [claimFee2(0n, 250_000_000n, 0)]), lookupSolY);
+    expect(e?.depositSol).toBe(0);
+    expect(e?.withdrawSol).toBe(0);
+    expect(e?.claimSol).toBeCloseTo(0.25, 9);
+  });
+
+  it('PARTIAL WITHDRAWAL (RemoveLiquidity, without close) → same path as a close on the withdrawSol side', () => {
+    const e = buildDetectedEvent('sigPartial', tx('RemoveLiquidityByRange2', [removeLiquidity(0n, 500_000_000n, 0)]), lookupSolY);
+    expect(e?.instruction).toBe('RemoveLiquidityByRange2');
+    expect(e?.withdrawSol).toBeCloseTo(0.5, 9);
+    expect(e?.depositSol).toBe(0);
+    expect(e?.claimSol).toBe(0);
+  });
+
+  it('multiple Adds in one tx → depositSol sums the legs (never overwritten)', () => {
+    const e = buildDetectedEvent(
+      'sigMulti',
+      tx('AddLiquidityByStrategy2', [addLiquidity(0n, 1_000_000_000n, 0), addLiquidity(0n, 250_000_000n, 0)]),
+      lookupSolY,
+    );
+    expect(e?.depositSol).toBeCloseTo(1.25, 9);
+  });
+
+  it('pool present but NOT valuable in SOL (solSide null) → event KEPT, amounts at 0, nonSolMint null', () => {
+    const noSol: PoolMetaLookup = () => ({ binStep: 1, solSide: null, mintX: NONSOL, mintY: 'OtherMintNotSol111111111111111111111111111' });
+    const e = buildDetectedEvent('sigNoSol', tx('AddLiquidityByStrategy2', [addLiquidity(0n, 9n, 0)]), noSol);
+    expect(e).not.toBeNull(); // we NEVER lose the action — no-miss pillar
+    expect(e?.depositSol).toBe(0);
+    expect(e?.nonSolMint).toBeNull();
+    expect(e?.pool).toBe(LB_PAIR); // the pool stays populated
+  });
+
+  it('meta absent for the pool (lookup → null) → action kept without amount', () => {
+    const e = buildDetectedEvent('sigUnknown', tx('AddLiquidityByStrategy2', [addLiquidity(0n, 9n, 0)]), () => null);
+    expect(e?.depositSol).toBe(0);
+    expect(e?.nonSolMint).toBeNull();
+  });
+
+  it('NON-DLMM tx (no log from the program) → null (filtered out)', () => {
+    const nonDlmm = {
+      blockTime: 1,
+      transaction: { signatures: ['SIG1'] },
+      meta: { logMessages: ['Program 11111111111111111111111111111111 invoke [1]'], innerInstructions: [] },
+    } as unknown as ParsedTransactionWithMeta;
+    expect(buildDetectedEvent('sigOther', nonDlmm, lookupSolY)).toBeNull();
+  });
+
+  it('absent tx (null) → null', () => {
+    expect(buildDetectedEvent('sigNull', null, lookupSolY)).toBeNull();
+  });
+
+  it('blockTime absent → null (no misleading 0)', () => {
+    const e = buildDetectedEvent('sigNoTime', tx('ClaimFee2', [claimFee2(0n, 1n, 0)], null), lookupSolY);
+    expect(e?.blockTime).toBeNull();
+  });
+
+  it('poolsOf lists the touched lbPairs (meta pre-loading) and tolerates null', () => {
+    expect(poolsOf(tx('ClaimFee2', [claimFee2(0n, 1n, 0)]))).toEqual([LB_PAIR]);
+    expect(poolsOf(null)).toEqual([]);
+  });
+});
