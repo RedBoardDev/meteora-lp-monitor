@@ -38,6 +38,17 @@ export async function startCoffre(): Promise<void> {
   if (coffre && coffre.exitCode === null) return;
   coffre = await spawnUntil('coffre', ['--import', 'tsx', 'src/copybot/coffre/coffre-main.ts'], { ...process.env, SIGNING_ENABLED: 'true' }, '🔐 vault started', 30_000);
 }
+/** Kill ONLY the coffre (the brain keeps running + publishing). Simulates a vault crash. */
+export async function killCoffre(): Promise<void> {
+  coffre?.kill('SIGKILL');
+  coffre = undefined;
+  await sleep(800);
+}
+/** Restart the coffre (re-runs the boot PENDING-recovery, then resumes consuming). */
+export async function restartCoffre(): Promise<void> {
+  await killCoffre();
+  await startCoffre();
+}
 export async function startBrain(extraEnv: NodeJS.ProcessEnv = {}): Promise<void> {
   if (brain && brain.exitCode === null) return;
   brain = await spawnUntil('brain', ['dist/copybot/src/copybot/brain/brain-main.cjs'], { ...brainEnv(), ...extraEnv }, 'replay done', 40_000);

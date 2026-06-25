@@ -13,6 +13,7 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { type Connection, PublicKey } from '@solana/web3.js';
+import Redis from 'ioredis';
 import type { UserPosition } from '@/infrastructure/solana/dlmm/leader-position-reader';
 import type { FidelityResult } from '@/infrastructure/solana/dlmm/shape-fidelity';
 import { readAllOwnerTokenBalances } from '@/infrastructure/solana/token-balance-reader';
@@ -157,6 +158,18 @@ export class Harness {
     }
     const m = [...log.matchAll(/"kind":"open"[^\n]*?"our":"([1-9A-HJ-NP-Za-km-z]{32,44})"/g)];
     return m.length ? (m[m.length - 1]?.[1] ?? null) : null;
+  }
+  /** CHAOS helper (6.6): deliver any UNREAD `cmd:sign` into the coffre consumer's PEL via XREADGROUP '>' WITHOUT
+   *  acking — simulating "the vault read the message then CRASHED before ACK". On the next coffre boot its
+   *  pending-recovery (XREADGROUP '0') must re-process it. Returns how many messages were moved to the PEL. */
+  async deliverCmdSignToVaultPending(): Promise<number> {
+    const redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6385', { maxRetriesPerRequest: null });
+    try {
+      const res = (await redis.xreadgroup('GROUP', 'coffre', 'coffre-1', 'COUNT', 50, 'STREAMS', 'copybot:cmd:sign', '>')) as Array<[string, unknown[]]> | null;
+      return res?.[0]?.[1]?.length ?? 0;
+    } finally {
+      await redis.quit();
+    }
   }
   /** Does the brain's tee'd log currently contain `substr`? (Used to corroborate a decision, e.g. an open BLOCKED
    *  by the kill-switch vs a missed event.) */
