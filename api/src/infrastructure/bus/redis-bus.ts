@@ -65,6 +65,18 @@ export class RedisBus {
       stream,
       '>',
     )) as Array<[string, Array<[string, string[]]>]> | null;
+    return this.parse(res, hop, key);
+  }
+
+  /** Re-read THIS consumer's PENDING (delivered-but-unACKed) messages — XREADGROUP with id '0' returns the
+   *  consumer's PEL (no BLOCK). A crashed prior instance read these but never ACKed; on boot the vault re-processes
+   *  them (exactly-once via the executions table) so an in-flight cmd:sign is NEVER stranded by a crash. */
+  async consumePending(stream: string, group: string, consumer: string, hop: string, key: string, count = 100): Promise<ConsumedMessage[]> {
+    const res = (await this.redis.xreadgroup('GROUP', group, consumer, 'COUNT', count, 'STREAMS', stream, '0')) as Array<[string, Array<[string, string[]]>]> | null;
+    return this.parse(res, hop, key);
+  }
+
+  private parse(res: Array<[string, Array<[string, string[]]>]> | null, hop: string, key: string): ConsumedMessage[] {
     if (!res || res.length === 0) return [];
     const entries = res[0]?.[1] ?? [];
     return entries.map(([id, fields]) => {

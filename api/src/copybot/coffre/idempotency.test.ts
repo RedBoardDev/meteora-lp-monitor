@@ -40,4 +40,12 @@ describe('claimExecution — idempotency claim with failed-retry (integration)',
     const row = await db.select().from(executions).where(eq(executions.commandId, CID));
     expect(row[0]?.state).toBe('claimed');
   });
+
+  it('a stranded CLAIMED command is re-claimable ONLY during vault PENDING-recovery (no normal-flow double-sign)', async () => {
+    // The CID is in 'claimed' state here. WHY: a vault that claimed a command then crashed before landing must, on
+    // RESTART, re-process its pending (single-consumer → the prior claimant is provably dead). Normal flow must keep
+    // rejecting a re-delivered 'claimed' (no double-sign on a still-in-flight command); only recovery re-claims it.
+    expect(await claimExecution(db, CID, 'ek', 999, 5)).toBe(false); // normal flow → still a duplicate
+    expect(await claimExecution(db, CID, 'ek', 999, 6, true)).toBe(true); // recovering=true → re-claimable
+  });
 });

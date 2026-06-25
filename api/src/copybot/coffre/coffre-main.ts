@@ -59,6 +59,22 @@ async function main(): Promise<void> {
   await blockhashCache.start(); // first sign attempt reads it instantly (no getLatestBlockhash RTT)
   log.info({ owner: copier.publicKey.toBase58(), signing: cfg.signingEnabled }, '🔐 vault started (pull-only)');
 
+  // CRASH RECOVERY (no-miss): re-process any cmd:sign a prior (crashed) instance read but never ACKed — its PEL,
+  // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
+  // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
+  // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
+  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache };
+  try {
+    const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
+    for (const msg of pending) {
+      const verdict = await process1(msg.payload, recoverCtx, true); // recovering → a stranded 'claimed' is re-claimable
+      log.info({ id: msg.id, recovered: true, ...verdict }, '♻️  recovered pending');
+      await bus.ack(STREAM, GROUP, msg.id);
+    }
+  } catch (e) {
+    await alert(log, 'vault pending-recovery errored on boot', { error: (e as Error).message });
+  }
+
   let stopped = false;
   const drain = process.argv.includes('--drain'); // one batch then exit (validation)
   const stop = async (): Promise<void> => {
@@ -100,7 +116,7 @@ interface Ctx {
   blockhashCache: BlockhashCache;
 }
 
-async function process1(payload: unknown | null, ctx: Ctx): Promise<{ ok: boolean; reason?: string; kind?: string }> {
+async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
   const { conn, db, bus, copier, blockhashCache } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
@@ -115,7 +131,7 @@ async function process1(payload: unknown | null, ctx: Ctx): Promise<{ ok: boolea
 
   // 8 idempotency: claim BEFORE signing; only a previously 'failed' command may be re-claimed (retry).
   const now = Date.now();
-  const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now);
+  const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering);
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
   if (sr.sizeSol > cfg.maxTradeSol) return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
