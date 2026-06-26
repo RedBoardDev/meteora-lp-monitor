@@ -11,6 +11,7 @@ import { Connection, type Keypair, Transaction } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
 import { alert } from '@/copybot/alert';
+import { CopyJournalStore } from '@/copybot/journal-store';
 import { deriveCommandId } from '@/copybot/command-id';
 import { claimExecution } from '@/copybot/coffre/idempotency';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
@@ -18,6 +19,7 @@ import { confirmLanded, land } from '@/copybot/coffre/landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import { SignRequestSchema } from '@/domain/copybot/contracts';
+import type { Journal } from '@/domain/copybot/journal';
 import { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { executions } from '@/infrastructure/persistence/schema';
@@ -53,6 +55,7 @@ async function main(): Promise<void> {
   const copier = loadCopierKeypair(cfg.keypairPath, cfg.owner);
   const conn = new Connection(cfg.httpUrl, 'confirmed');
   const db = openDatabase(cfg.dbUrl);
+  const journal = new CopyJournalStore(db, log, 'coffre'); // activity journal (fail-safe; never blocks signing)
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
@@ -63,7 +66,7 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache };
+  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal };
   try {
     const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
     for (const msg of pending) {
@@ -91,7 +94,7 @@ async function main(): Promise<void> {
     try {
       const msgs = await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000);
       for (const msg of msgs) {
-        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache });
+        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal });
         log.info({ id: msg.id, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
         await bus.ack(STREAM, GROUP, msg.id); // ACK: idempotence guaranteed by the executions table
       }
@@ -114,10 +117,11 @@ interface Ctx {
   bus: RedisBus;
   copier: Keypair;
   blockhashCache: BlockhashCache;
+  journal: Journal;
 }
 
 async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
-  const { conn, db, bus, copier, blockhashCache } = ctx;
+  const { conn, db, bus, copier, blockhashCache, journal } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
   const parsed = SignRequestSchema.safeParse(payload); // 5
@@ -134,7 +138,10 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
   const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering);
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
-  if (sr.sizeSol > cfg.maxTradeSol) return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
+  if (sr.sizeSol > cfg.maxTradeSol) {
+    void journal.record({ stage: 'sign', outcome: 'rejected', reason: 'over_max_trade', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, ourSizeSol: sr.sizeSol });
+    return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
+  }
 
   // 10-11 Wall B: decode the tx (WITHOUT the SDK) and re-verify against the intent.
   let tx: Transaction;
@@ -146,7 +153,10 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
   if (sr.owner !== ourOwner) return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'owner_mismatch', kind: sr.kind });
   // Wall B binds a swap to owner's ATA of its non-SOL token: sell = the token sold, buy = the token bought.
   const wb = verifyTx(tx, { owner: sr.owner, pool: sr.pool, kind: sr.kind, positionPubkey: sr.positionPubkey, inputMint: sr.sell?.inputMint ?? sr.buy?.outputMint });
-  if (!wb.ok) return finalize(db, sr.commandId, 'failed', { ok: false, reason: `wallb:${wb.reason}`, kind: sr.kind });
+  if (!wb.ok) {
+    void journal.record({ stage: 'sign', outcome: 'rejected', reason: `wallb:${wb.reason}`, kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId });
+    return finalize(db, sr.commandId, 'failed', { ok: false, reason: `wallb:${wb.reason}`, kind: sr.kind });
+  }
 
   // 12-13 SIGN + LAND
   const busMs = Date.now() - sr.issuedAtMs; // latency publish(brain) → here (bus + critical section)
@@ -172,6 +182,7 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
       if (sr.kind === 'buy') await confirmLanded(conn, sig, 30_000);
       // ev:executed carries the pool/position/owner so the brain can trigger the residual sell on a close.
       await bus.publish('copybot:ev:executed', 'ev:executed', cfg.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
+      void journal.record({ stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: sig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, detail: recovering ? { recovering: true } : undefined });
       log.info({ kind: sr.kind, sig, attempt, busMs, signLandMs: Date.now() - tSign, totalMs: Date.now() - sr.issuedAtMs }, '🚀 signed + landed');
       return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
     } catch (e) {
@@ -187,6 +198,7 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
     link: `https://app.meteora.ag/dlmm/${sr.pool}`,
     error: lastErr?.message,
   });
+  void journal.record({ stage: 'sign', outcome: 'failed', reason: 'sign_land_failed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, detail: { error: lastErr?.message } });
   return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'sign_land_failed', kind: sr.kind });
 }
 

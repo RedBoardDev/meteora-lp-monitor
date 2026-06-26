@@ -14,6 +14,7 @@ import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts'
 import { decideEntry } from '@/domain/copybot/decision';
 import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
+import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
 import { type FilterContext, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
 import { TtlCache } from '@/domain/copybot/ttl-cache';
@@ -37,6 +38,7 @@ import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
 import { alert } from '@/copybot/alert';
+import { CopyJournalStore } from '@/copybot/journal-store';
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
@@ -130,7 +132,9 @@ async function main(): Promise<void> {
   const bus = RedisBus.connect(cfg.redisUrl);
   const tracker = new LeaderPositionTracker();
   const registry = new MirrorRegistry();
-  const store = new MirrorStore(openDatabase(cfg.dbUrl)); // no-dormant persistence (survives restarts)
+  const db = openDatabase(cfg.dbUrl);
+  const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
+  const journal = new CopyJournalStore(db, log, 'brain'); // activity journal (fail-safe; never blocks the hot path)
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
   const snapshotCache = new TtlCache<TokenSnapshot>(SNAPSHOT_TTL_MS);
@@ -146,11 +150,26 @@ async function main(): Promise<void> {
     return { openPositions: open.length, totalExposureSol: open.reduce((s, m) => s + m.sizeSol, 0), tokenOpenCount: 0, openTimestampsMs: [] };
   };
 
-  async function publish(sr: Omit<SignRequest, 'issuedAtMs'>): Promise<void> {
+  async function publish(sr: Omit<SignRequest, 'issuedAtMs'>, journalHint?: Partial<JournalEntry>): Promise<void> {
     const full: SignRequest = { ...sr, issuedAtMs: Date.now() }; // timestamp at publish time (latency)
     SignRequestSchema.parse(full); // local guardrail: we only publish a valid contract
     const id = await bus.publish(STREAM, HOP, cfg.hmacKey, full);
     log.info({ id, kind: full.kind, pool: full.pool, our: full.positionPubkey, bins: full.targetBinRange }, '📤 cmd:sign published');
+    // Activity journal: EVERY published intent is recorded once here (single backstop). Context-specific publishes
+    // (a failsafe/orphan re-close, a reshape-funding buy) pass a hint to override stage/severity/leaderPosition.
+    void journal.record({
+      stage: stageForKind(full.kind),
+      outcome: 'published',
+      kind: full.kind,
+      leader: cfg.leader,
+      pool: full.pool,
+      ourPosition: full.positionPubkey,
+      commandId: full.commandId,
+      eventKey: full.eventKey,
+      ourSizeSol: full.sizeSol,
+      detail: { targetBinRange: full.targetBinRange },
+      ...journalHint,
+    });
   }
 
   function serializeUnsigned(tx: Transaction): string {
@@ -167,9 +186,15 @@ async function main(): Promise<void> {
   async function handleOpen(e: DetectedEvent): Promise<void> {
     log.info({ position: e.position, pool: e.pool, depositSol: e.depositSol }, '🔨 handleOpen start');
     const decision = decideEntry(e, SIZING, { availableBalanceSol: cfg.balanceSol });
-    if (decision.outcome === 'skipped') return log.info({ reason: decision.reason }, 'open skipped');
+    if (decision.outcome === 'skipped') {
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol });
+      return log.info({ reason: decision.reason }, 'open skipped');
+    }
     const cap = checkCaps(CAPS, capsState(), decision.sizeSol, Date.now());
-    if (cap.action === 'block') return log.warn({ reason: cap.reason }, 'open blocked (cap)');
+    if (cap.action === 'block') {
+      void journal.record({ stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol });
+      return log.warn({ reason: cap.reason }, 'open blocked (cap)');
+    }
 
     const poolPk = new PublicKey(e.pool);
     // Latency budget (≤3s SLA): fire the INDEPENDENT reads in PARALLEL — the DLMM pair (~300ms, DLMM.create), the
@@ -183,12 +208,16 @@ async function main(): Promise<void> {
     const meta = await poolReader.loadPoolMeta(e.pool);
     if (!meta?.solSide) {
       void pairP.catch(() => undefined); // non-SOL skip → discard the in-flight pair read (no unhandled rejection)
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
       return log.info('non-SOL pool → skip');
     }
 
     const pair = await pairP;
     const shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
-    if (!shape) return log.warn({ position: e.position }, 'leader position not found on-chain → skip');
+    if (!shape) {
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
+      return log.warn({ position: e.position }, 'leader position not found on-chain → skip');
+    }
 
     // Entry filters gate the OPEN only. Context = local (open tokens) + leader-shape (range) + resolved data.
     const filterCtx: FilterContext = {
@@ -215,7 +244,10 @@ async function main(): Promise<void> {
       );
     }
     if (verdict.action === 'skip') {
-      if (!FILTER_SHADOW) return log.info({ reason: verdict.reason }, '🚧 open filtered → skip');
+      if (!FILTER_SHADOW) {
+        void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
+        return log.info({ reason: verdict.reason }, '🚧 open filtered → skip');
+      }
       log.info({ reason: verdict.reason }, '👻 filter shadow: WOULD skip (not enforced)');
     }
 
@@ -259,7 +291,7 @@ async function main(): Promise<void> {
     };
     const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol: decision.sizeSol, lowerBin: reanchored.lowerBinId, upperBin: reanchored.upperBinId, openedAt: Date.now() });
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
-    await publish(sr);
+    await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
   }
 
   /** TWO-SIDED open: buy the token leg (ExactOut, deterministic) then deposit BOTH legs. Publishes the BUY first
@@ -283,6 +315,7 @@ async function main(): Promise<void> {
       // We do NOT open a HALF (one-sided) position that wouldn't match the two-sided leader's composition — we SKIP
       // the open entirely. Nothing is stashed or published before this point, so it's a clean no-op (no partial
       // position, no stranded token, no dormant state).
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_unbuyable', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { tokenMint, err: (err as Error).message } });
       log.warn({ tokenMint, err: (err as Error).message }, '🚫 two-sided buy unavailable → SKIP open (never a partial/one-sided copy)');
       return;
     }
@@ -340,7 +373,7 @@ async function main(): Promise<void> {
     };
     const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol, lowerBin: lower, upperBin: upper, openedAt: Date.now() });
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
-    await publish(sr);
+    await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
     log.info({ our: sr.positionPubkey, bins: dist.length }, '🪙 two-sided OPEN published (after buy landed)');
   }
 
@@ -372,13 +405,19 @@ async function main(): Promise<void> {
     if (!m) return;
     const poolPk = new PublicKey(m.pool);
     const meta = await poolReader.loadPoolMeta(m.pool);
-    if (!meta?.solSide) return log.info('non-SOL pool → skip resync');
+    if (!meta?.solSide) {
+      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+      return log.info('non-SOL pool → skip resync');
+    }
     const solSide = meta.solSide;
     const pair = await createDlmmPair(conn, poolPk);
     const leaderShape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
     if (!leaderShape) return; // leader gone → the reconcile closes ours
     const ourShape = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
-    if (!ourShape) return log.warn({ our: m.ourPosition }, 'our position not on-chain yet → skip resync (next event/reconcile catches up)');
+    if (!ourShape) {
+      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+      return log.warn({ our: m.ourPosition }, 'our position not on-chain yet → skip resync (next event/reconcile catches up)');
+    }
 
     // SHAPE-EXACT re-sync. Align by offset-from-LOWER (the open re-anchor maps leader.lower ↔ our.lower), so the
     // per-bin target = factor × leader per-bin. A SELECTIVE leader trim/add is mirrored on the exact bins (the
@@ -392,12 +431,18 @@ async function main(): Promise<void> {
     // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
     const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, COPY_RATIO, SIZING.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
     const twoSidedAdd = TWO_SIDED_MODE === 'on' && tokenAddOps.length > 0;
-    if (ops.length === 0 && !twoSidedAdd) return log.info({ position: e.position }, '⚖️ in sync — no adjustment');
+    if (ops.length === 0 && !twoSidedAdd) {
+      void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+      return log.info({ position: e.position }, '⚖️ in sync — no adjustment');
+    }
 
     const calls = reshapeToCalls(ops, ourShape.lowerBinId);
     // Our position's bin range is fixed at open; can't add outside it (leader extending its range = v1 limit).
     const adds = calls.adds.filter((a) => a.binId >= ourShape.lowerBinId && a.binId <= ourShape.upperBinId);
-    if (adds.length < calls.adds.length) log.warn({ position: e.position, dropped: calls.adds.length - adds.length }, '⚠️ reshape: leader bins beyond our range — partial copy');
+    if (adds.length < calls.adds.length) {
+      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'partial_range', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, detail: { dropped: calls.adds.length - adds.length } });
+      log.warn({ position: e.position, dropped: calls.adds.length - adds.length }, '⚠️ reshape: leader bins beyond our range — partial copy');
+    }
 
     const { issuedAtSlot, deadlineSlot } = await slots();
     // Removes first (free SOL), then ONE by-weight add. Each is its own idempotent cmd:sign.
@@ -439,7 +484,7 @@ async function main(): Promise<void> {
       const buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, totalTokenRaw, SELL_SLIPPAGE_BPS);
       const buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
       const buyKey = `${cfg.leader}:${m.pool}:reshape-buy:${e.signature}`;
-      await publish({ commandId: deriveCommandId(buyKey), eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: totalTokenRaw.toString(), maxInLamports: buyQuote.inAmount } });
+      await publish({ commandId: deriveCommandId(buyKey), eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: totalTokenRaw.toString(), maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
       const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? addLamports : totalTokenRaw, solSide === 'Y' ? addLamports : totalTokenRaw, dist, pair);
       const lower = loBin;
       const upper = hiBin;
@@ -513,6 +558,7 @@ async function main(): Promise<void> {
       await store.markClosed(m.leaderPosition);
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
+      void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, detail: { via: 'reconcile' } });
       log.info({ leaderPosition: m.leaderPosition, our }, '✅ reconcile: close confirmed on-chain');
     }
     for (const rc of plan.reClose) {
@@ -536,7 +582,7 @@ async function main(): Promise<void> {
     const eventKey = `${cfg.leader}:${m.pool}:failsafe:${m.leaderPosition}`;
     const built = await buildCloseTx(conn, new PublicKey(m.pool), ownerPk, new PublicKey(m.ourPosition), m.lowerBin, m.upperBin);
     const { issuedAtSlot, deadlineSlot } = await slots();
-    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot });
+    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason: 'leader_closed', leaderPosition: m.leaderPosition });
     recentlyPublishedClose.set(m.ourPosition, Date.now());
     log.warn({ leaderPosition: m.leaderPosition, our: m.ourPosition }, '🛟 failsafe re-close (still on-chain, leader closed)');
   }
@@ -548,7 +594,7 @@ async function main(): Promise<void> {
     const eventKey = `${cfg.leader}:${p.pool}:orphan:${p.position}`;
     const built = await buildCloseTx(conn, new PublicKey(p.pool), ownerPk, new PublicKey(p.position), p.lowerBinId, p.upperBinId);
     const { issuedAtSlot, deadlineSlot } = await slots();
-    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: p.pool, positionPubkey: p.position, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: 0, targetBinRange: { lower: p.lowerBinId, upper: p.upperBinId }, issuedAtSlot, deadlineSlot });
+    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: p.pool, positionPubkey: p.position, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: 0, targetBinRange: { lower: p.lowerBinId, upper: p.upperBinId }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason: 'orphan' });
     recentlyPublishedClose.set(p.position, Date.now());
     await alert(log, 'orphan auto-close: untracked on-chain position force-closed', { position: p.position, pool: p.pool });
   }
@@ -562,6 +608,7 @@ async function main(): Promise<void> {
     await store.markClosed(m.leaderPosition);
     registry.close(m.leaderPosition);
     recentlyPublishedClose.delete(ourPosition);
+    void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, detail: { via: 'ev_executed' } });
     log.info({ leaderPosition: m.leaderPosition, our: ourPosition }, '✅ close confirmed (ev:executed) → marked closed');
   }
 
@@ -576,6 +623,7 @@ async function main(): Promise<void> {
     const quote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, residualRaw, SELL_SLIPPAGE_BPS);
     const minOut = minOutWithSlippage(BigInt(quote.outAmount), SELL_SLIPPAGE_BPS);
     if (minOut < MIN_SELL_OUT_LAMPORTS) {
+      void journal.record({ stage: 'sell', outcome: 'skipped', reason: 'below_min_sell_out', leader: cfg.leader, pool, detail: { tokenMint, outAmount: quote.outAmount, source } });
       log.info({ tokenMint, outAmount: quote.outAmount, source }, '💱 sell skipped (below min SOL out)');
       return false;
     }
@@ -607,7 +655,10 @@ async function main(): Promise<void> {
     const tokenMint = meta.solSide === 'X' ? meta.mintY : meta.mintX; // the non-SOL leg = residual to sell
     const residual = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
     const decision = decideResidualSell(residual, DUST_TOKEN_RAW);
-    if (!decision.sell) return log.info({ tokenMint, reason: decision.reason }, '💱 residual sell skipped');
+    if (!decision.sell) {
+      void journal.record({ stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, detail: { tokenMint } });
+      return log.info({ tokenMint, reason: decision.reason }, '💱 residual sell skipped');
+    }
     await publishSell(tokenMint, residual, ev.pool, 'close');
   }
 
@@ -618,11 +669,13 @@ async function main(): Promise<void> {
     const balances = await readAllOwnerTokenBalances(conn, ownerPk);
     const toSweep = planWalletSweep(balances, WSOL_MINT, DUST_TOKEN_RAW);
     if (toSweep.length === 0) return;
+    void journal.record({ stage: 'sweep', outcome: 'detected', leader: cfg.leader, detail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
     log.info({ count: toSweep.length, mints: toSweep.map((b) => b.mint) }, '🧹 wallet sweep — dormant non-SOL token(s) found');
     for (const b of toSweep) {
-      await publishSell(b.mint, b.amountRaw, ownerPk.toBase58(), 'sweep').catch((e) =>
-        alert(log, 'wallet sweep sell failed to build/publish', { error: (e as Error).message, mint: b.mint }),
-      );
+      await publishSell(b.mint, b.amountRaw, ownerPk.toBase58(), 'sweep').catch((e) => {
+        void journal.record({ stage: 'sweep', outcome: 'failed', reason: 'build_error', leader: cfg.leader, detail: { mint: b.mint, error: (e as Error).message } });
+        return alert(log, 'wallet sweep sell failed to build/publish', { error: (e as Error).message, mint: b.mint });
+      });
     }
   }
 
@@ -635,6 +688,9 @@ async function main(): Promise<void> {
     const tracked = registry.hasOpen(e.position);
     const action = classifyEventAction(e, tracked); // pure routing (unit-tested in dispatch.test.ts)
     log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
+    if (action !== 'ignore') {
+      void journal.record({ stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, detail: { action, instruction: e.instruction } });
+    }
     const act =
       action === 'open'
         ? handleOpen(e)
