@@ -24,7 +24,8 @@ export interface WalletRuntime {
   /** on-chain positions source: force a projection→positions sync on the next snapshot (set on activity). */
   needsSync: boolean;
   lastSyncAt: number;
-  /** on-chain positions source: last delta-ingest time (drives the dropped-WS-event backstop sweep). */
+  /** on-chain positions source: epoch ms of the last delta-ingest (telemetry only now — the
+   *  TransactionStream's gap detector + live activity replaced the dropped-WS-event backstop sweep). */
   lastIngestAt: number;
   /** on-chain positions source: closed-position count at the last full reproject — emit closed_changed
    *  only when this actually moves (−1 = never reprojected, so the first reproject always notifies). */

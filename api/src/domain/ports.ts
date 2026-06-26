@@ -24,6 +24,12 @@ import type {
   SwapFlowRow,
   WalletFlowRow,
 } from '@/domain/dlmm';
+// Type-only (erased at compile) so the reason union behind the TransactionStreamPort handler is
+// single-sourced from the Step-5a machinery rather than duplicated here. Re-exported so the engine can
+// import it alongside its other contracts from `@/domain/ports`.
+import type { StreamActivityReason } from '@/infrastructure/solana/transaction-stream';
+
+export type { StreamActivityReason };
 
 /** A pool the wallet has positions in. */
 export interface PoolRef {
@@ -64,13 +70,36 @@ export interface PositionsGateway {
   fetchClosedPositions(wallet: string, pool: PoolRef): Promise<ClosedPosition[]>;
 }
 
-/** Subscribes to on-chain DLMM activity for a wallet (Solana WS logsSubscribe). */
+/** Subscribes to on-chain DLMM activity for a wallet (Solana WS logsSubscribe). LEGACY 'meteora' source. */
 export interface RpcSubscriber {
   /** (re)subscribe a wallet; onActivity fires when a DLMM tx touches it. */
   watch(wallet: string, onActivity: (signature: string, instruction: string) => void): void;
   unwatch(wallet: string): void;
   isConnected(): boolean;
   /** fires on every (re)connect so the engine can trigger an immediate poll. */
+  onReconnect(cb: () => void): void;
+  onConnectionChange(cb: (connected: boolean) => void): void;
+  start(): void;
+  stop(): void;
+}
+
+/** Anything that reports live WS connectivity. The StateEmitter only needs this slice of the active WS
+ *  backbone (the legacy RpcSubscriber OR the on-chain TransactionStream), so it doesn't care which one. */
+export interface ConnectionStatus {
+  isConnected(): boolean;
+}
+
+/** The WS backbone the engine drives in ON-CHAIN mode (Helius `transactionSubscribe`). Same lifecycle
+ *  surface as {@link RpcSubscriber}, but the per-wallet handler is `(wallet, reason)` — the engine merely
+ *  TRIGGERS the cursor-based delta ingest + close-detection (it doesn't parse the WS payload here). The
+ *  infra `TransactionStream` (Step 5a, with its built-in cursor/dedup/replay/gap-detector) satisfies this;
+ *  kept as a port so the engine depends on the contract, never the concrete class. */
+export interface TransactionStreamPort extends ConnectionStatus {
+  /** (re)subscribe a wallet; `onActivity` fires on each DLMM tx that touches it (reason 'ws') or when the
+   *  no-miss gap detector wants it recovered (reason 'gap-backfill'). */
+  watch(wallet: string, onActivity: (wallet: string, reason: StreamActivityReason) => void): void;
+  unwatch(wallet: string): void;
+  /** fires on every (re)connect so the engine can run its own fleet catch-up (resyncAllOnchain). */
   onReconnect(cb: () => void): void;
   onConnectionChange(cb: (connected: boolean) => void): void;
   start(): void;

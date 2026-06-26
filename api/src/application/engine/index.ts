@@ -23,6 +23,8 @@ import type {
   PositionsGateway,
   PriceGateway,
   RpcSubscriber,
+  StreamActivityReason,
+  TransactionStreamPort,
 } from '@/domain/ports';
 import { mintsNeedingPrice, valueSnapshot } from '@/domain/snapshot-valuation';
 import { KeyedSerializer, Semaphore } from '@/util/concurrency';
@@ -46,9 +48,6 @@ const POLL_STAGGER_MS = 50;
 // On-chain source: refresh the positions projection at most this often on the snapshot cadence (open
 // positions' live value/range) — re-projecting every snapshot tick would re-read all legs needlessly.
 const SYNC_INTERVAL_MS = 60_000;
-// On-chain source: periodic delta-ingest backstop so a dropped WS notification (socket stayed up) can't
-// strand a missed open/close indefinitely. Catches what the live WS path misses.
-const BACKSTOP_INGEST_MS = 300_000;
 // After a close the residual is usually market-sold within seconds; Helius indexes that swap in ~1-2s
 // (measured), so the realized pass fired at close-detection can run BEFORE the sell exists and overstate
 // PnL (residual still marked as held). Re-run it on a small front-loaded schedule after each close so the
@@ -60,7 +59,11 @@ const REALIZED_REFRESH_OFFSETS_MS = [25_000, 60_000, 150_000];
 export interface EngineDeps {
   gateway: PositionsGateway;
   prices: PriceGateway;
+  /** LEGACY 'meteora' WS backbone (logsSubscribe). Used only when POSITIONS_SOURCE !== 'onchain'. */
   subscriber: RpcSubscriber;
+  /** ON-CHAIN WS backbone (Helius transactionSubscribe) — the trigger for triggerOnchainSync, replacing
+   *  the old unconditional BACKSTOP_INGEST_MS sweep. Used (started/watched) only in onchain mode. */
+  stream: TransactionStreamPort;
   onchain: OnchainDlmmGateway;
   health: HealthMonitor;
   strategy: StrategyService;
@@ -85,8 +88,8 @@ export class Engine {
   private tick: NodeJS.Timeout | null = null;
   private effectiveRps = 0;
   private lastBackfillAt = 0;
-  // Serializes all ingests for one wallet (backfill + WS deltas + backstop) so two never race the
-  // same leg set — the in-process equivalent of a per-wallet lock (single-process deployment).
+  // Serializes all ingests for one wallet (backfill + WS deltas + gap-backfill recoveries) so two never
+  // race the same leg set — the in-process equivalent of a per-wallet lock (single-process deployment).
   private readonly ingestLock = new KeyedSerializer();
   // Global concurrent-backfill cap (onboarding admission control); sized to the RPC tier via config.
   private readonly backfillSemaphore: Semaphore;
@@ -102,6 +105,7 @@ export class Engine {
 
   private readonly prices: PriceGateway;
   private readonly subscriber: RpcSubscriber;
+  private readonly stream: TransactionStreamPort;
   private readonly onchain: OnchainDlmmGateway;
   private readonly health: HealthMonitor;
   private readonly strategy: StrategyService;
@@ -122,6 +126,7 @@ export class Engine {
     const { gateway, prices, subscriber, bus, logger, repo, appConfig } = deps;
     this.prices = prices;
     this.subscriber = subscriber;
+    this.stream = deps.stream;
     this.onchain = deps.onchain;
     this.health = deps.health;
     this.strategy = deps.strategy;
@@ -136,7 +141,14 @@ export class Engine {
     this.walletFlowIngest = deps.walletFlowIngest;
     this.swapFlowIngest = deps.swapFlowIngest;
     this.realizedPnl = deps.realizedPnl;
-    this.emitter = new StateEmitter(this.wallets, subscriber, bus, this.health);
+    // The emitter reports WS health off whichever backbone is actually live for this mode (the on-chain
+    // TransactionStream or the legacy logsSubscribe subscriber) — both expose isConnected().
+    this.emitter = new StateEmitter(
+      this.wallets,
+      this.onchainSource ? deps.stream : subscriber,
+      bus,
+      this.health,
+    );
     this.refresher = new PositionRefresher(
       gateway,
       prices,
@@ -150,13 +162,18 @@ export class Engine {
   }
 
   async start(): Promise<void> {
-    this.subscriber.onReconnect(() =>
+    // ON-CHAIN: the Helius transactionSubscribe stream is the trigger; its onReconnect drives a fleet
+    // delta-resync (parity with the old subscriber) and its built-in gap detector + fromSlot replay now
+    // own the no-miss guarantee the deleted BACKSTOP_INGEST_MS sweep used to provide.
+    // LEGACY 'meteora': the logsSubscribe subscriber + the periodic Meteora poll.
+    const backbone = this.onchainSource ? this.stream : this.subscriber;
+    backbone.onReconnect(() =>
       this.onchainSource ? this.resyncAllOnchain() : this.pollAllNow('ws-reconnect'),
     );
-    this.subscriber.onConnectionChange((c) =>
+    backbone.onConnectionChange((c) =>
       this.logger.debug({ connected: c }, 'Solana WS connection changed'),
     );
-    this.subscriber.start();
+    backbone.start();
     await this.strategy.init();
 
     for (const address of await this.accounts.monitoredWallets())
@@ -175,7 +192,7 @@ export class Engine {
 
   stop(): void {
     if (this.tick) clearInterval(this.tick);
-    this.subscriber.stop();
+    (this.onchainSource ? this.stream : this.subscriber).stop();
   }
 
   async addWallet(address: string): Promise<void> {
@@ -185,7 +202,7 @@ export class Engine {
   }
 
   removeWallet(address: string): void {
-    this.subscriber.unwatch(address);
+    (this.onchainSource ? this.stream : this.subscriber).unwatch(address);
     this.wallets.delete(address);
     this.ingestLock.delete(address);
   }
@@ -239,7 +256,13 @@ export class Engine {
   private async registerWallet(address: string): Promise<void> {
     const rt = makeRuntime(address, await this.repo.getOpen(address));
     this.wallets.set(address, rt);
-    this.subscriber.watch(address, (_sig, instr) => this.onWsActivity(address, instr));
+    if (this.onchainSource) {
+      // transactionSubscribe: a DLMM tx (or a gap-detector recovery) → the cursor-based delta ingest.
+      this.stream.watch(address, (wallet, reason) => this.onStreamActivity(wallet, reason));
+    } else {
+      // logsSubscribe: a classified DLMM instruction → the Meteora refresh path.
+      this.subscriber.watch(address, (_sig, instr) => this.onWsActivity(address, instr));
+    }
   }
 
   private onTick(): void {
@@ -266,8 +289,9 @@ export class Engine {
         void this.doSnapshot(rt);
       if (!this.onchainSource && Date.now() - rt.lastClosedSyncAt >= CLOSED_RESYNC_MS)
         void this.reconciler.resyncClosed(rt);
-      if (this.onchainSource && Date.now() - rt.lastIngestAt >= BACKSTOP_INGEST_MS)
-        void this.triggerOnchainSync(rt.address);
+      // No unconditional on-chain delta-ingest here anymore: the deleted BACKSTOP_INGEST_MS fleet timer is
+      // replaced by the TransactionStream's live activity + its watermark gap detector (Step 5a), so an
+      // idle wallet costs ~0 RPC instead of a poll every 5 min.
       if (hasOpen) rps += rt.pools.length / (interval / 1000);
     }
 
@@ -541,7 +565,7 @@ export class Engine {
       } catch (err) {
         this.logger.error(
           { err, address: rt.address },
-          'onchain backfill failed — backstop sweep will retry',
+          'onchain backfill failed — next stream activity / gap detector will retry',
         );
       }
       // Cash-flow backfill for the wallet PnL curve — best-effort & isolated so a flow failure never
@@ -574,13 +598,25 @@ export class Engine {
     return { ready: rt?.reconciled ?? false, indexedTxs: rt?.ingestedTxs ?? 0 };
   }
 
+  /**
+   * TransactionStream activity for a wallet — a live `ws` DLMM notification OR a `gap-backfill` recovery
+   * from the no-miss gap detector. BOTH funnel into the SAME cursor-based delta ingest + close-detection
+   * (`triggerOnchainSync`, via `onchainActivity`'s short settle lag). The stream is purely the TRIGGER
+   * that replaced the unconditional BACKSTOP_INGEST_MS sweep; we don't parse the WS payload into legs here
+   * (a later optimization) — the cheap delta ingest re-reads the new signatures.
+   */
+  private onStreamActivity(wallet: string, reason: StreamActivityReason): void {
+    this.logger.debug({ wallet, reason }, 'stream activity → onchain delta sync');
+    this.onchainActivity(wallet);
+  }
+
   /** WS open/close/add/remove/claim → delta-ingest the new signatures then re-project, after a short
    *  lag so the just-confirmed tx is visible to getSignaturesForAddress. */
   private onchainActivity(address: string): void {
     setTimeout(() => void this.triggerOnchainSync(address), INITIAL_LAG_MS);
   }
 
-  /** Delta-ingest a wallet's new legs (cursor top-up), then sync — the WS-activity & backstop path. */
+  /** Delta-ingest a wallet's new legs (cursor top-up), then sync — the WS-activity & gap-backfill path. */
   private async triggerOnchainSync(address: string): Promise<void> {
     const rt = this.wallets.get(address);
     if (!rt) return;
@@ -588,12 +624,12 @@ export class Engine {
       rt.lastIngestAt = Date.now();
       const r = await this.ingestLock.run(address, () => this.dlmmIngest.ingest(address));
       // Only force a full reproject when the delta actually ingested new txs (a real open/close/add/
-      // claim). A backstop sweep that finds nothing must NOT re-write the whole closed history — that
-      // was a recurring 15k-row write per wallet every 5 min. doSnapshot still refreshes net-worth.
+      // claim). A delta sync that finds nothing (e.g. a gap-backfill recovery) must NOT re-write the whole
+      // closed history — that was a recurring 15k-row write per wallet. doSnapshot still refreshes net-worth.
       if (r.txs > 0) rt.needsSync = true;
       await this.doSnapshot(rt);
     } catch (err) {
-      this.logger.warn({ err, address }, 'onchain delta sync failed (backstop will retry)');
+      this.logger.warn({ err, address }, 'onchain delta sync failed (next stream activity will retry)');
     }
     // Delta-ingest the wallet's cash-flow too — captures post-close SWAP dumps the DLMM ingest can't
     // see. Outside the try above so it runs even if the leg sync threw; isolated and cheap (1 page).

@@ -3,7 +3,7 @@ import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
 import { buildWalletState, combineOnchain } from '@/application/wallet-state';
 import type { OnchainValued } from '@/domain/dlmm';
-import type { RpcSubscriber } from '@/domain/ports';
+import type { ConnectionStatus } from '@/domain/ports';
 import type { WalletRuntime } from './runtime';
 
 export class StateEmitter {
@@ -11,7 +11,9 @@ export class StateEmitter {
 
   constructor(
     private readonly wallets: Map<string, WalletRuntime>,
-    private readonly subscriber: RpcSubscriber,
+    // The active WS backbone (on-chain TransactionStream or legacy logsSubscribe subscriber) — only its
+    // live-connectivity slice is needed for the health payload.
+    private readonly subscriber: ConnectionStatus,
     private readonly bus: EventBus,
     private readonly health: HealthMonitor,
   ) {}

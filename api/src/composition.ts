@@ -35,6 +35,7 @@ import { PushRepository } from './infrastructure/persistence/push-repository';
 import { RpcCreditLedgerRepository } from './infrastructure/persistence/rpc-credit-ledger-repository';
 import { SwapFlowRepository } from './infrastructure/persistence/swap-flow-repository';
 import { WalletFlowRepository } from './infrastructure/persistence/wallet-flow-repository';
+import { WalletStreamCursorRepository } from './infrastructure/persistence/wallet-stream-cursor-repository';
 import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { DlmmIngest } from './infrastructure/solana/dlmm/dlmm-ingest';
 import { OnchainDlmmGateway } from './infrastructure/solana/dlmm/onchain-gateway';
@@ -42,8 +43,10 @@ import { OnchainPoolMetaReader } from './infrastructure/solana/dlmm/pool-meta';
 import { StrategyResolver } from './infrastructure/solana/dlmm/strategy-resolver';
 import { HeliusEnhancedGateway } from './infrastructure/solana/helius-enhanced';
 import { HeliusSubscriber } from './infrastructure/solana/helius-subscriber';
+import { createHeliusWsTransportFactory } from './infrastructure/solana/helius-ws-transport';
 import { SolanaRpcRateLimiter } from './infrastructure/solana/rpc-rate-limiter';
 import { HeliusTokenMetadataGateway } from './infrastructure/solana/token-metadata-gateway';
+import { TransactionStream } from './infrastructure/solana/transaction-stream';
 
 /** Cadence to flush the CreditMeter's since-last-drain deltas into the rpc_credit_daily rollup. */
 const CREDIT_FLUSH_INTERVAL_MS = 60_000;
@@ -80,7 +83,18 @@ export function compose(config: AppConfig): App {
   const prices = new CachedPriceGateway(
     new JupiterPriceGateway(logger, config.JUPITER_PRICE_URL, health),
   );
+  // LEGACY 'meteora' WS backbone (logsSubscribe). Built unconditionally but only started/watched when
+  // POSITIONS_SOURCE !== 'onchain' — it never opens a socket until the engine calls subscriber.start().
   const subscriber = new HeliusSubscriber(config.SOLANA_WS_URL, logger);
+  // ON-CHAIN WS backbone: ONE Helius transactionSubscribe multiplexing every wallet, the trigger for the
+  // cursor-based delta ingest (replacing the deleted BACKSTOP_INGEST_MS sweep). The transport factory opens
+  // the real socket ONLY when the engine calls stream.start() in onchain mode — never at composition time —
+  // and the durable wallet_stream_cursor backs the no-miss reconnect/replay (Step 5a machinery).
+  const stream = new TransactionStream({
+    transportFactory: createHeliusWsTransportFactory(config.SOLANA_WS_URL),
+    cursors: new WalletStreamCursorRepository(db),
+    logger,
+  });
   // One shared rate limiter gates EVERY RPC call on this Connection (overall + per-method sub-limits),
   // so the live engine and the heavy history backfill stay within the provider's plan. The config
   // values are the PLAN limits; we target a fraction of them so the provider's sliding-window
@@ -214,6 +228,7 @@ export function compose(config: AppConfig): App {
     gateway,
     prices,
     subscriber,
+    stream,
     onchain,
     health,
     strategy,
