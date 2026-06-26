@@ -18,6 +18,7 @@ import { loadCopierKeypair } from '@/copybot/coffre/keypair';
 import { confirmLanded, land } from '@/copybot/coffre/landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
+import { ConfigStore } from '@/copybot/config-store';
 import { SignRequestSchema } from '@/domain/copybot/contracts';
 import type { Journal } from '@/domain/copybot/journal';
 import { RedisBus } from '@/infrastructure/bus/redis-bus';
@@ -29,6 +30,7 @@ const STREAM = 'copybot:cmd:sign';
 const GROUP = 'coffre';
 const CONSUMER = 'coffre-1';
 const HOP = 'cmd:sign';
+const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (the maxTradeSol re-clamp ceiling) so web edits apply live
 
 const cfg = {
   httpUrl: process.env.SOLANA_HTTP_URL ?? '',
@@ -37,7 +39,7 @@ const cfg = {
   hmacKey: process.env.BUS_HMAC_KEY ?? 'dev-k-sign-CHANGE-ME',
   keypairPath: process.env.COPIER_KEYPAIR_PATH ?? '.wallets/copier-test.json',
   owner: process.env.COPIER_OWNER ?? 'Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrvDh9zz',
-  maxTradeSol: Number(process.env.MAX_TRADE_SOL ?? '1.0'),
+  maxTradeSolEnv: process.env.MAX_TRADE_SOL !== undefined ? Number(process.env.MAX_TRADE_SOL) : undefined, // env override; else the DB config's maxTradeSizeSol
   signingEnabled: process.env.SIGNING_ENABLED === 'true', // Inc.4 ; false = dry-run
   retryMax: Number(process.env.SIGN_RETRY_MAX ?? '2'), // sign+land attempts before alerting (Valhalla-style)
   retryDelayMs: Number(process.env.SIGN_RETRY_DELAY_MS ?? '1500'),
@@ -56,6 +58,9 @@ async function main(): Promise<void> {
   const conn = new Connection(cfg.httpUrl, 'confirmed');
   const db = openDatabase(cfg.dbUrl);
   const journal = new CopyJournalStore(db, log, 'coffre'); // activity journal (fail-safe; never blocks signing)
+  const configStore = new ConfigStore(db, log);
+  let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
+  const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.sizing.maxTradeSizeSol;
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
@@ -66,7 +71,7 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal };
+  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol() };
   try {
     const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
     for (const msg of pending) {
@@ -80,8 +85,15 @@ async function main(): Promise<void> {
 
   let stopped = false;
   const drain = process.argv.includes('--drain'); // one batch then exit (validation)
+  // Live config reload: re-read the DB config so a web edit to the re-clamp ceiling applies without a restart.
+  const configTimer = setInterval(() => {
+    void configStore.load().then((c) => {
+      runtimeConfig = c;
+    });
+  }, CONFIG_POLL_MS);
   const stop = async (): Promise<void> => {
     stopped = true;
+    clearInterval(configTimer);
     blockhashCache.stop();
     await bus.quit();
     process.exit(0);
@@ -94,7 +106,7 @@ async function main(): Promise<void> {
     try {
       const msgs = await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000);
       for (const msg of msgs) {
-        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal });
+        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol() });
         log.info({ id: msg.id, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
         await bus.ack(STREAM, GROUP, msg.id); // ACK: idempotence guaranteed by the executions table
       }
@@ -118,10 +130,11 @@ interface Ctx {
   copier: Keypair;
   blockhashCache: BlockhashCache;
   journal: Journal;
+  maxTradeSol: number; // live re-clamp ceiling (DB config, env override) snapshotted per message
 }
 
 async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
-  const { conn, db, bus, copier, blockhashCache, journal } = ctx;
+  const { conn, db, bus, copier, blockhashCache, journal, maxTradeSol } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
   const parsed = SignRequestSchema.safeParse(payload); // 5
@@ -138,7 +151,7 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
   const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering);
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
-  if (sr.sizeSol > cfg.maxTradeSol) {
+  if (sr.sizeSol > maxTradeSol) {
     void journal.record({ stage: 'sign', outcome: 'rejected', reason: 'over_max_trade', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, ourSizeSol: sr.sizeSol });
     return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
   }

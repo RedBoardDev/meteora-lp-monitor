@@ -9,12 +9,13 @@
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import { ComputeBudgetProgram, Connection, type Keypair, PublicKey, type Transaction } from '@solana/web3.js';
 import { pino } from 'pino';
-import { CAPS_DEFAULTS, type CapsState, checkCaps } from '@/domain/copybot/caps';
+import { type CapsState, checkCaps } from '@/domain/copybot/caps';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
 import { decideEntry } from '@/domain/copybot/decision';
 import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
+import { type ConfigOverride, mergeConfig, type TwoSidedMode } from '@/domain/copybot/config';
 import { type FilterContext, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
 import { TtlCache } from '@/domain/copybot/ttl-cache';
@@ -38,6 +39,7 @@ import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
 import { alert } from '@/copybot/alert';
+import { ConfigStore } from '@/copybot/config-store';
 import { CopyJournalStore } from '@/copybot/journal-store';
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
@@ -58,9 +60,9 @@ const SELL_SLIPPAGE_BPS = Number(process.env.SELL_SLIPPAGE_BPS ?? '100'); // 1% 
 const DUST_TOKEN_RAW = BigInt(process.env.DUST_TOKEN_RAW ?? '0'); // residual token units at/below which we don't sell
 const MIN_SELL_OUT_LAMPORTS = BigInt(process.env.MIN_SELL_OUT_LAMPORTS ?? '50000'); // skip if the SOL out floor < ~0.00005 SOL (not worth fees)
 const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL safety-sweep cadence: the no-miss backstop behind the close-triggered sell (catches any dormant non-SOL left by downtime/a missed close)
-const TWO_SIDED_MODE = process.env.COPYBOT_TWO_SIDED ?? 'off'; // 'on' = replicate the leader's token leg (buy token + two-sided open); 'shadow' = log the plan but still open SOL-only; 'off' (default) = SOL-side-only
 const RESHAPE_BIN_DEADBAND_TOKEN = Number(process.env.RESHAPE_BIN_DEADBAND_TOKEN ?? '100'); // per-bin token-leg reshape threshold (RAW token units) — act on a token-leg add above this; LOW for fidelity (see RESHAPE_BIN_DEADBAND_SOL), raise to skip dust token adds (two-sided reshape only)
 const EV_EXECUTED_STREAM = 'copybot:ev:executed';
+const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
 
@@ -77,16 +79,26 @@ const cfg = {
   balanceSol: Number(process.env.COPIER_BALANCE_SOL ?? '10'),
   jupiterBaseUrl: process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL,
 };
-const SIZING = { tradeRatioPct: 50, maxTradeSizeSol: 1.0, minPositionSizeSol: Number(process.env.COPYBOT_MIN_POSITION_SOL ?? '0.05'), solReserveSol: 0.05, onInsufficient: 'skip' as const, skipNonSolPaired: true };
-// Safety envelope (P2.6) — runtime-configurable so a kill-switch / cap can actually HALT new copies (proven by the
-// kill-switch on-chain test). The kill-switch blocks ENTRIES only; exits + reconciliation keep running (caps.ts).
-const CAPS = {
-  ...CAPS_DEFAULTS,
-  killSwitchGlobal: process.env.COPYBOT_KILL_SWITCH === 'true',
-  killSwitchLeader: process.env.COPYBOT_KILL_SWITCH_LEADER === 'true',
-  maxOpenPositions: process.env.COPYBOT_MAX_OPEN_POSITIONS ? Number(process.env.COPYBOT_MAX_OPEN_POSITIONS) : CAPS_DEFAULTS.maxOpenPositions,
-};
-const COPY_RATIO = (SIZING.tradeRatioPct ?? 0) / 100; // re-sync target = COPY_RATIO × leader current size (0 = fixed-size mode → no resync)
+// Sizing/caps/two-sided now come from the DB-backed runtime config (config-store), reloaded live below. ENV vars,
+// WHEN SET, still take precedence over the DB config at boot + on every reload — this preserves the existing env
+// control (the on-chain bench toggles kill-switch / max-open / two-sided via env on restart); an UNSET var falls
+// through to the DB config so the web stays authoritative in production.
+function envConfigOverride(): ConfigOverride {
+  const num = (v: string | undefined): number | undefined => (v === undefined ? undefined : Number(v));
+  const bool = (v: string | undefined): boolean | undefined => (v === undefined ? undefined : v === 'true');
+  const sizing: NonNullable<ConfigOverride['sizing']> = {};
+  const minPos = num(process.env.COPYBOT_MIN_POSITION_SOL);
+  if (minPos !== undefined) sizing.minPositionSizeSol = minPos;
+  const caps: NonNullable<ConfigOverride['caps']> = {};
+  const ksg = bool(process.env.COPYBOT_KILL_SWITCH);
+  if (ksg !== undefined) caps.killSwitchGlobal = ksg;
+  const ksl = bool(process.env.COPYBOT_KILL_SWITCH_LEADER);
+  if (ksl !== undefined) caps.killSwitchLeader = ksl;
+  const maxOpen = num(process.env.COPYBOT_MAX_OPEN_POSITIONS);
+  if (maxOpen !== undefined) caps.maxOpenPositions = maxOpen;
+  return { sizing, caps, twoSidedMode: process.env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined };
+}
+const ENV_CONFIG_OVERRIDE = envConfigOverride();
 const { config: FILTER_CONFIG, shadow: FILTER_SHADOW } = parseFilterConfig(process.env); // entry filters (env; all OFF + shadow ON by default)
 const FILTERS_ACTIVE =
   neededSources(FILTER_CONFIG).size > 0 ||
@@ -135,6 +147,8 @@ async function main(): Promise<void> {
   const db = openDatabase(cfg.dbUrl);
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
   const journal = new CopyJournalStore(db, log, 'brain'); // activity journal (fail-safe; never blocks the hot path)
+  const configStore = new ConfigStore(db, log);
+  let runtimeConfig = mergeConfig(await configStore.seedIfAbsent(), ENV_CONFIG_OVERRIDE); // DB config (+ env override); polled live below
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
   const snapshotCache = new TtlCache<TokenSnapshot>(SNAPSHOT_TTL_MS);
@@ -185,12 +199,12 @@ async function main(): Promise<void> {
 
   async function handleOpen(e: DetectedEvent): Promise<void> {
     log.info({ position: e.position, pool: e.pool, depositSol: e.depositSol }, '🔨 handleOpen start');
-    const decision = decideEntry(e, SIZING, { availableBalanceSol: cfg.balanceSol });
+    const decision = decideEntry(e, { ...runtimeConfig.sizing, skipNonSolPaired: true }, { availableBalanceSol: cfg.balanceSol });
     if (decision.outcome === 'skipped') {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol });
       return log.info({ reason: decision.reason }, 'open skipped');
     }
-    const cap = checkCaps(CAPS, capsState(), decision.sizeSol, Date.now());
+    const cap = checkCaps(runtimeConfig.caps, capsState(), decision.sizeSol, Date.now());
     if (cap.action === 'block') {
       void journal.record({ stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol });
       return log.warn({ reason: cap.reason }, 'open blocked (cap)');
@@ -253,15 +267,15 @@ async function main(): Promise<void> {
 
     // TWO-SIDED (flag-gated): if the leader's position holds a TOKEN leg, replicate BOTH sides (buy the token,
     // deposit two-sided). 'shadow' logs the plan but still opens SOL-only; 'off' (default) = SOL-side-only.
-    if (TWO_SIDED_MODE !== 'off') {
+    if (runtimeConfig.twoSidedMode !== 'off') {
       const legs = shape.perBin.map((b) => ({ binId: b.binId, solRaw: meta.solSide === 'Y' ? b.y : b.x, tokenRaw: meta.solSide === 'Y' ? b.x : b.y }));
       const plan = planTwoSided(legs, shape.activeBinId, shape.activeBinId, DUST_TOKEN_RAW);
       if (plan.twoSided && plan.leaderSolRaw > 0n && e.nonSolMint) {
-        log.info({ mode: TWO_SIDED_MODE, leaderTokenRaw: plan.leaderTokenRaw.toString(), bins: plan.weights.length }, '🪙 two-sided position detected');
+        log.info({ mode: runtimeConfig.twoSidedMode, leaderTokenRaw: plan.leaderTokenRaw.toString(), bins: plan.weights.length }, '🪙 two-sided position detected');
         // SAFE: a two-sided leader is copied as BOTH legs or NOT AT ALL — NEVER a half (one-sided) position. 'on'
         // hands off to openTwoSided, which either replicates both legs or SKIPS cleanly if the token can't be
         // bought (no Jupiter route). Either way we return — we do NOT fall through to the one-sided SOL path.
-        if (TWO_SIDED_MODE === 'on') return openTwoSided(e, e.nonSolMint, meta.solSide, plan);
+        if (runtimeConfig.twoSidedMode === 'on') return openTwoSided(e, e.nonSolMint, meta.solSide, plan);
         // 'shadow' → fall through to the SOL-only path below (shadow mode = log the two-sided plan, open SOL-only).
       }
     }
@@ -298,8 +312,8 @@ async function main(): Promise<void> {
    *  so the coffre lands it before the open (funds the token). The SOL leg keeps the sized SOL; the token leg is
    *  scaled by the SAME factor (our SOL / leader SOL) to preserve the leader's composition. */
   async function openTwoSided(e: DetectedEvent, tokenMint: string, solSide: 'X' | 'Y', plan: TwoSidedPlan): Promise<void> {
-    // Scale BOTH legs by COPY_RATIO of the leader's respective legs (preserves composition), SOL leg capped.
-    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, SIZING.tradeRatioPct, BigInt(Math.round(SIZING.maxTradeSizeSol * 1e9)));
+    // Scale BOTH legs by copyRatio of the leader's respective legs (preserves composition), SOL leg capped.
+    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, runtimeConfig.sizing.tradeRatioPct ?? 100, BigInt(Math.round(runtimeConfig.sizing.maxTradeSizeSol * 1e9)));
     const sizeSol = Number(sizeLamports) / 1e9;
     const dist: WeightBin[] = plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }));
     const totalX = solSide === 'X' ? sizeLamports : tokenTarget;
@@ -397,12 +411,13 @@ async function main(): Promise<void> {
     await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'claim', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot });
   }
 
-  // The leader changed a position (add or partial remove) → RE-SYNC ours to the TARGET = COPY_RATIO × leader's
+  // The leader changed a position (add or partial remove) → RE-SYNC ours to the TARGET = copyRatio × leader's
   // CURRENT on-chain size (capped). Reads BOTH sizes on-chain so drift self-corrects and a missed event catches
   // up on the next one. A deadband (MIN_ADD_SOL) avoids churning on price-driven SOL-leg wiggle.
   async function handleResync(e: DetectedEvent): Promise<void> {
     const m = registry.get(e.position);
     if (!m) return;
+    const copyRatio = (runtimeConfig.sizing.tradeRatioPct ?? 0) / 100; // re-sync target = ratio × leader current size (0/null = fixed-size → no resync)
     const poolPk = new PublicKey(m.pool);
     const meta = await poolReader.loadPoolMeta(m.pool);
     if (!meta?.solSide) {
@@ -429,8 +444,8 @@ async function main(): Promise<void> {
     const leaderTokenBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: tokenOf(b) }));
     const ourTokenBins = ourShape.perBin.map((b) => ({ offset: b.binId - ourShape.lowerBinId, sol: tokenOf(b) }));
     // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
-    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, COPY_RATIO, SIZING.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
-    const twoSidedAdd = TWO_SIDED_MODE === 'on' && tokenAddOps.length > 0;
+    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, runtimeConfig.sizing.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
+    const twoSidedAdd = runtimeConfig.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
       void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
       return log.info({ position: e.position }, '⚖️ in sync — no adjustment');
@@ -500,7 +515,7 @@ async function main(): Promise<void> {
       await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: totalAddSol, targetBinRange: { lower: shaped.lowerBinId, upper: shaped.upperBinId }, issuedAtSlot, deadlineSlot });
     }
 
-    const newSize = Math.min(COPY_RATIO * leaderBins.reduce((s, b) => s + b.sol, 0), SIZING.maxTradeSizeSol);
+    const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), runtimeConfig.sizing.maxTradeSizeSol);
     registry.adjustSize(e.position, newSize);
     await store.updateSize(e.position, newSize);
     log.info({ position: e.position, removes: calls.removes.length, adds: adds.length, newSize }, '🔧 reshape published (per-bin exact)');
@@ -750,6 +765,13 @@ async function main(): Promise<void> {
   const timer = setInterval(() => detector.poll().catch((e) => log.error({ e: (e as Error).message }, 'poll')), POLL_MS);
   const reconTimer = setInterval(() => reconcileSweep().catch((e) => log.error({ e: (e as Error).message }, 'reconcile')), RECON_MS);
   const sweepTimer = setInterval(() => sweepWallet().catch((e) => log.error({ e: (e as Error).message }, 'sweep')), SWEEP_MS);
+  // Live config reload: re-read the DB config (+ env override) so web edits to sizing/caps/two-sided apply without a
+  // restart. load() is fail-safe (defaults on corruption); the assignment is the only write to runtimeConfig post-boot.
+  const configTimer = setInterval(() => {
+    void configStore.load().then((c) => {
+      runtimeConfig = mergeConfig(c, ENV_CONFIG_OVERRIDE);
+    });
+  }, CONFIG_POLL_MS);
 
   // ev:executed consumer on a SEPARATE Redis connection (a blocking XREAD must never stall publishes). Crash-proof.
   let stopped = false;
@@ -790,6 +812,7 @@ async function main(): Promise<void> {
     clearInterval(timer);
     clearInterval(reconTimer);
     clearInterval(sweepTimer);
+    clearInterval(configTimer);
     blockhashCache.stop();
     sub.stop();
     await Promise.all([bus.quit(), evBus.quit()]);
