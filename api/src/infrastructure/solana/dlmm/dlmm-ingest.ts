@@ -1,9 +1,10 @@
 import { type Connection, PublicKey } from '@solana/web3.js';
 import type { Logger } from 'pino';
-import type { DlmmLeg } from '@/domain/dlmm';
+import type { DlmmLeg, SwapFlowRow } from '@/domain/dlmm';
 import type { DlmmIngest as DlmmIngestPort, LegRepository } from '@/domain/ports';
 import { sleep } from '@/util/sleep';
 import { withCodePath } from '../code-path';
+import { extractSwapRows } from '../parsed-tx-adapter';
 import { decodeDlmmLegs } from './dlmm-event-decoder';
 
 const SIG_PAGE = 1000; // getSignaturesForAddress hard cap
@@ -90,7 +91,7 @@ export class DlmmIngest implements DlmmIngestPort {
       let legs: DlmmLeg[];
       let txs: number;
       try {
-        ({ legs, txs } = await this.decodeBatch(sigs));
+        ({ legs, txs } = await this.decodeBatch(wallet, sigs));
       } catch (err) {
         this.logger.error(
           { err, wallet },
@@ -154,8 +155,12 @@ export class DlmmIngest implements DlmmIngestPort {
    * requests in parallel — fast on a paid plan (batch JSON-RPC). Falls back to single calls per
    * chunk only if a batch request keeps failing (e.g. a 403 on a free key).
    */
-  private async decodeBatch(sigs: string[]): Promise<{ legs: DlmmLeg[]; txs: number }> {
+  private async decodeBatch(
+    wallet: string,
+    sigs: string[],
+  ): Promise<{ legs: DlmmLeg[]; txs: number }> {
     const legs: DlmmLeg[] = [];
+    const shadowSwaps: SwapFlowRow[] = [];
     let txs = 0;
     const chunks: string[][] = [];
     for (let i = 0; i < sigs.length; i += TX_BATCH) chunks.push(sigs.slice(i, i + TX_BATCH));
@@ -167,9 +172,24 @@ export class DlmmIngest implements DlmmIngestPort {
           if (!tx) continue;
           txs++;
           legs.push(...decodeDlmmLegs(tx));
+          // SHADOW PARITY (unified raw-fetch): derive swap legs from the SAME parsed tx we already fetched
+          // (~0 extra RPC), so we can confirm they match the Enhanced-API swap_flows BEFORE cutting the
+          // 100cr/page Enhanced path. Read-only (logged, NOT persisted). Isolated — a throw here must never
+          // break the no-miss leg ingest.
+          try {
+            shadowSwaps.push(...extractSwapRows(tx, wallet));
+          } catch (err) {
+            this.logger.debug({ err }, 'shadow swap extract failed (non-fatal)');
+          }
         }
       }
       if (i + BATCH_CONCURRENCY < chunks.length) await sleep(BATCH_PAUSE_MS);
+    }
+    if (shadowSwaps.length > 0) {
+      this.logger.info(
+        { wallet, count: shadowSwaps.length, rows: shadowSwaps },
+        'shadow swap extract (parity vs Enhanced swap_flows)',
+      );
     }
     return { legs, txs };
   }
