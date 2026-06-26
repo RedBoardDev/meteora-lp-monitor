@@ -230,7 +230,13 @@ export function compose(config: AppConfig): App {
       let statsTimer: ReturnType<typeof setInterval> | undefined;
       const logRpcStats = () => {
         logger.info(
-          { live: rpcLimiter.stats(), backfill: backfillLimiter.stats() },
+          {
+            live: rpcLimiter.stats(),
+            backfill: backfillLimiter.stats(),
+            // Enhanced REST (getEnhancedTransactionsByAddress): billed per request and BYPASSES the
+            // JSON-RPC limiter, so it had no counter — this is the line that exposes the real RPC spend.
+            enhanced: enhanced.stats(),
+          },
           'rpc call counts (Helius tier instrumentation)',
         );
       };
@@ -250,7 +256,7 @@ export function compose(config: AppConfig): App {
       logger.info({ port: config.PORT }, 'Binsight API listening');
 
       logRpcStats();
-      statsTimer = setInterval(() => logRpcStats(), 600_000); // every 10 min
+      statsTimer = setInterval(() => logRpcStats(), 60_000); // every 60s (tightened for RPC debugging)
     },
   };
 }

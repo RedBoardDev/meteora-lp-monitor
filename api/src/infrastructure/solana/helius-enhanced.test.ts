@@ -1,11 +1,15 @@
 import { SOL_MINT } from '@binsight/shared';
-import { describe, expect, it } from 'vitest';
+import type { Logger } from 'pino';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   accumulatePositionFlow,
   type EnhancedTx,
+  HeliusEnhancedGateway,
   parseSwapBuy,
   parseSwapSell,
 } from './helius-enhanced';
+
+const silentLogger = { info() {}, warn() {}, debug() {} } as unknown as Logger;
 
 const W = 'WALLET';
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -201,5 +205,47 @@ describe('accumulatePositionFlow — on-chain SOL-leg + NET residual', () => {
     } as unknown as EnhancedTx;
     const f = accumulatePositionFlow([close], W, TOK);
     expect(f.solLegSol).toBeCloseTo(4, 9); // 4 WSOL credited
+  });
+});
+
+describe('HeliusEnhancedGateway — Enhanced API call telemetry (stats)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('counts every Enhanced page fetch under its call-site — the getEnhancedTransactionsByAddress budget', async () => {
+    // WHY this exists: these REST calls BYPASS the JSON-RPC rate-limiter's counters, so the single most
+    // expensive RPC consumer (a full-history re-page = #pages billed requests) was invisible in telemetry.
+    const gw = new HeliusEnhancedGateway('https://rpc.test/?api-key=k', silentLogger);
+    const page = [
+      {
+        timestamp: 100,
+        signature: 's',
+        type: 'SWAP',
+        tokenTransfers: [tt(TOK, W, 'pool', 1000), tt(SOL_MINT, 'pool', W, 9)],
+      },
+    ];
+    // one data page, then an empty page (genuine end of history) → exactly 2 billed requests
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => page })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const res = await gw.fetchSells(W, 0);
+    expect(res.sells.length).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(gw.stats()).toMatchObject({ total: 2, sells: 2, buys: 0, walletFlows: 0, pageFlows: 0 });
+  });
+
+  it('attributes a retried page to the same call-site (Helius bills each retry, not each logical page)', async () => {
+    const gw = new HeliusEnhancedGateway('https://rpc.test/?api-key=k', silentLogger);
+    // attempt 1: transient 500 (retried); attempt 2: empty page (end) → 2 billed requests, ONE logical page
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 500, headers: { get: () => null } })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await gw.fetchBuys(W, 0);
+    expect(gw.stats()).toMatchObject({ total: 2, buys: 2, sells: 0 });
   });
 });

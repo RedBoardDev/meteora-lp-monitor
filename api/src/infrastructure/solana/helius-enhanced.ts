@@ -40,6 +40,18 @@ export interface PositionFlow {
 const PAGE_SIZE = 100;
 const INTER_PAGE_MS = 120; // gentle on the free-tier Enhanced endpoint
 
+/** Per-call-site counters for the Enhanced REST endpoint (getEnhancedTransactionsByAddress). */
+export interface EnhancedCallCounts {
+  total: number;
+  sells: number;
+  buys: number;
+  walletFlows: number;
+  pageFlows: number;
+  reconstruct: number;
+}
+/** Call site that issued an Enhanced page request — used to attribute RPC cost in the telemetry. */
+type EnhancedCallTag = Exclude<keyof EnhancedCallCounts, 'total'>;
+
 /**
  * Reads a wallet's realized token→SOL sells from the Helius Enhanced Transactions API
  * (`/v0/addresses/<wallet>/transactions?type=SWAP`) — the cheap, parsed, batched source of actual
@@ -75,6 +87,23 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
 
   private readonly bucket: TokenBucket;
 
+  /** Cumulative Enhanced REST call counts (getEnhancedTransactionsByAddress). This endpoint is billed
+   *  per HTTP request and BYPASSES the JSON-RPC rate-limiter's counters — it was the blind spot in the
+   *  RPC telemetry. EVERY fetch (including retries) is counted, tagged by the call site that issued it. */
+  private readonly callCounts: EnhancedCallCounts = {
+    total: 0,
+    sells: 0,
+    buys: 0,
+    walletFlows: 0,
+    pageFlows: 0,
+    reconstruct: 0,
+  };
+
+  /** Snapshot of the cumulative Enhanced API call counts (per call-site + total) for tier instrumentation. */
+  stats(): EnhancedCallCounts {
+    return { ...this.callCounts };
+  }
+
   /** Enabled only when the Helius URL carries an api-key (the Enhanced API needs one). */
   get enabled(): boolean {
     return this.apiKey != null;
@@ -104,7 +133,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       const url =
         `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
         `?api-key=${this.apiKey}&type=SWAP&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
-      const txs = await this.fetchPageWithRetry(url, wallet, page);
+      const txs = await this.fetchPageWithRetry(url, wallet, page, 'sells');
       if (txs == null) {
         // page failed after retries → history is incomplete (oldest sells missing). Stop, flag it.
         this.logger.warn({ wallet, page }, 'enhanced API page failed after retries — INCOMPLETE');
@@ -160,7 +189,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       const url =
         `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
         `?api-key=${this.apiKey}&type=SWAP&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
-      const txs = await this.fetchPageWithRetry(url, wallet, page);
+      const txs = await this.fetchPageWithRetry(url, wallet, page, 'buys');
       if (txs == null) break;
       if (txs.length === 0) {
         complete = true;
@@ -213,7 +242,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       const url =
         `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
         `?api-key=${this.apiKey}&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
-      const txs = await this.fetchPageWithRetry(url, wallet, page);
+      const txs = await this.fetchPageWithRetry(url, wallet, page, 'walletFlows');
       if (txs == null) break; // incomplete
       if (txs.length === 0) {
         complete = true;
@@ -290,7 +319,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       const url =
         `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
         `?api-key=${this.apiKey}&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
-      const txs = await this.fetchPageWithRetry(url, wallet, page);
+      const txs = await this.fetchPageWithRetry(url, wallet, page, 'pageFlows');
       if (txs == null) break; // retries exhausted → incomplete; keep what we have, cursor won't advance
       if (txs.length === 0) {
         complete = true; // genesis (full) or nothing new (top-up)
@@ -333,10 +362,15 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     url: string,
     wallet: string,
     page: number,
+    tag: EnhancedCallTag,
   ): Promise<EnhancedTx[] | null> {
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await this.bucket.acquire();
+        // Count BEFORE the call: Helius bills every request, retries included, so an attempt that 429s
+        // and is retried is two billed requests — the telemetry must reflect real cost, not logical pages.
+        this.callCounts.total++;
+        this.callCounts[tag]++;
         const res = await fetch(url, { headers: { 'User-Agent': 'binsight/1.0' } });
         if (res.ok) return (await res.json()) as EnhancedTx[];
         // Retry EVERY non-200 (Helius intermittently returns 5xx/4xx mid-pagination on deep history);
@@ -376,7 +410,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       const url =
         `https://api.helius.xyz/v0/addresses/${positionAddress}/transactions` +
         `?api-key=${this.apiKey}&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
-      const txs = await this.fetchPageWithRetry(url, positionAddress, page);
+      const txs = await this.fetchPageWithRetry(url, positionAddress, page, 'reconstruct');
       if (txs == null) return null; // incomplete → don't trust a partial reconstruction
       if (txs.length === 0) break;
       all.push(...txs);
