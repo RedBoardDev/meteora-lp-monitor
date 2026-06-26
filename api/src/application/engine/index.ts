@@ -93,8 +93,8 @@ export class Engine {
   // Wallets a client is currently viewing (maintained by the WS layer). The recurring net-worth
   // snapshot only runs for viewed wallets (+ notify-enabled ones) so idle wallets cost no RPC.
   private viewedWallets = new Set<string>();
-  // Per-wallet guard so the chained-FIFO realized-PnL pass (Enhanced API + price gateway) never runs
-  // twice concurrently for the same wallet — it fires async off the close-notification, not the loop.
+  // Per-wallet guard so the chained-FIFO realized-PnL pass (persisted swap_flows + price gateway) never
+  // runs twice concurrently for the same wallet — it fires async off the close-notification, not the loop.
   private readonly realizedPnlRunning = new Set<string>();
   // A trigger that arrives mid-run sets this so exactly ONE more pass runs after the current one
   // finishes (coalesced) — a close-burst no longer gets silently dropped by the single-flight guard.
@@ -397,14 +397,12 @@ export class Engine {
           rt.lastClosedCount = res.closed;
           this.bus.emit('closedChanged', { wallet: rt.address });
           // The closed set moved → (re)compute the authoritative on-chain realized market_pnl_sol for
-          // this wallet's closed positions. Runs async (Enhanced API + price gateway) so it never blocks
-          // the snapshot loop; the UI fills in via a second closedChanged when it persists.
-          // INCREMENTAL: loadFlows still does one FULL seed on a cold cache (else-branch), so the first
-          // close after a (re)start pages the whole history once; every subsequent close then costs only
-          // the delta (~one Helius page). A full re-page on EVERY close was burning millions of
-          // getEnhancedTransactionsByAddress calls/day on an actively-churning wallet.
+          // this wallet's closed positions. Runs async so it never blocks the snapshot loop; the UI fills
+          // in via a second closedChanged when it persists. The pass reads the PERSISTED swap_flows (no
+          // Enhanced re-page) after a cheap delta top-up — so a restart/close costs ~0 credits, which is
+          // what fixes the getEnhancedTransactionsByAddress blowout an on-every-close re-page caused.
           rt.lastRealizedRunAt = Date.now();
-          void this.runRealizedPnl(rt.address, { incremental: true });
+          void this.runRealizedPnl(rt.address);
           // Arm the BOUNDED deferred refresh (below) ONLY for a genuine LIVE close — post-reconcile with
           // newly-closed rows. NEVER the initial backfill count-establishment (wasReconciled=false) or a
           // bulk catch-up, which would otherwise fan out N extra realized passes per wallet on cold-start.
@@ -434,9 +432,9 @@ export class Engine {
         })
       ) {
         rt.lastRealizedRunAt = Date.now();
-        // Incremental: the close-time pass already seeded the full history; a refresh only needs the
-        // recent delta (the residual sell) — cheap, so it converges fast even for huge wallets.
-        void this.runRealizedPnl(rt.address, { incremental: true });
+        // Each deferred pass tops up the swap delta (the late residual sell) then re-reads the persisted
+        // swap_flows — cheap, so it converges fast even for huge wallets, with no full re-page.
+        void this.runRealizedPnl(rt.address);
       }
     } catch (err) {
       this.health.record('rpc', false, err instanceof Error ? err.message : String(err));
@@ -463,10 +461,10 @@ export class Engine {
    * single-flight per wallet so it can never pile up. Errors are swallowed — a failed pass must not
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
-  private async runRealizedPnl(wallet: string, opts: { incremental?: boolean } = {}): Promise<void> {
-    // Master switch: when disabled, NO buys/sells fetch ever runs — no cold-cache full re-page on a
-    // restart, no per-close re-page. Closed positions keep their persisted market_pnl_sol; new closes
-    // fall back to the pool mark. This is what keeps RPC ≈ 0 and lets the engine scale to many wallets.
+  private async runRealizedPnl(wallet: string): Promise<void> {
+    // Master switch: when disabled, NO swap ingest / realized read runs. Closed positions keep their
+    // persisted market_pnl_sol; new closes fall back to the pool mark. This is what keeps RPC ≈ 0 and
+    // lets the engine scale to many wallets.
     if (!this.appConfig.REALIZED_PNL_ENABLED) return;
     if (this.realizedPnlRunning.has(wallet)) {
       this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
@@ -474,15 +472,25 @@ export class Engine {
     }
     this.realizedPnlRunning.add(wallet);
     try {
-      // First pass honors the requested mode (deferred refresh = incremental → cheap delta fetch); any
-      // COALESCED rerun falls back to a full pass (rare, since passes are spaced, and always safe).
-      let incremental = opts.incremental ?? false;
+      // Freshness: top up the persisted swap delta BEFORE reading swap_flows. A close fires this pass
+      // concurrently with the WS-path swap ingest, so without this top-up the FIFO could read the DB
+      // before the just-landed residual sell is persisted and overstate held value. Cheap — a complete
+      // cursor with no new sigs pages ZERO Enhanced calls (anti-re-seed); serialized with all wallet
+      // ingests. Isolated so a flaky delta still lets the recompute run on the already-persisted swaps.
+      try {
+        await this.ingestLock.run(wallet, () => this.swapFlowIngest.ingest(wallet));
+      } catch (err) {
+        this.logger.warn(
+          { err, wallet },
+          'realized-pnl: swap delta top-up failed — computing on already-persisted swaps',
+        );
+      }
       do {
         this.realizedPnlRerun.delete(wallet);
-        const pnlByPos = await this.realizedPnl.computeForWallet(wallet, { incremental });
-        incremental = false;
-        // null = the engine refused to produce values (incomplete buy/sell history). Skip persisting so
-        // a flaky live Helius fetch can never overwrite good market_pnl_sol with inflated held values.
+        const pnlByPos = await this.realizedPnl.computeForWallet(wallet);
+        // null = the engine refused to produce values (incomplete persisted swap history — cursor
+        // missing or the seed unfinished). Skip persisting so a partial history can never overwrite good
+        // market_pnl_sol with inflated held values.
         if (pnlByPos == null || pnlByPos.size === 0) continue;
         // One atomic batched UPDATE for the whole wallet (was N sequential single-row writes): a
         // mid-loop crash can no longer leave mixed old/new market_pnl_sol generations.

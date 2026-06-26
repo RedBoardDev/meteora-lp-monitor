@@ -171,13 +171,15 @@ export function compose(config: AppConfig): App {
     return hist ? flowFromHistory(hist) : null;
   };
   const backfill = new ResidualBackfill(enhanced, positionFlow, positionRepo, bus, logger);
-  // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + Helius buys/sells,
-  // held residual marked via the shared price gateway). Triggered by the engine after a wallet's closed
-  // set changes — the production port of scripts/fifo-cost-basis.ts.
+  // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + the PERSISTED
+  // swap_flows buys/sells, held residual marked via the shared price gateway). Triggered by the engine
+  // after a wallet's closed set changes — the production port of scripts/fifo-cost-basis.ts. Reading the
+  // persisted swaps (instead of re-paging the Enhanced API) is what makes a restart/close cost ~0 credits;
+  // SwapFlowIngest owns the Enhanced paging now (seed-once + delta).
   const realizedPnl = new RealizedPnlEngine(
     dlmmLegRepo,
     positionRepo,
-    enhanced,
+    swapFlowRepo,
     prices,
     (mint) => onchain.decimalsOf(mint),
     logger,
