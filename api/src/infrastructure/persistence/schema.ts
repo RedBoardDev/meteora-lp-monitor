@@ -5,6 +5,7 @@ import {
   doublePrecision,
   index,
   integer,
+  jsonb,
   pgTable,
   primaryKey,
   serial,
@@ -169,6 +170,40 @@ export const copyPositions = pgTable('copy_positions', {
   openedAt: ms('opened_at').notNull(),
   closedAt: ms('closed_at'),
 });
+
+
+// Copy-bot activity journal — append-only, lifecycle-wide record of every meaningful action across BOTH processes
+// (brain + coffre). Source of truth for the web activity feed. Taxonomy is compositional: (stage, outcome[, reason]).
+// See domain/copybot/journal.ts for the closed enums; `reason` stores the producer's functional code verbatim.
+export const copyJournal = pgTable(
+  'copy_journal',
+  {
+    id: serial('id').primaryKey(),
+    ts: ms('ts').notNull(), // when WE recorded it (Date.now)
+    process: text('process').notNull(), // brain | coffre
+    stage: text('stage').notNull(), // detect | open | reshape | close | sell | sweep | failsafe | sign | recover
+    outcome: text('outcome').notNull(), // detected | published | landed | confirmed | skipped | blocked | failed | rejected | noop
+    severity: text('severity').notNull(), // info | warn | error
+    reason: text('reason'), // producer's functional code (decision/cap/filter/Wall B), verbatim — null on progress outcomes
+    kind: text('kind'), // open | add | remove | close | claim | sell | buy (leader DLMM action this relates to)
+    leader: text('leader'),
+    pool: text('pool'),
+    leaderPosition: text('leader_position'), // correlates one mirrored position's whole lifecycle
+    ourPosition: text('our_position'),
+    commandId: text('command_id'), // bus / executions correlation
+    eventKey: text('event_key'), // detection correlation
+    leaderSizeSol: doublePrecision('leader_size_sol'),
+    ourSizeSol: doublePrecision('our_size_sol'),
+    signature: text('signature'), // on-chain tx sig (landed) or leader trigger sig (detect)
+    latencyMs: integer('latency_ms'), // build+publish (brain) or sign+land (coffre)
+    detail: jsonb('detail'), // free-form long tail (bin ranges, fidelity, filter sub-code)
+  },
+  (t) => [
+    index('idx_copy_journal_ts').on(t.ts), // feed: ORDER BY ts DESC
+    index('idx_copy_journal_leader_ts').on(t.leader, t.ts), // per-leader feed
+    index('idx_copy_journal_our_position').on(t.ourPosition), // per-position drill-down
+  ],
+)
 
 // Per-pool DLMM metadata (binStep / SOL side / mints), decoded once from the LbPair account. These are
 // immutable on-chain, so caching them here lets the projection skip the per-pool getAccountInfo on every
