@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CreditMeter, CREDIT_COST, wsCredits } from './credit-meter';
+import { CREDIT_COST, type CreditFlushRow, CreditMeter, wsCredits } from './credit-meter';
 
 /** A meter on a mutable clock so every time-based rule (rolling window, UTC-day) is deterministic. */
 function meterAt(start: number, thresholds?: ConstructorParameters<typeof CreditMeter>[1]) {
@@ -175,5 +175,63 @@ describe('CreditMeter — blocked marker', () => {
     expect(last.blocked).toBe(true);
     expect(last.credits).toBe(0);
     expect(last.ok).toBe(false);
+  });
+});
+
+describe('CreditMeter — drainForFlush (DB rollup buffer)', () => {
+  const byKey = (r: CreditFlushRow) => `${r.day}|${r.method}|${r.wallet}|${r.codePath}`;
+
+  // WHY: the 60s flush persists only the deltas SINCE the last drain, accumulated per
+  // (day,method,wallet,codePath), while the cumulative stats() ledger must stay whole. Draining resets
+  // ONLY the buffer, so a second drain with no new calls is empty — the timer never double-writes a
+  // window into rpc_credit_daily, and a wallet-less call maps onto the '' bucket.
+  it('returns per-key deltas, resets the buffer, and never disturbs the cumulative stats()', () => {
+    const { meter } = meterAt(0);
+    meter.record('getAccountInfo', { wallet: 'A', codePath: 'ingest' }); // 1
+    meter.record('getAccountInfo', { wallet: 'A', codePath: 'ingest' }); // same key → 2 calls / 2 credits
+    meter.record('enhancedTx', { wallet: 'B', codePath: 'realized' }); // 100, distinct key
+    meter.record('getBalance'); // no wallet, untagged path → ('', 'unknown')
+
+    const first = new Map(meter.drainForFlush().map((r) => [byKey(r), r]));
+    expect(first.size).toBe(3);
+    expect(first.get('0|getAccountInfo|A|ingest')).toMatchObject({ calls: 2, credits: 2 });
+    expect(first.get('0|enhancedTx|B|realized')).toMatchObject({ calls: 1, credits: 100 });
+    expect(first.get('0|getBalance||unknown')).toMatchObject({ calls: 1, credits: 1 });
+
+    // Buffer reset: a second drain with no new records is empty…
+    expect(meter.drainForFlush()).toEqual([]);
+    // …yet the cumulative ledger is untouched (drain touches only the flush buffer).
+    const s = meter.stats();
+    expect(s.totalCredits).toBe(103);
+    expect(s.totalCalls).toBe(4);
+
+    // A NEW record after the reset accumulates fresh (from the emptied buffer, not the cumulative sum).
+    meter.record('getAccountInfo', { wallet: 'A', codePath: 'ingest' });
+    expect(meter.drainForFlush()).toEqual([
+      { day: 0, method: 'getAccountInfo', wallet: 'A', codePath: 'ingest', calls: 1, credits: 1 },
+    ]);
+  });
+
+  // WHY: the day bucket comes from the injected clock, so calls on different UTC days flush to DISTINCT
+  // rows — the rollup is day-partitioned exactly like rpc_credit_daily's PK.
+  it('partitions deltas by UTC day from the clock', () => {
+    const { meter, clock } = meterAt(0);
+    meter.record('getAccountInfo', { wallet: 'A', codePath: 'ingest' }); // day 0
+    clock.now = 86_400_000; // next UTC day
+    meter.record('getAccountInfo', { wallet: 'A', codePath: 'ingest' }); // day 1
+    expect(
+      meter
+        .drainForFlush()
+        .map((r) => r.day)
+        .sort(),
+    ).toEqual([0, 1]);
+  });
+
+  // WHY: a kill-switch-blocked call was never ISSUED (0 credits), so it must NOT enter the spend rollup
+  // — only real, billed calls belong in rpc_credit_daily (blocked calls live in the live feed only).
+  it('excludes blocked calls from the flush buffer', () => {
+    const { meter } = meterAt(0);
+    meter.recordBlocked('getProgramAccounts', { wallet: 'A', codePath: 'snapshot' });
+    expect(meter.drainForFlush()).toEqual([]);
   });
 });

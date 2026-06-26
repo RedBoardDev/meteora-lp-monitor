@@ -81,6 +81,18 @@ export interface CreditStats {
   ringTail: RingEntry[];
 }
 
+/** A per-(UTC-day, exact method, wallet, code path) credit delta — the unit the 60s flush appends to the
+ *  `rpc_credit_daily` rollup. `wallet` is '' when the call isn't attributable to a wallet (so it maps
+ *  straight onto that table's columns + PK). */
+export interface CreditFlushRow {
+  day: number;
+  method: string;
+  wallet: string;
+  codePath: string;
+  calls: number;
+  credits: number;
+}
+
 export interface RecordOpts {
   wallet?: string;
   codePath?: string;
@@ -111,6 +123,9 @@ export class CreditMeter {
   // Per wallet: ONLY its current UTC day's running credit sum (reset when the day rolls) → bounded to
   // the number of wallets, no unbounded history kept in memory.
   private readonly walletDay = new Map<string, { day: number; credits: number }>();
+  // Per-(day,method,wallet,codePath) deltas accumulated SINCE the last drainForFlush() — the DB-flush
+  // buffer. Distinct from the cumulative counters above: a drain resets ONLY this, never stats().
+  private flushBuffer = new Map<string, CreditFlushRow>();
 
   private readonly alarmCreditsPerMin: number;
   private readonly globalKillCreditsPerMin: number;
@@ -121,7 +136,8 @@ export class CreditMeter {
     thresholds: CreditMeterThresholds = {},
   ) {
     this.alarmCreditsPerMin = thresholds.alarmCreditsPerMin ?? ALARM_CREDITS_PER_MIN;
-    this.globalKillCreditsPerMin = thresholds.globalKillCreditsPerMin ?? GLOBAL_KILL_CREDITS_PER_MIN;
+    this.globalKillCreditsPerMin =
+      thresholds.globalKillCreditsPerMin ?? GLOBAL_KILL_CREDITS_PER_MIN;
     this.walletDailyBudget = thresholds.walletDailyBudget ?? WALLET_DAILY_BUDGET;
   }
 
@@ -150,6 +166,7 @@ export class CreditMeter {
     this.pushRing({ at, method, codePath, wallet, credits, ok: opts.ok ?? true });
     this.window.push({ at, credits });
     this.pruneWindow(at);
+    this.bumpFlush(at, method, wallet, codePath, credits);
   }
 
   /** Record a kill-switch-blocked call that was NEVER issued — counted (0 credits) for the live feed only. */
@@ -176,6 +193,16 @@ export class CreditMeter {
       byWallet: { ...this.byWallet },
       ringTail: this.ring.slice(-RING_TAIL),
     };
+  }
+
+  /** The per-(day,method,wallet,codePath) credit deltas accumulated SINCE the previous drain, then RESET
+   *  the buffer (the cumulative stats() counters are untouched). The 60s timer flushes these into the
+   *  `rpc_credit_daily` rollup; a drain with no new calls since the last one returns [] (so the timer
+   *  never re-writes an already-persisted window). */
+  drainForFlush(): CreditFlushRow[] {
+    const rows = [...this.flushBuffer.values()];
+    this.flushBuffer.clear();
+    return rows;
   }
 
   /** Pure anomaly signals derived from the cumulative ledger + the rolling window + the per-day sums. */
@@ -252,6 +279,28 @@ export class CreditMeter {
     const cur = this.walletDay.get(wallet);
     if (!cur || cur.day !== day) this.walletDay.set(wallet, { day, credits });
     else cur.credits += credits;
+  }
+
+  /** Accumulate one call into the flush buffer under its (day,method,wallet,codePath) key. A null wallet
+   *  maps to '' (matches the rpc_credit_daily column default). Blocked calls are excluded — they were
+   *  never issued, so they belong in the live feed, not the spend rollup. */
+  private bumpFlush(
+    at: number,
+    method: string,
+    wallet: string | null,
+    codePath: string,
+    credits: number,
+  ): void {
+    const day = utcDay(at);
+    const w = wallet ?? '';
+    const key = `${day} ${method} ${w} ${codePath}`;
+    const cur = this.flushBuffer.get(key);
+    if (cur) {
+      cur.calls += 1;
+      cur.credits += credits;
+    } else {
+      this.flushBuffer.set(key, { day, method, wallet: w, codePath, calls: 1, credits });
+    }
   }
 
   private pushRing(entry: RingEntry): void {

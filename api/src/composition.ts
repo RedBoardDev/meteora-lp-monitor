@@ -31,16 +31,20 @@ import { DlmmLegRepository } from './infrastructure/persistence/dlmm-leg-reposit
 import { NetworthSnapshotRepository } from './infrastructure/persistence/networth-snapshot-repository';
 import { PostgresPositionRepository } from './infrastructure/persistence/position-repository';
 import { PushRepository } from './infrastructure/persistence/push-repository';
+import { RpcCreditLedgerRepository } from './infrastructure/persistence/rpc-credit-ledger-repository';
 import { WalletFlowRepository } from './infrastructure/persistence/wallet-flow-repository';
+import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { DlmmIngest } from './infrastructure/solana/dlmm/dlmm-ingest';
 import { OnchainDlmmGateway } from './infrastructure/solana/dlmm/onchain-gateway';
 import { OnchainPoolMetaReader } from './infrastructure/solana/dlmm/pool-meta';
 import { StrategyResolver } from './infrastructure/solana/dlmm/strategy-resolver';
-import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { HeliusEnhancedGateway } from './infrastructure/solana/helius-enhanced';
 import { HeliusSubscriber } from './infrastructure/solana/helius-subscriber';
 import { SolanaRpcRateLimiter } from './infrastructure/solana/rpc-rate-limiter';
 import { HeliusTokenMetadataGateway } from './infrastructure/solana/token-metadata-gateway';
+
+/** Cadence to flush the CreditMeter's since-last-drain deltas into the rpc_credit_daily rollup. */
+const CREDIT_FLUSH_INTERVAL_MS = 60_000;
 
 export interface App {
   start(): Promise<void>;
@@ -140,7 +144,13 @@ export function compose(config: AppConfig): App {
   );
   const positionSync = new PositionSync(dlmmPositionPnl, tokenMetadata, positionRepo, logger);
   const strategy = new StrategyService(new StrategyResolver(connection), positionRepo, logger);
-  const enhanced = new HeliusEnhancedGateway(config.solanaHttpUrl, logger, undefined, undefined, meter);
+  const enhanced = new HeliusEnhancedGateway(
+    config.solanaHttpUrl,
+    logger,
+    undefined,
+    undefined,
+    meter,
+  );
   // Free OHLCV candle source (no key) for the position price chart.
   const gecko = new GeckoTerminalGateway(logger);
   // Persisted wallet cash-flow: ingested once at backfill + topped up on the cadence, so the wallet
@@ -180,6 +190,7 @@ export function compose(config: AppConfig): App {
   );
   // Browser/PWA Web Push, routed per-wallet to subscribers. Fans out alongside Bark via a composite.
   const pushRepo = new PushRepository(db);
+  const creditLedgerRepo = new RpcCreditLedgerRepository(db);
   const webPush = new WebPushChannel(
     pushRepo,
     {
@@ -236,6 +247,7 @@ export function compose(config: AppConfig): App {
         pushRepo,
         gecko,
         meter,
+        creditLedger: creditLedgerRepo,
         vapidPublicKey: config.VAPID_PUBLIC_KEY,
         sendTestPush: (userId) => pushRepo.forUser(userId).then((subs) => webPush.sendTest(subs)),
         openAccess: config.OPEN_ACCESS_MODE,
@@ -257,6 +269,13 @@ export function compose(config: AppConfig): App {
           'rpc call counts (Helius tier instrumentation)',
         );
       };
+      // Persist the since-last-drain credit deltas into the rpc_credit_daily rollup, so /debug/rpc keeps
+      // real spend history across restarts (the in-memory meter resets on boot).
+      let flushTimer: ReturnType<typeof setInterval> | undefined;
+      const flushCredits = async () => {
+        const deltas = meter.drainForFlush();
+        if (deltas.length > 0) await creditLedgerRepo.addDeltas(deltas);
+      };
 
       // db closes last (after in-flight requests drain in app.close); engine stops first. (Hooks must
       // be registered BEFORE listen — Fastify rejects addHook once listening.)
@@ -266,6 +285,7 @@ export function compose(config: AppConfig): App {
           async () => engine.stop(),
           async () => {
             if (statsTimer) clearInterval(statsTimer);
+            if (flushTimer) clearInterval(flushTimer);
           },
         ],
       });
@@ -274,6 +294,7 @@ export function compose(config: AppConfig): App {
 
       logRpcStats();
       statsTimer = setInterval(() => logRpcStats(), 60_000); // every 60s (tightened for RPC debugging)
+      flushTimer = setInterval(() => void flushCredits(), CREDIT_FLUSH_INTERVAL_MS);
     },
   };
 }
