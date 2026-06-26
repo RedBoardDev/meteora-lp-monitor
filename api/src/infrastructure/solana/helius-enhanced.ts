@@ -555,7 +555,7 @@ export function accumulatePositionFlow(
 }
 
 /** The wallet's net SOL+WSOL change in a tx (native balance change + WSOL token-balance change). */
-function walletSolFlow(tx: EnhancedTx, wallet: string): number {
+export function walletSolFlow(tx: EnhancedTx, wallet: string): number {
   let lamports = 0;
   let wsol = 0;
   for (const ad of tx.accountData ?? []) {
