@@ -28,6 +28,7 @@ import { planReconcile } from '@/domain/copybot/reconciliation';
 import { decideResidualSell, minOutWithSlippage, planWalletSweep } from '@/domain/copybot/residual-sell';
 import { classifyInstruction } from '@/domain/dlmm';
 import { RedisBus } from '@/infrastructure/bus/redis-bus';
+import { ControlChannel } from '@/infrastructure/bus/control-channel';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { decodeDlmmLegs } from '@/infrastructure/solana/dlmm/dlmm-event-decoder';
 import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildOpenByWeight, buildRemovePartial, createDlmmPair } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
@@ -148,7 +149,11 @@ async function main(): Promise<void> {
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
   const journal = new CopyJournalStore(db, log, 'brain'); // activity journal (fail-safe; never blocks the hot path)
   const configStore = new ConfigStore(db, log);
-  let runtimeConfig = mergeConfig(await configStore.seedIfAbsent(), ENV_CONFIG_OVERRIDE); // DB config (+ env override); polled live below
+  let runtimeConfig = mergeConfig(await configStore.seedIfAbsent(), ENV_CONFIG_OVERRIDE); // DB config (+ env override); polled + ping-reloaded live below
+  const reloadConfig = async (): Promise<void> => {
+    runtimeConfig = mergeConfig(await configStore.load(), ENV_CONFIG_OVERRIDE);
+  };
+  const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
   const snapshotCache = new TtlCache<TokenSnapshot>(SNAPSHOT_TTL_MS);
@@ -729,7 +734,7 @@ async function main(): Promise<void> {
   // --once: validates the pipeline by forcing ONE open on a live leader position (deterministic), then exits.
   if (once) {
     await onceValidate(conn, leaderPk, poolReader, handleOpen, bus, log);
-    await bus.quit();
+    await Promise.all([bus.quit(), control.quit()]);
     process.exit(0);
   }
 
@@ -751,7 +756,7 @@ async function main(): Promise<void> {
   }
   if (!cfg.wsUrl) {
     log.warn('no SOLANA_WS_URL → live impossible');
-    await bus.quit();
+    await Promise.all([bus.quit(), control.quit()]);
     return;
   }
   const sub = new HeliusTxSubscriber(cfg.wsUrl, log);
@@ -765,13 +770,14 @@ async function main(): Promise<void> {
   const timer = setInterval(() => detector.poll().catch((e) => log.error({ e: (e as Error).message }, 'poll')), POLL_MS);
   const reconTimer = setInterval(() => reconcileSweep().catch((e) => log.error({ e: (e as Error).message }, 'reconcile')), RECON_MS);
   const sweepTimer = setInterval(() => sweepWallet().catch((e) => log.error({ e: (e as Error).message }, 'sweep')), SWEEP_MS);
-  // Live config reload: re-read the DB config (+ env override) so web edits to sizing/caps/two-sided apply without a
-  // restart. load() is fail-safe (defaults on corruption); the assignment is the only write to runtimeConfig post-boot.
-  const configTimer = setInterval(() => {
-    void configStore.load().then((c) => {
-      runtimeConfig = mergeConfig(c, ENV_CONFIG_OVERRIDE);
-    });
-  }, CONFIG_POLL_MS);
+  // Live config reload. A web config edit publishes a control ping → reload from the DB NOW (kill-switch in <100ms);
+  // the periodic poll is the backstop if a ping is ever missed. load() is fail-safe (defaults on corruption); these
+  // are the only writes to runtimeConfig post-boot.
+  const configTimer = setInterval(() => void reloadConfig(), CONFIG_POLL_MS);
+  await control.subscribe(() => {
+    log.info('🔁 control: config-changed → reloading config now');
+    void reloadConfig();
+  });
 
   // ev:executed consumer on a SEPARATE Redis connection (a blocking XREAD must never stall publishes). Crash-proof.
   let stopped = false;
@@ -815,7 +821,7 @@ async function main(): Promise<void> {
     clearInterval(configTimer);
     blockhashCache.stop();
     sub.stop();
-    await Promise.all([bus.quit(), evBus.quit()]);
+    await Promise.all([bus.quit(), evBus.quit(), control.quit()]);
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown());

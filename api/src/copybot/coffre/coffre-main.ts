@@ -21,6 +21,7 @@ import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import { ConfigStore } from '@/copybot/config-store';
 import { SignRequestSchema } from '@/domain/copybot/contracts';
 import type { Journal } from '@/domain/copybot/journal';
+import { ControlChannel } from '@/infrastructure/bus/control-channel';
 import { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { executions } from '@/infrastructure/persistence/schema';
@@ -61,6 +62,10 @@ async function main(): Promise<void> {
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
   const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.sizing.maxTradeSizeSol;
+  const reloadConfig = async (): Promise<void> => {
+    runtimeConfig = await configStore.load();
+  };
+  const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (re-clamp ceiling in <100ms)
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
@@ -85,17 +90,18 @@ async function main(): Promise<void> {
 
   let stopped = false;
   const drain = process.argv.includes('--drain'); // one batch then exit (validation)
-  // Live config reload: re-read the DB config so a web edit to the re-clamp ceiling applies without a restart.
-  const configTimer = setInterval(() => {
-    void configStore.load().then((c) => {
-      runtimeConfig = c;
-    });
-  }, CONFIG_POLL_MS);
+  // Live config reload. A web config edit publishes a control ping → reload from the DB NOW (re-clamp ceiling in
+  // <100ms); the periodic poll is the backstop if a ping is missed.
+  const configTimer = setInterval(() => void reloadConfig(), CONFIG_POLL_MS);
+  await control.subscribe(() => {
+    log.info('🔁 control: config-changed → reloading config now');
+    void reloadConfig();
+  });
   const stop = async (): Promise<void> => {
     stopped = true;
     clearInterval(configTimer);
     blockhashCache.stop();
-    await bus.quit();
+    await Promise.all([bus.quit(), control.quit()]);
     process.exit(0);
   };
   process.on('SIGINT', () => void stop());

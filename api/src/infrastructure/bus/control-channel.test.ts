@@ -1,0 +1,45 @@
+import { afterAll, describe, expect, it } from 'vitest';
+import { type ControlMessage, ControlChannel, parseControlMessage } from './control-channel';
+
+describe('parseControlMessage (pure)', () => {
+  it('accepts a known config-changed message', () => {
+    expect(parseControlMessage(JSON.stringify({ type: 'config-changed' }))).toEqual({ type: 'config-changed' });
+  });
+
+  it('ignores malformed JSON, non-objects, missing/unknown types (never throws)', () => {
+    expect(parseControlMessage('not json')).toBeNull();
+    expect(parseControlMessage('42')).toBeNull();
+    expect(parseControlMessage(JSON.stringify({}))).toBeNull();
+    expect(parseControlMessage(JSON.stringify({ type: 'reboot-the-server' }))).toBeNull(); // unknown type rejected
+    expect(parseControlMessage(JSON.stringify({ type: 42 }))).toBeNull();
+  });
+});
+
+// Integration: requires local Redis (:6385).
+const URL = process.env.REDIS_URL ?? 'redis://localhost:6385';
+
+describe('ControlChannel (integration)', () => {
+  const channels: ControlChannel[] = [];
+  afterAll(async () => {
+    await Promise.all(channels.map((c) => c.quit()));
+  });
+
+  it('delivers a published control message to a subscriber (the instant-reload path)', async () => {
+    const subClient = ControlChannel.connect(URL);
+    const pubClient = ControlChannel.connect(URL);
+    channels.push(subClient, pubClient);
+
+    const received = new Promise<ControlMessage>((resolve) => {
+      void subClient.subscribe(resolve);
+    });
+    // Give the SUBSCRIBE a beat to register before publishing (pub/sub drops messages with no live subscriber).
+    await new Promise((r) => setTimeout(r, 150));
+    await pubClient.publish({ type: 'config-changed' });
+
+    const msg = await Promise.race([
+      received,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('control message not delivered in time')), 3000)),
+    ]);
+    expect(msg).toEqual({ type: 'config-changed' });
+  });
+});
