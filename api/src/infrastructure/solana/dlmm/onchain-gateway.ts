@@ -174,6 +174,15 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     return this.decimalsCache.get(mint) ?? 0;
   }
 
+  /** Token decimals for MANY mints in one batched pass (≤100 per getMultipleAccounts, cached). The
+   *  realized-PnL engine needs every traded mint's decimals; fetching them one-by-one cost ~1 RPC per
+   *  mint (~1600 on a cold wallet). This batches them via the shared `decimalsFor` so a cold pass is
+   *  ~ceil(mints/100) calls and a warm one is 0. Missing mints default to 0 (same as `decimalsOf`). */
+  async decimalsOfMany(mints: string[]): Promise<Map<string, number>> {
+    await this.decimalsFor(mints.map((m) => new PublicKey(m)));
+    return new Map(mints.map((m) => [m, this.decimalsCache.get(m) ?? 0]));
+  }
+
   /** Per-bin liquidity distribution of one open position (for the Price-Bin histogram). */
   positionBins(positionAddress: string): Promise<PositionBins | null> {
     return fetchPositionBins(this.conn, (m) => this.decimalsOf(m), positionAddress);

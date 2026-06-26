@@ -117,7 +117,7 @@ export class RealizedPnlEngine {
     private readonly positions: RealizedPositionSource,
     private readonly swaps: RealizedSwapSource,
     private readonly prices: PriceGateway,
-    private readonly decimalsOf: (mint: string) => Promise<number>,
+    private readonly decimalsOfMany: (mints: string[]) => Promise<Map<string, number>>,
     private readonly logger: Logger,
   ) {}
 
@@ -223,9 +223,10 @@ export class RealizedPnlEngine {
       }
     }
 
-    // 3. Token decimals (decimalsOf is cached upstream).
-    const decMap = new Map<string, number>();
-    for (const mint of mints) decMap.set(mint, await this.decimalsOf(mint));
+    // 3. Token decimals — fetched in ONE batched pass (≤100 mints per getMultipleAccounts), NOT one RPC
+    //    per mint. The per-mint loop cost ~1 getMultipleAccounts × the wallet's mint count (~1600 cold) —
+    //    the residual spend the live validation caught. Decimals are immutable + cached, so re-runs ≈ 0.
+    const decMap = await this.decimalsOfMany([...mints]);
     const dec = (mint: string) => decMap.get(mint) ?? 9;
 
     // 4. Buys + sells from the PERSISTED swap_flows table (no Enhanced API, no re-page) — completeness

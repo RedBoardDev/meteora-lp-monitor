@@ -1,4 +1,4 @@
-import type { Connection } from '@solana/web3.js';
+import { type Connection, PublicKey } from '@solana/web3.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { RawRpc } from './gpa-v2';
 import { OnchainDlmmGateway } from './onchain-gateway';
@@ -78,5 +78,28 @@ describe('OnchainDlmmGateway — decimals cache', () => {
     // Now the real value is cached: a third read serves from memory, no extra RPC.
     expect(await g.decimalsOf(OWNER)).toBe(6);
     expect(calls).toBe(2);
+  });
+
+  it('decimalsOfMany batches the fetch — ≤100 mints per getMultipleAccounts, NOT one RPC per mint', async () => {
+    // WHY (regression): the realized-PnL pass needs every traded mint's decimals; fetching them one-by-one
+    // cost ~1 getMultipleAccounts × ~1600 mints on a cold wallet — the residual spend the live validation
+    // caught. Batched by 100, a cold pass is ceil(mints/100) calls and a warm one is 0.
+    const data = new Uint8Array(82);
+    data[44] = 6; // SPL Mint decimals @ offset 44
+    let calls = 0;
+    const conn = {
+      async getMultipleAccountsInfo(keys: unknown[]) {
+        calls++;
+        return (keys as unknown[]).map(() => ({ data }));
+      },
+    } as unknown as Connection;
+    const g = new OnchainDlmmGateway(conn);
+    const mints = Array.from({ length: 250 }, () => PublicKey.unique().toBase58());
+
+    const out = await g.decimalsOfMany(mints);
+
+    expect(calls).toBe(3); // 250 mints / 100 per chunk = 3 calls, NOT 250
+    expect(out.size).toBe(250);
+    expect(out.get(mints[0]!)).toBe(6);
   });
 });

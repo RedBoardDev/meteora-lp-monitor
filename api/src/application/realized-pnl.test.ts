@@ -112,8 +112,15 @@ async function makeEngine(opts: {
     getPricesSol: async () => opts.prices ?? new Map<string, number>(),
     getSolUsd: async () => null,
   } as unknown as PriceGateway;
-  // decimals 0 → human == raw, keeps the hand math exact.
-  const engine = new RealizedPnlEngine(legSource, posSource, repo, prices, async () => 0, noopLogger);
+  // decimals 0 → human == raw, keeps the hand math exact. Batched fetch (one call for all mints).
+  const engine = new RealizedPnlEngine(
+    legSource,
+    posSource,
+    repo,
+    prices,
+    async (mints: string[]) => new Map<string, number>(mints.map((m) => [m, 0])),
+    noopLogger,
+  );
   return { engine, repo };
 }
 

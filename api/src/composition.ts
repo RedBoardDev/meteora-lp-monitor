@@ -199,7 +199,7 @@ export function compose(config: AppConfig): App {
     positionRepo,
     swapFlowRepo,
     prices,
-    (mint) => onchain.decimalsOf(mint),
+    (mints) => onchain.decimalsOfMany(mints),
     logger,
   );
   // Wallet PnL curve — the TRUE realized SOL over time from on-chain cash-flow (captures rug/slippage
