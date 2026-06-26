@@ -417,25 +417,6 @@ export class RealizedPnlEngine {
       return (lamportsPerRaw * 10 ** dec(m.mint)) / LAMPORTS_PER_SOL;
     };
 
-    // Current market price (SOL per human token) of the held bags, via the shared price gateway (Jupiter).
-    const heldMints = [
-      ...new Set(
-        [...leftoverByMint]
-          .filter(([, lots]) => lots.some((l) => l.origin && l.qty > EPS))
-          .map(([mint]) => mint),
-      ),
-    ];
-    const curPrices =
-      heldMints.length > 0 ? await this.prices.getPricesSol(heldMints) : new Map<string, number>();
-    this.logger.info(
-      {
-        wallet,
-        heldMints: heldMints.length,
-        priced: [...curPrices.values()].filter((v) => v > 0).length,
-      },
-      'realized-pnl: current prices fetched',
-    );
-
     const now = Date.now();
     for (const [mint, lots] of leftoverByMint) {
       for (const lot of lots) {
@@ -449,8 +430,12 @@ export class RealizedPnlEngine {
           const localP = priceNearClose(mint, m.closedAt ?? now);
           markPerTok = Math.max(0, Math.min(localP, binTok));
         } else {
-          const cp = curPrices.get(mint);
-          markPerTok = cp != null ? Math.min(cp, binTok) : binTok;
+          // FRESH close: mark the residual at its CLOSE-bin price (binTok = the on-chain price where the
+          // position closed) — mark-to-market-at-close, the model LPAgent shows. The PREVIOUS code capped
+          // this at the CURRENT market price, so a token that DIED after close was marked ~0 → a spurious
+          // full -deposit loss (SOLANGELES showed -13 where LPAgent shows 0.00). The later residual sells
+          // are wallet-level trading, not this position's close PnL.
+          markPerTok = binTok;
         }
         accOf(lot.origin).heldValue += lot.qty * markPerTok;
       }

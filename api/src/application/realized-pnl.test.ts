@@ -160,31 +160,33 @@ describe('RealizedPnlEngine — chained FIFO cost-basis (persisted swap_flows)',
     expect((out!.get('P1') ?? 0) + (out!.get('P2') ?? 0)).toBeCloseTo(-2 + (20 - 10), 9);
   });
 
-  it('marks a still-held residual at min(current price, close-bin) and only reports closed positions', async () => {
+  it('marks a FRESH still-held residual at the CLOSE-bin price, NOT the current market price (died-token regression)', async () => {
+    // WHY (regression): a token that DIED after close has a current price ~0. The OLD code marked the held
+    // residual at min(currentPrice, close-bin) → ~0 → a spurious full -deposit loss (SOLANGELES showed -13
+    // where LPAgent shows 0.00). Mark-to-market-AT-CLOSE (LPAgent's model) uses the CLOSE-bin price and
+    // ignores the current price entirely; the later residual sells are wallet-level trading, not this close.
     // P2 locks bought tokens (no SOL side), withdraws them, never sells → a still-held bag. The buy cost
-    // and the withdraw credit cancel WITHIN P2 (it was basis-neutral); only the held mark remains.
-    //  buy 100 @0.1 → lot{100,0.1,null}
-    //  P2 deposit 100, 0 SOL → solLeg 0, entryCost 10 (consumes the buy lot)
-    //  P2 withdraw 100, 0 SOL → solLeg 0, exitCredit 10, lot{100,0.1,P2}  (held)
-    // bin price = 1, solSide Y, decimals 0 → bin mark per token = (1 × 10^0)/1e9 = 1e-9 SOL.
-    // current price (gateway) = 5e-9 SOL → min(5e-9, 1e-9) = 1e-9 → heldValue = 100 × 1e-9 = 1e-7.
-    // PnL(P2) = 0 − 10 + 10 + 0 + 1e-7 = 1e-7
+    // and the withdraw credit cancel WITHIN P2 (basis-neutral); only the held mark remains.
+    //  buy 100 @0.1 → lot{100,0.1,null}; P2 deposit 100,0 → entryCost 10; P2 withdraw 100,0 → exitCredit 10, held lot{100,0.1,P2}
+    // bin price = 1, solSide Y, decimals 0 → close-bin mark = (1 × 10^0)/1e9 = 1e-9 SOL/token.
+    // current price = 1e-10 (token DIED, BELOW the bin): OLD min(1e-10,1e-9)=1e-10 → held 1e-8 → PnL 1e-8.
+    //   NEW: ignore current, mark at the close-bin 1e-9 → held = 100 × 1e-9 = 1e-7 → PnL(P2) = 0−10+10+1e-7 = 1e-7.
     const legs = [leg('P2', 'deposit', 100, 0, 1000), leg('P2', 'withdraw', 100, 0, 2000)];
     const status = new Map([
-      ['P2', { status: 'closed', closedAt: Date.now() - 1000 }], // fresh (<7d) → current-price branch
+      ['P2', { status: 'closed', closedAt: Date.now() - 1000 }], // fresh (<7d) → close-bin mark, no current price
     ]);
     const { engine } = await makeEngine({
       legs,
       status,
       buys: [{ ts: 500, mint: MINT, tokenAmount: 100, solReceived: 10 }],
       sells: [],
-      prices: new Map([[MINT, 5e-9]]), // above the bin → capped at the bin mark
+      prices: new Map([[MINT, 1e-10]]), // token died: current << close-bin → MUST be ignored for the mark
     });
 
     const out = await engine.computeForWallet(WALLET);
     expect(out).not.toBeNull();
     expect(out!.size).toBe(1);
-    expect(out!.get('P2')).toBeCloseTo(1e-7, 12);
+    expect(out!.get('P2')).toBeCloseTo(1e-7, 12); // close-bin mark (1e-9), NOT the current 1e-10
   });
 
   it('returns null (skip persist) when the swap_flow cursor is incomplete (seed unfinished)', async () => {
