@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { CREDIT_COST, type CreditFlushRow, CreditMeter, wsCredits } from './credit-meter';
 
-/** A meter on a mutable clock so every time-based rule (rolling window, UTC-day) is deterministic. */
-function meterAt(start: number, thresholds?: ConstructorParameters<typeof CreditMeter>[1]) {
+/** A meter on a mutable clock so the time-based flush day-bucket is deterministic. */
+function meterAt(start: number) {
   const clock = { now: start };
-  const meter = new CreditMeter(() => clock.now, thresholds);
+  const meter = new CreditMeter(() => clock.now);
   return { meter, clock };
 }
 
@@ -55,8 +55,8 @@ describe('CreditMeter — credit accounting', () => {
     expect(meter.stats().byCodePath).toEqual({ snapshot: 10, ingest: 1, unknown: 1 });
   });
 
-  // WHY: per-wallet credit sums power both the daily-budget anomaly and the kill-switch; a record with
-  // no wallet must NOT pollute byWallet (it's not attributable to any tenant).
+  // WHY: per-wallet credit sums power the by-wallet breakdown on /debug/rpc; a record with no wallet
+  // must NOT pollute byWallet (it's not attributable to any tenant).
   it('sums credits per wallet only when a wallet is given', () => {
     const { meter } = meterAt(0);
     meter.record('enhancedTx', { wallet: 'A' }); // 100
@@ -105,76 +105,6 @@ describe('CreditMeter — anomalies', () => {
     expect(meter.anomalies().some((a) => a.kind === 'legacy-gpa')).toBe(false);
     meter.record('getProgramAccounts');
     expect(meter.anomalies().some((a) => a.kind === 'legacy-gpa')).toBe(true);
-  });
-
-  // WHY: the per-minute alarm must fire strictly ABOVE the threshold (not at it), and must clear as the
-  // 60s window rolls — it's a rate signal, not a cumulative one.
-  it('credits-per-min-over fires above the threshold and clears as the window rolls', () => {
-    const { meter, clock } = meterAt(1_000, { alarmCreditsPerMin: 50 });
-    meter.record('das'); // +10 → 10
-    meter.record('das'); // 20
-    meter.record('das'); // 30
-    meter.record('das'); // 40
-    meter.record('das'); // 50 — AT threshold, not over
-    expect(meter.anomalies().some((a) => a.kind === 'credits-per-min-over')).toBe(false);
-    meter.record('getAccountInfo'); // 51 — now over
-    expect(meter.anomalies().some((a) => a.kind === 'credits-per-min-over')).toBe(true);
-    clock.now += 60_001; // roll the 60s window past every recorded credit
-    expect(meter.anomalies().some((a) => a.kind === 'credits-per-min-over')).toBe(false);
-  });
-
-  // WHY: a single runaway wallet is the failure mode from the incident; its day-sum crossing budget must
-  // flag THAT wallet (and only over-budget wallets).
-  it('wallet-daily-budget flags the over-budget wallet only', () => {
-    const { meter } = meterAt(0, { walletDailyBudget: 150 });
-    meter.record('enhancedTx', { wallet: 'A' }); // 100
-    meter.record('enhancedTx', { wallet: 'A' }); // 200 — over 150
-    meter.record('enhancedTx', { wallet: 'B' }); // 100 — under
-    const flagged = meter.anomalies().filter((a) => a.kind === 'wallet-daily-budget');
-    expect(flagged.length).toBe(1);
-    expect(flagged[0]!.detail).toContain('A');
-  });
-});
-
-describe('CreditMeter — kill-switch', () => {
-  // WHY: the global breaker halts ALL recurring RPC when a credit burst breaches the hard ceiling, then
-  // releases once the rolling window drains — otherwise a runaway never recovers without a restart.
-  it('blocks globally above the ceiling and releases as the window rolls', () => {
-    const { meter, clock } = meterAt(1_000, { globalKillCreditsPerMin: 50 });
-    expect(meter.shouldBlock()).toBe(false);
-    meter.record('enhancedTx'); // 100 > 50
-    expect(meter.shouldBlock()).toBe(true);
-    clock.now += 60_001; // window rolls → credits age out
-    expect(meter.shouldBlock()).toBe(false);
-  });
-
-  // WHY: a per-wallet budget breach must block only that wallet's calls; an under-budget wallet and the
-  // global (no-wallet) check stay open, so one noisy tenant can't halt everyone.
-  it('blocks the over-budget wallet without blocking others or the global check', () => {
-    const { meter } = meterAt(0, { walletDailyBudget: 150, globalKillCreditsPerMin: 1_000_000 });
-    meter.record('enhancedTx', { wallet: 'A' }); // 100
-    meter.record('enhancedTx', { wallet: 'A' }); // 200 — over 150
-    meter.record('enhancedTx', { wallet: 'B' }); // 100 — under
-    expect(meter.shouldBlock('A')).toBe(true);
-    expect(meter.shouldBlock('B')).toBe(false);
-    expect(meter.shouldBlock()).toBe(false); // global budget not breached
-  });
-});
-
-describe('CreditMeter — blocked marker', () => {
-  // WHY: a kill-switch-blocked call was NEVER issued, so it must add 0 credits (not pollute the budget)
-  // yet still appear in the live feed as a counted, failed, blocked entry.
-  it('records a blocked call as 0 credits but a counted, flagged ring entry', () => {
-    const { meter } = meterAt(0);
-    meter.record('getAccountInfo'); // 1 real credit
-    meter.recordBlocked('getProgramAccounts', { codePath: 'snapshot', wallet: 'A' });
-    const s = meter.stats();
-    expect(s.totalCredits).toBe(1); // blocked call added nothing
-    expect(s.totalCalls).toBe(2); // but it was counted
-    const last = s.ringTail.at(-1)!;
-    expect(last.blocked).toBe(true);
-    expect(last.credits).toBe(0);
-    expect(last.ok).toBe(false);
   });
 });
 
@@ -225,13 +155,5 @@ describe('CreditMeter — drainForFlush (DB rollup buffer)', () => {
         .map((r) => r.day)
         .sort(),
     ).toEqual([0, 1]);
-  });
-
-  // WHY: a kill-switch-blocked call was never ISSUED (0 credits), so it must NOT enter the spend rollup
-  // — only real, billed calls belong in rpc_credit_daily (blocked calls live in the live feed only).
-  it('excludes blocked calls from the flush buffer', () => {
-    const { meter } = meterAt(0);
-    meter.recordBlocked('getProgramAccounts', { wallet: 'A', codePath: 'snapshot' });
-    expect(meter.drainForFlush()).toEqual([]);
   });
 });

@@ -38,14 +38,6 @@ const EnvSchema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
 
-  // Credit kill-switch / anomaly thresholds (CreditMeter) — env-overridable so a deploy can cap spend
-  // HARD: a tiny CREDIT_WALLET_DAILY_BUDGET halts a runaway (e.g. a one-time SWAP seed) at a few Enhanced
-  // pages, which is exactly the safety net for validating near-zero behavior on a low remaining budget.
-  // Defaults sit above legitimate steady-state, far below the incident burst (see the Helius credit model).
-  CREDIT_ALARM_PER_MIN: z.coerce.number().int().nonnegative().default(2000),
-  CREDIT_GLOBAL_KILL_PER_MIN: z.coerce.number().int().nonnegative().default(10_000),
-  CREDIT_WALLET_DAILY_BUDGET: z.coerce.number().int().nonnegative().default(5_000),
-
   SOLANA_WS_URL: z.string().url(),
   SOLANA_HTTP_URL: z.string().url().optional(),
 

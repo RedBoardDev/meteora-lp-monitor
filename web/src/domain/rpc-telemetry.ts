@@ -10,8 +10,7 @@ const MS_PER_DAY = 86_400_000;
 
 export type RpcSeverity = 'low' | 'medium' | 'high';
 
-/** One recorded call from the meter's bounded ring (the live feed). `credits === 0 && blocked` ⇒ a
- *  kill-switch-skipped call that was never issued. */
+/** One recorded call from the meter's bounded ring (the live feed). */
 export interface RpcRingEntry {
   at: number;
   method: string;
@@ -19,7 +18,6 @@ export interface RpcRingEntry {
   wallet: string | null;
   credits: number;
   ok: boolean;
-  blocked?: boolean;
 }
 
 /** Cumulative credit ledger (since the API process booted) + the recent live tail. */
@@ -33,7 +31,7 @@ export interface RpcCreditStats {
 }
 
 export interface RpcAnomaly {
-  kind: 'enhanced-used' | 'legacy-gpa' | 'credits-per-min-over' | 'wallet-daily-budget';
+  kind: 'enhanced-used' | 'legacy-gpa';
   detail: string;
   severity: RpcSeverity;
 }
@@ -52,7 +50,6 @@ export interface RpcCreditLedgerRow {
 export interface RpcTelemetry {
   stats: RpcCreditStats;
   anomalies: RpcAnomaly[];
-  killSwitch: { blockingNow: boolean };
   /** Durable per-day spend for the last-7d window — newest day first. Absent if the API omits it. */
   last7d?: RpcCreditLedgerRow[];
 }

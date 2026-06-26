@@ -76,8 +76,8 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     // The Enhanced REST endpoint bypasses the Connection rate-limiter, so it gets its OWN token bucket
     // to coordinate concurrent cold curve requests (different wallets) instead of bursting uncapped.
     enhancedRps = 5,
-    // Shared credit meter (optional). Enhanced calls cost 100 credits each — the meter both records every
-    // attempt and gates them via the per-wallet kill-switch (a runaway re-page is what drained the key).
+    // Shared credit meter (optional). Enhanced calls cost 100 credits each — the meter records every
+    // attempt for the telemetry (a runaway re-page is what drained the key, so it stays fully visible).
     private readonly meter?: CreditMeter,
   ) {
     this.bucket = new TokenBucket(enhancedRps, enhancedRps);
@@ -463,12 +463,6 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     page: number,
     tag: EnhancedCallTag,
   ): Promise<EnhancedTx[] | null> {
-    // Per-wallet kill-switch: if this wallet (or the global budget) is already over budget, treat the
-    // page like an auth failure — return null (incomplete) rather than spam more 100-credit calls.
-    if (this.meter?.shouldBlock(wallet)) {
-      this.logger.warn({ wallet, page }, 'enhanced API blocked by credit kill-switch — INCOMPLETE');
-      return null;
-    }
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await this.bucket.acquire();

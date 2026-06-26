@@ -29,8 +29,7 @@ import {
   Stat,
 } from '@/presentation/ui';
 
-/** Poll cadence for /debug/rpc — the meter's rolling window is 60s, so a few seconds keeps the live
- *  feed/kill-switch fresh without hammering the BFF. */
+/** Poll cadence for /debug/rpc — a few seconds keeps the live feed fresh without hammering the BFF. */
 const POLL_MS = 5_000;
 
 /** Bar fill colour by credit weight — banned (red) and heavy (amber) make a costly call pop instantly. */
@@ -155,8 +154,6 @@ function RpcPanel() {
 
   return (
     <div className="flex flex-col gap-4">
-      {data.killSwitch.blockingNow && <KillSwitchBanner />}
-
       <Card className="p-5">
         <div className="grid grid-cols-2 gap-5 sm:grid-cols-4">
           <Stat
@@ -190,23 +187,6 @@ function RpcPanel() {
       {hasRollup && <TrendCard rows={data.last7d ?? []} />}
 
       <LiveFeedCard entries={data.stats.ringTail} />
-    </div>
-  );
-}
-
-function KillSwitchBanner() {
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-loss/40 bg-loss/12 px-5 py-4">
-      <span className="size-2 shrink-0 animate-pulse rounded-full bg-loss" />
-      <div>
-        <p className="font-semibold text-loss text-sm">
-          Kill-switch engaged — RPC calls are halting
-        </p>
-        <p className="text-muted text-xs">
-          The rolling 60s credit rate breached the hard breaker; recurring calls are being skipped
-          to protect the key budget.
-        </p>
-      </div>
     </div>
   );
 }
@@ -393,15 +373,14 @@ function LiveFeedCard({ entries }: { entries: RpcRingEntry[] }) {
 }
 
 function StatusBadge({ entry }: { entry: RpcRingEntry }) {
-  if (entry.blocked) return <Badge tone="loss">blocked</Badge>;
   if (entry.ok) return <Badge tone="profit">ok</Badge>;
   return <Badge tone="warn">err</Badge>;
 }
 
 function FeedRow({ entry }: { entry: RpcRingEntry }) {
   const weight = methodWeight(entry.method);
-  // A blocked (kill-switch-skipped) or banned-method call is the thing to spot — wash the whole row red.
-  const flagged = entry.blocked || weight === 'banned';
+  // A banned-method call (100-credit Enhanced) is the thing to spot — wash the whole row red.
+  const flagged = weight === 'banned';
   return (
     <tr className={cn('border-border/60 border-b last:border-0', flagged && 'bg-loss/8')}>
       <td className="tabular px-4 py-2 text-faint text-xs">

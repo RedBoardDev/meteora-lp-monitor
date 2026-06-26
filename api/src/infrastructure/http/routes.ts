@@ -148,14 +148,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     };
   });
 
-  // RPC credit telemetry: the in-memory ledger (totals + by method/codePath/wallet + live tail), the
-  // pure anomaly signals, and whether the kill-switch is currently halting calls (owner only).
+  // RPC credit telemetry: the in-memory ledger (totals + by method/codePath/wallet + live tail) and the
+  // pure structural anomaly signals (owner only).
   app.get('/debug/rpc', async (req, reply) => {
     if (!requireOwner(req, reply)) return;
     return {
       stats: meter.stats(),
       anomalies: meter.anomalies(),
-      killSwitch: { blockingNow: meter.shouldBlock() },
       // Durable spend history (per day/method/wallet/codePath) from the rollup — survives restarts.
       last7d: await creditLedger.since(DEBUG_RPC_HISTORY_DAYS),
     };
