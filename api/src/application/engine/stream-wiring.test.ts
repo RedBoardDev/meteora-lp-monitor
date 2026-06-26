@@ -112,6 +112,15 @@ function makeEngine() {
   // Spied so a test can assert the Enhanced cash-flow/swap top-up is GATED (skipped when nothing new landed).
   const walletFlowIngest = { ingest: vi.fn(async () => {}) };
   const swapFlowIngest = { ingest: vi.fn(async () => {}) };
+  // Returns a minimal snapshot whose `.plan` doSnapshot caches — lets a test assert the discovery gate:
+  // a real new-tx activity must FORCE a re-discovery (snapshotWallet called with NO cached plan).
+  const snapshotWallet = vi.fn(async () => ({
+    positions: [],
+    nativeLamports: 0,
+    idleTokens: [],
+    slot: 1,
+    plan: { positionKeys: [] },
+  }));
   // Legacy logsSubscribe backbone — its watch MUST stay untouched in onchain mode (we assert this).
   const subscriberWatch = vi.fn();
 
@@ -144,10 +153,7 @@ function makeEngine() {
     } as unknown as EngineDeps['subscriber'],
     stream,
     onchain: {
-      // Throws so doSnapshot takes its caught failure branch — we only need the ingest spy, not a valuation.
-      snapshotWallet: vi.fn(async () => {
-        throw new Error('no snapshot in wiring test');
-      }),
+      snapshotWallet,
       positionBins: vi.fn(),
       positionHistory: vi.fn(),
       decimalsOf: vi.fn(),
@@ -167,7 +173,10 @@ function makeEngine() {
     logger,
     appConfig,
     dlmmIngest: dlmmIngest as unknown as EngineDeps['dlmmIngest'],
-    positionSync: { sync: vi.fn(), refreshOpen: vi.fn() } as unknown as EngineDeps['positionSync'],
+    positionSync: {
+      sync: vi.fn(async () => ({ open: 0, closed: 0, closedRows: [], openPositions: [] })),
+      refreshOpen: vi.fn(async () => []),
+    } as unknown as EngineDeps['positionSync'],
     walletFlowIngest: walletFlowIngest as unknown as EngineDeps['walletFlowIngest'],
     swapFlowIngest: swapFlowIngest as unknown as EngineDeps['swapFlowIngest'],
     realizedPnl: { computeForWallet: vi.fn() } as unknown as EngineDeps['realizedPnl'],
@@ -180,6 +189,7 @@ function makeEngine() {
     dlmmIngest,
     walletFlowIngest,
     swapFlowIngest,
+    snapshotWallet,
     setNextTxs: (n: number) => {
       nextTxs = n;
     },
@@ -220,6 +230,7 @@ async function startSettled(h: ReturnType<typeof makeEngine>) {
   h.dlmmIngest.ingest.mockClear();
   h.walletFlowIngest.ingest.mockClear();
   h.swapFlowIngest.ingest.mockClear();
+  h.snapshotWallet.mockClear();
 }
 
 beforeEach(() => vi.useFakeTimers());
@@ -292,6 +303,28 @@ describe('Step 5b: TransactionStream is wired as the on-chain trigger', () => {
     await vi.advanceTimersByTimeAsync(1_500);
     expect(h.walletFlowIngest.ingest).toHaveBeenCalledWith(WALLET);
     expect(h.swapFlowIngest.ingest).toHaveBeenCalledWith(WALLET);
+
+    h.engine.stop();
+  });
+
+  it('a real new-tx WS activity FORCES a re-discovery — newly-opened positions are actually found', async () => {
+    // WHY (regression): the open-detection bug. The legacy logsSubscribe path set needsDiscovery on every
+    // open/add/remove, so the next snapshot re-ran getProgramAccountsV2 and FOUND the new position. The
+    // transactionStream path lost that — discovery then only ran on the 10-min SAFETY_REDISCOVER_MS, so a
+    // freshly-OPENED position never surfaced (open:0 for every wallet, regardless of duration). After boot
+    // caches a snapshot plan, a real new-tx activity MUST snapshot with NO cached plan (rediscover) — if it
+    // reuses the cached plan, discovery is skipped and the open is never found: the regression is back.
+    const h = makeEngine();
+    await startSettled(h); // boot runs a discovery and caches a snapshot plan
+    h.snapshotWallet.mockClear();
+
+    h.setNextTxs(1); // a real open/add/remove landed in the delta
+    h.transport().emit(notification('sigOpen', 3_000, WALLET));
+    await h.stream.idle();
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    // Re-discovery forced: snapshotWallet called with an UNDEFINED plan (not the cached one) → gPAv2 re-runs.
+    expect(h.snapshotWallet).toHaveBeenCalledWith(WALLET, undefined);
 
     h.engine.stop();
   });

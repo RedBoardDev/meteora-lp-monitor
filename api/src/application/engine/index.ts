@@ -687,7 +687,15 @@ export class Engine {
       // Only force a full reproject when the delta actually ingested new txs (a real open/close/add/
       // claim). A delta sync that finds nothing (e.g. a gap-backfill recovery) must NOT re-write the whole
       // closed history — that was a recurring 15k-row write per wallet. doSnapshot still refreshes net-worth.
-      if (r.txs > 0) rt.needsSync = true;
+      if (r.txs > 0) {
+        rt.needsSync = true;
+        // New legs landed → the position SET may have changed (a real OPEN/add/remove). Force the next
+        // snapshot to re-run discovery (getProgramAccountsV2, 1 credit) so a newly-OPENED position is
+        // actually FOUND. The legacy logsSubscribe path set this in onWsActivity; the transactionStream
+        // path lost it, so opens stayed undiscovered until the 10-min SAFETY_REDISCOVER_MS fallback — they
+        // never surfaced (the open-detection regression). Covers the WS, reconnect-resync and gap paths.
+        rt.needsDiscovery = true;
+      }
       await this.doSnapshot(rt);
     } catch (err) {
       this.logger.warn(
