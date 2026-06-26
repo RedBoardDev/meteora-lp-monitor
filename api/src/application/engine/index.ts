@@ -1,10 +1,4 @@
-import {
-  type OpenPosition,
-  type PositionBins,
-  type PositionHistory,
-  WALLET_BALANCE_REFRESH_MS,
-  type WalletState,
-} from '@binsight/shared';
+import type { OpenPosition, PositionBins, PositionHistory, WalletState } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
@@ -13,7 +7,8 @@ import type { RealizedPnlEngine } from '@/application/realized-pnl';
 import type { SwapFlowIngest } from '@/application/swap-flow-ingest';
 import type { WalletFlowIngest } from '@/application/wallet-flow-ingest';
 import type { AppConfig } from '@/config/env';
-import { classifyInstruction } from '@/domain/dlmm';
+import { classifyInstruction, type OnchainWalletSnapshot } from '@/domain/dlmm';
+import { liveMarkWallet } from '@/domain/live-mark';
 import type {
   AccountRepository,
   ConfigRepository,
@@ -37,6 +32,11 @@ import { clamp, shouldRefreshRealized } from './utils';
 
 const INITIAL_LAG_MS = 1500;
 const RETRY_DELAYS_MS = [2000, 2500];
+// Shared price-mark cadence: ONE engine-wide timer re-marks every VIEWED wallet's OPEN positions from
+// cached on-chain data + the live Jupiter price (zero RPC). Replaces the blind per-wallet 30s
+// WALLET_BALANCE_REFRESH_MS getMultipleAccounts snapshot. Above the 5s Jupiter price-cache TTL so each
+// tick reflects a freshly fetched price; idle/un-viewed wallets are skipped → they cost 0 recurring RPC.
+const PRICE_MARK_INTERVAL_MS = 10_000;
 const CLOSED_RESYNC_MS = 90_000;
 const STRATEGY_BACKFILL_MS = 60_000;
 // Safety net: re-run snapshot discovery at least this often even with no WS activity, so a silently
@@ -86,6 +86,10 @@ export class Engine {
   private readonly refresher: PositionRefresher;
   private readonly reconciler: Reconciler;
   private tick: NodeJS.Timeout | null = null;
+  // Shared price-mark timer (one for the whole engine) + a single-flight guard so two ticks never overlap
+  // the Jupiter fetch. The value-on-demand replacement for the deleted per-wallet 30s snapshot timer.
+  private priceTick: NodeJS.Timeout | null = null;
+  private priceMarking = false;
   private effectiveRps = 0;
   private lastBackfillAt = 0;
   // Serializes all ingests for one wallet (backfill + WS deltas + gap-backfill recoveries) so two never
@@ -93,8 +97,9 @@ export class Engine {
   private readonly ingestLock = new KeyedSerializer();
   // Global concurrent-backfill cap (onboarding admission control); sized to the RPC tier via config.
   private readonly backfillSemaphore: Semaphore;
-  // Wallets a client is currently viewing (maintained by the WS layer). The recurring net-worth
-  // snapshot only runs for viewed wallets (+ notify-enabled ones) so idle wallets cost no RPC.
+  // Wallets a client is currently viewing (maintained by the WS layer). Drives `isWalletActive`, which
+  // gates the shared price-mark tick (with notify-enabled wallets) so an idle wallet costs no recurring
+  // work; a 0→1 viewer transition also triggers one refresh-on-connect EXACT read.
   private viewedWallets = new Set<string>();
   // Per-wallet guard so the chained-FIFO realized-PnL pass (persisted swap_flows + price gateway) never
   // runs twice concurrently for the same wallet — it fires async off the close-notification, not the loop.
@@ -184,6 +189,9 @@ export class Engine {
     }
 
     this.tick = setInterval(() => this.onTick(), 1000);
+    // Value-on-demand: a SINGLE shared timer re-marks viewed wallets off the live price (zero RPC),
+    // instead of the per-wallet getMultipleAccounts snapshot we just removed from onTick.
+    this.priceTick = setInterval(() => void this.runPriceMark(), PRICE_MARK_INTERVAL_MS);
   }
 
   private get onchainSource(): boolean {
@@ -192,6 +200,7 @@ export class Engine {
 
   stop(): void {
     if (this.tick) clearInterval(this.tick);
+    if (this.priceTick) clearInterval(this.priceTick);
     (this.onchainSource ? this.stream : this.subscriber).stop();
   }
 
@@ -281,12 +290,11 @@ export class Engine {
 
       if (!this.onchainSource && !rt.refreshing && Date.now() - rt.lastPollAt >= interval)
         void this.doRefresh(rt, 'poll');
-      if (
-        !rt.snapshotting &&
-        this.isWalletActive(rt.address) &&
-        Date.now() - rt.lastSnapshotAt >= WALLET_BALANCE_REFRESH_MS
-      )
-        void this.doSnapshot(rt);
+      // The blind per-wallet WALLET_BALANCE_REFRESH_MS getMultipleAccounts snapshot is GONE: an EXACT
+      // on-chain read now fires only on a real event (WS position-set change, viewer-connect, detail
+      // view), and a VIEWED wallet's live value/range is kept current by the shared price-mark timer
+      // (runPriceMark) off cached data — zero RPC. So an idle wallet (no viewer, no activity) issues no
+      // recurring RPC at all.
       if (!this.onchainSource && Date.now() - rt.lastClosedSyncAt >= CLOSED_RESYNC_MS)
         void this.reconciler.resyncClosed(rt);
       // No unconditional on-chain delta-ingest here anymore: the deleted BACKSTOP_INGEST_MS fleet timer is
@@ -392,6 +400,9 @@ export class Engine {
         rediscover ? undefined : (rt.snapshotPlan ?? undefined),
       );
       rt.snapshotPlan = snap.plan;
+      // Cache the raw snapshot so the shared price-mark tick can re-price it (live Jupiter price, zero RPC)
+      // for a viewed wallet between exact reads. Persistence still uses the EXACT `valued` below.
+      rt.lastSnapshot = snap;
       this.health.record('rpc', true);
       this.health.setChainTip(snap.slot);
       const priceMap = await this.prices.getPricesSol(mintsNeedingPrice(snap));
@@ -468,6 +479,45 @@ export class Engine {
       );
     } finally {
       rt.snapshotting = false;
+    }
+  }
+
+  /**
+   * Shared price-mark tick — the value-on-demand replacement for the deleted 30s per-wallet snapshot.
+   * Re-marks every ACTIVE wallet's (viewed OR notify-enabled — the same `isWalletActive` gate the old
+   * recurring snapshot used) OPEN positions from its CACHED on-chain snapshot + ONE shared Jupiter price
+   * fetch (free — not a Helius RPC), so it touches NO getMultipleAccounts/getAccountInfo. The result is
+   * the APPROXIMATE live mark (token amounts held fixed, re-priced): `liveMarkWallet` flags it
+   * `complete: false` so `emitMarked` surfaces freshness!=='fresh' and the NetworthRecorder never persists
+   * it — only an EXACT on-chain read is authoritative. Idle wallets (no viewer, no notify rule) are
+   * skipped → they contribute ZERO recurring cost. Single-flight so two ticks never overlap the fetch.
+   */
+  private async runPriceMark(): Promise<void> {
+    if (this.priceMarking) return;
+    const targets: { rt: WalletRuntime; snap: OnchainWalletSnapshot }[] = [];
+    for (const rt of this.wallets.values()) {
+      // Same gate as the old recurring snapshot: a wallet a client is viewing OR one with an enabled
+      // notify rule. An idle wallet (no viewer, no notify rule) is skipped → it contributes nothing.
+      if (!this.isWalletActive(rt.address)) continue;
+      const snap = rt.lastSnapshot;
+      if (!snap || snap.positions.length === 0) continue; // nothing open → nothing to re-mark
+      targets.push({ rt, snap });
+    }
+    if (targets.length === 0) return; // no viewer with open positions → no Jupiter call, no emission
+    this.priceMarking = true;
+    try {
+      // ONE shared price fetch covering every viewed wallet's mints (CachedPriceGateway dedups + caches).
+      const mints = new Set<string>();
+      for (const { snap } of targets) for (const m of mintsNeedingPrice(snap)) mints.add(m);
+      const priceMap = await this.prices.getPricesSol([...mints]);
+      for (const { rt, snap } of targets) {
+        const { valued, open } = liveMarkWallet(snap, [...rt.open.values()], priceMap);
+        this.emitter.emitMarked(rt.address, open, valued);
+      }
+    } catch (err) {
+      this.logger.warn({ err }, 'price-mark tick failed — keeping last emitted state');
+    } finally {
+      this.priceMarking = false;
     }
   }
 
@@ -587,7 +637,10 @@ export class Engine {
     try {
       await this.ingestLock.run(address, () => this.swapFlowIngest.ingest(address));
     } catch (err) {
-      this.logger.warn({ err, address }, 'swap flow ingest failed — realized PnL may lag, will retry');
+      this.logger.warn(
+        { err, address },
+        'swap flow ingest failed — realized PnL may lag, will retry',
+      );
     }
   }
 
@@ -629,7 +682,10 @@ export class Engine {
       if (r.txs > 0) rt.needsSync = true;
       await this.doSnapshot(rt);
     } catch (err) {
-      this.logger.warn({ err, address }, 'onchain delta sync failed (next stream activity will retry)');
+      this.logger.warn(
+        { err, address },
+        'onchain delta sync failed (next stream activity will retry)',
+      );
     }
     // Delta-ingest the wallet's cash-flow too — captures post-close SWAP dumps the DLMM ingest can't
     // see. Outside the try above so it runs even if the leg sync threw; isolated and cheap (1 page).

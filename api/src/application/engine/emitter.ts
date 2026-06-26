@@ -44,6 +44,14 @@ export class StateEmitter {
     this.bus.emit('state', buildWalletState(address, [...rt.open.values()], rt.onchain));
   }
 
+  /** Emit a wallet state built from EXPLICIT positions + valuation — the APPROXIMATE price-mark (the
+   *  value-on-demand replacement for the 30s snapshot). `valued.complete` is false so it surfaces as
+   *  freshness!=='fresh' and the NetworthRecorder skips it: DISPLAY-ONLY, never persisted as net worth. */
+  emitMarked(address: string, positions: OpenPosition[], valued: OnchainValued): void {
+    if (!this.wallets.has(address)) return;
+    this.bus.emit('state', buildWalletState(address, positions, valued));
+  }
+
   emitHealth(effectiveRps: number): void {
     const wsOk = this.subscriber.isConnected();
     this.health.set('ws', wsOk ? 'ok' : 'down', wsOk ? undefined : 'disconnected');
