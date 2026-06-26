@@ -76,7 +76,11 @@ export function compose(config: AppConfig): App {
   const health = new HealthMonitor();
   // ONE shared credit meter wired into every billable chokepoint (both RPC lanes, the Enhanced REST
   // gateway, the DAS metadata gateway) — the single in-memory ledger behind /debug/rpc + the kill-switch.
-  const meter = new CreditMeter();
+  const meter = new CreditMeter(undefined, {
+    alarmCreditsPerMin: config.CREDIT_ALARM_PER_MIN,
+    globalKillCreditsPerMin: config.CREDIT_GLOBAL_KILL_PER_MIN,
+    walletDailyBudget: config.CREDIT_WALLET_DAILY_BUDGET,
+  });
   const gateway = new MeteoraGateway(logger);
   // Resource-keyed (per-mint) price cache + single-flight + token bucket: N wallets/snapshots
   // needing the same token in one window collapse to ONE Jupiter call (cross-user dedup).
