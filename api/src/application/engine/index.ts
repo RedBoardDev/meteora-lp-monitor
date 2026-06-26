@@ -10,6 +10,7 @@ import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
 import type { PositionSync } from '@/application/position-sync-service';
 import type { RealizedPnlEngine } from '@/application/realized-pnl';
+import type { SwapFlowIngest } from '@/application/swap-flow-ingest';
 import type { WalletFlowIngest } from '@/application/wallet-flow-ingest';
 import type { AppConfig } from '@/config/env';
 import { classifyInstruction } from '@/domain/dlmm';
@@ -72,6 +73,7 @@ export interface EngineDeps {
   dlmmIngest: DlmmIngest;
   positionSync: PositionSync;
   walletFlowIngest: WalletFlowIngest;
+  swapFlowIngest: SwapFlowIngest;
   realizedPnl: RealizedPnlEngine;
 }
 
@@ -112,6 +114,7 @@ export class Engine {
   private readonly dlmmIngest: DlmmIngest;
   private readonly positionSync: PositionSync;
   private readonly walletFlowIngest: WalletFlowIngest;
+  private readonly swapFlowIngest: SwapFlowIngest;
   private readonly realizedPnl: RealizedPnlEngine;
 
   constructor(deps: EngineDeps) {
@@ -131,6 +134,7 @@ export class Engine {
     this.dlmmIngest = deps.dlmmIngest;
     this.positionSync = deps.positionSync;
     this.walletFlowIngest = deps.walletFlowIngest;
+    this.swapFlowIngest = deps.swapFlowIngest;
     this.realizedPnl = deps.realizedPnl;
     this.emitter = new StateEmitter(this.wallets, subscriber, bus, this.health);
     this.refresher = new PositionRefresher(
@@ -538,12 +542,20 @@ export class Engine {
     });
   }
 
-  /** Top up a wallet's persisted cash-flow (powers the wallet PnL curve). Never throws into callers. */
+  /** Top up a wallet's persisted cash-flow (wallet PnL curve) AND its decoded swap legs (realized-PnL
+   *  FIFO inputs) on the same trigger/cadence. Each ingest is isolated so one failing never blocks the
+   *  other or the positions path; the swap top-up is what keeps a restart/close from re-paging the whole
+   *  Enhanced SWAP history. Never throws into callers. */
   private async ingestWalletFlows(address: string): Promise<void> {
     try {
       await this.ingestLock.run(address, () => this.walletFlowIngest.ingest(address));
     } catch (err) {
       this.logger.warn({ err, address }, 'wallet flow ingest failed — curve may lag, will retry');
+    }
+    try {
+      await this.ingestLock.run(address, () => this.swapFlowIngest.ingest(address));
+    } catch (err) {
+      this.logger.warn({ err, address }, 'swap flow ingest failed — realized PnL may lag, will retry');
     }
   }
 

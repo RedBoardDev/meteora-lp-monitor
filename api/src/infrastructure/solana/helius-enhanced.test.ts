@@ -1,6 +1,7 @@
 import { SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { SwapFlowRow } from '@/domain/dlmm';
 import {
   accumulatePositionFlow,
   type EnhancedTx,
@@ -247,5 +248,78 @@ describe('HeliusEnhancedGateway — Enhanced API call telemetry (stats)', () => 
 
     await gw.fetchBuys(W, 0);
     expect(gw.stats()).toMatchObject({ total: 2, buys: 2, sells: 0 });
+  });
+});
+
+describe('HeliusEnhancedGateway.pageSwaps — incremental SWAP-leg persistence (mirror of pageFlows)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const sellTx = (signature: string) => ({
+    timestamp: 100,
+    signature,
+    type: 'SWAP',
+    tokenTransfers: [tt(TOK, W, 'pool', 1000), tt(SOL_MINT, 'pool', W, 9)], // token out, WSOL in
+  });
+  const buyTx = (signature: string) => ({
+    timestamp: 100,
+    signature,
+    type: 'SWAP',
+    tokenTransfers: [tt(SOL_MINT, W, 'pool', 9), tt(TOK, 'pool', W, 1000)], // WSOL out, token in
+  });
+
+  // WHY: a backfill must decode EVERY clean leg via the proven parsers (one sell, one buy), persist each
+  // page through onPage, and report the raw-tx boundaries the cursor advances on — exactly like pageFlows.
+  it('decodes a sell + a buy, persists per page, returns boundaries, tags pageSwaps', async () => {
+    const gw = new HeliusEnhancedGateway('https://rpc.test/?api-key=k', silentLogger);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [sellTx('s-sell'), buyTx('s-buy')] })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] }); // empty page = genesis
+    vi.stubGlobal('fetch', fetchMock);
+
+    const persisted: SwapFlowRow[] = [];
+    const res = await gw.pageSwaps(W, {
+      onPage: async (rows) => {
+        persisted.push(...rows);
+      },
+    });
+
+    expect(persisted).toEqual([
+      { wallet: W, signature: 's-sell', ts: 100, mint: TOK, tokenAmount: 1000, solAmount: 9, side: 'sell' },
+      { wallet: W, signature: 's-buy', ts: 100, mint: TOK, tokenAmount: 1000, solAmount: 9, side: 'buy' },
+    ]);
+    // newest = first raw tx, oldest = last raw tx of the page (NOT a leg's) — the stop boundary is a tx sig.
+    expect(res).toEqual({
+      added: 2,
+      complete: true,
+      hitKnownTop: false,
+      newestSig: 's-sell',
+      oldestSig: 's-buy',
+    });
+    // the URL must filter to SWAP only and the cost attributes to the pageSwaps call-site.
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('type=SWAP');
+    expect(gw.stats()).toMatchObject({ pageSwaps: 2, pageFlows: 0 });
+  });
+
+  // WHY: a top-up MUST stop at the previously-ingested top signature (hitKnownTop) and page no further —
+  // this is the incremental contract that keeps a restart from re-paging the whole SWAP history.
+  it('top-up stops at untilSig (hitKnownTop) and does not page past it', async () => {
+    const gw = new HeliusEnhancedGateway('https://rpc.test/?api-key=k', silentLogger);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [sellTx('fresh'), sellTx('known-top')] });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const persisted: SwapFlowRow[] = [];
+    const res = await gw.pageSwaps(W, {
+      untilSig: 'known-top',
+      onPage: async (rows) => {
+        persisted.push(...rows);
+      },
+    });
+
+    expect(persisted.map((r) => r.signature)).toEqual(['fresh']);
+    expect(res).toMatchObject({ added: 1, hitKnownTop: true, complete: false, newestSig: 'fresh' });
+    expect(fetchMock).toHaveBeenCalledTimes(1); // stopped at the known top → no further page
   });
 });

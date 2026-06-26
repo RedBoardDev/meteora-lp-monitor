@@ -1,7 +1,7 @@
 import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import { classifyTradingByType, type WalletTxFlow } from '@/domain/cashflow';
-import type { ResidualSell, WalletFlowRow } from '@/domain/dlmm';
+import type { ResidualSell, SwapFlowRow, WalletFlowRow } from '@/domain/dlmm';
 import { LAMPORTS_PER_SOL } from '@/domain/dlmm-pnl';
 import type { EnhancedTxGateway } from '@/domain/ports';
 import { TokenBucket } from '@/util/cache';
@@ -48,6 +48,7 @@ export interface EnhancedCallCounts {
   buys: number;
   walletFlows: number;
   pageFlows: number;
+  pageSwaps: number;
   reconstruct: number;
 }
 /** Call site that issued an Enhanced page request — used to attribute RPC cost in the telemetry. */
@@ -100,6 +101,7 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     buys: 0,
     walletFlows: 0,
     pageFlows: 0,
+    pageSwaps: 0,
     reconstruct: 0,
   };
 
@@ -358,6 +360,99 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
       this.logger.warn({ wallet, maxPages: this.maxPages }, 'pageFlows hit maxPages — INCOMPLETE');
     }
     this.logger.info({ wallet, added, complete, hitKnownTop }, 'enhanced: wallet flows paged');
+    return { added, complete, hitKnownTop, newestSig, oldestSig };
+  }
+
+  /**
+   * Page a wallet's SWAP tx stream (`?type=SWAP`) for PERSISTENCE of the realized-PnL FIFO inputs — the
+   * EXACT same incremental machinery as {@link pageFlows} (newest → genesis, INTER_PAGE_MS, retries,
+   * maxPages guard, `untilSig` top-up stop with `hitKnownTop`, `startBefore` resume), but each tx is
+   * decoded into clean buy/sell legs instead of a net cash-flow. A tx is run through BOTH parsers:
+   *  - parseSwapSell → a token→SOL leg (side 'sell', solAmount = SOL received);
+   *  - parseSwapBuy  → a SOL→token leg (side 'buy',  solAmount = SOL spent).
+   * A clean SWAP matches at most one of them, so a tx yields 0 or 1 legs (a hypothetical both-sided tx
+   * upserts cleanly — the leg PK includes the mint). Each page is handed to `onPage` for incremental
+   * persistence; `newestSig`/`oldestSig` track the raw tx boundaries (the top-up stop is a tx signature,
+   * NOT a leg's — identical to pageFlows — so a top SWAP tx that decodes to no clean leg still bounds the
+   * cursor). `added` counts the legs actually decoded (a no-clean-leg page can still advance the cursor).
+   */
+  async pageSwaps(
+    wallet: string,
+    opts: {
+      untilSig?: string | null;
+      startBefore?: string | null;
+      onPage: (rows: SwapFlowRow[]) => Promise<void>;
+    },
+  ): Promise<{
+    added: number;
+    complete: boolean;
+    hitKnownTop: boolean;
+    newestSig: string | null;
+    oldestSig: string | null;
+  }> {
+    if (!this.apiKey)
+      return { added: 0, complete: false, hitKnownTop: false, newestSig: null, oldestSig: null };
+    const stopSig = opts.untilSig ?? null;
+    let added = 0;
+    let before: string | undefined = opts.startBefore ?? undefined;
+    let newestSig: string | null = null;
+    let oldestSig: string | null = opts.startBefore ?? null;
+    let complete = false;
+    let hitKnownTop = false;
+    let page = 0;
+    for (; page < this.maxPages; page++) {
+      const url =
+        `https://api.helius.xyz/v0/addresses/${wallet}/transactions` +
+        `?api-key=${this.apiKey}&type=SWAP&limit=${PAGE_SIZE}${before ? `&before=${before}` : ''}`;
+      const txs = await this.fetchPageWithRetry(url, wallet, page, 'pageSwaps');
+      if (txs == null) break; // retries exhausted → incomplete; keep what we have, cursor won't advance
+      if (txs.length === 0) {
+        complete = true; // genesis (full) or nothing new (top-up)
+        break;
+      }
+      if (newestSig === null) newestSig = txs[0]!.signature;
+      const pageRows: SwapFlowRow[] = [];
+      for (const tx of txs) {
+        if (stopSig && tx.signature === stopSig) {
+          hitKnownTop = true;
+          break;
+        }
+        const sell = parseSwapSell(tx, wallet);
+        if (sell)
+          pageRows.push({
+            wallet,
+            signature: tx.signature,
+            ts: sell.ts,
+            mint: sell.mint,
+            tokenAmount: sell.tokenAmount,
+            solAmount: sell.solReceived, // SOL received for the sell
+            side: 'sell',
+          });
+        const buy = parseSwapBuy(tx, wallet);
+        if (buy)
+          pageRows.push({
+            wallet,
+            signature: tx.signature,
+            ts: buy.ts,
+            mint: buy.mint,
+            tokenAmount: buy.tokenAmount,
+            solAmount: buy.solReceived, // = SOL spent on the buy (parseSwapBuy returns it as solReceived)
+            side: 'buy',
+          });
+      }
+      await opts.onPage(pageRows);
+      added += pageRows.length;
+      oldestSig = txs[txs.length - 1]!.signature;
+      before = oldestSig;
+      if (hitKnownTop) break; // reached previously-ingested top → caught up
+      // Same as pageFlows: a SHORT page (< PAGE_SIZE) is NOT genesis on the Enhanced API — only a truly
+      // EMPTY page is. Stopping on a short page would silently drop the older swap tail.
+      if (INTER_PAGE_MS) await new Promise((r) => setTimeout(r, INTER_PAGE_MS));
+    }
+    if (page >= this.maxPages && !complete) {
+      this.logger.warn({ wallet, maxPages: this.maxPages }, 'pageSwaps hit maxPages — INCOMPLETE');
+    }
+    this.logger.info({ wallet, added, complete, hitKnownTop }, 'enhanced: swap flows paged');
     return { added, complete, hitKnownTop, newestSig, oldestSig };
   }
 

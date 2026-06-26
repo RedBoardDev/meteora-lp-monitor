@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { FlowCursor, SwapFlowRow, SwapSide } from '@/domain/dlmm';
+import type { SwapFlowRepository as SwapFlowRepositoryPort } from '@/domain/ports';
 import type { Database } from './database';
 import { swapFlowCursor, swapFlows } from './schema';
 
@@ -13,7 +14,7 @@ const INSERT_CHUNK = 1000;
  * a restart costs ~0 credits; rows are immutable and the upsert is idempotent on (wallet, signature,
  * mint), which is what makes re-ingesting a tx a safe no-op.
  */
-export class SwapFlowRepository {
+export class SwapFlowRepository implements SwapFlowRepositoryPort {
   constructor(private readonly db: Database) {}
 
   /** Idempotently store decoded swap legs. PK (wallet, signature, mint) ⇒ re-ingesting a tx is a no-op

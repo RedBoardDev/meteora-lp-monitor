@@ -12,6 +12,7 @@ import { PositionSync } from './application/position-sync-service';
 import { RealizedPnlEngine } from './application/realized-pnl';
 import { ResidualBackfill } from './application/residual-backfill';
 import { flowFromHistory } from './application/residual-realized';
+import { SwapFlowIngest } from './application/swap-flow-ingest';
 import { WalletFlowIngest } from './application/wallet-flow-ingest';
 import { WalletPnlService } from './application/wallet-pnl-service';
 import type { AppConfig } from './config/env';
@@ -32,6 +33,7 @@ import { NetworthSnapshotRepository } from './infrastructure/persistence/networt
 import { PostgresPositionRepository } from './infrastructure/persistence/position-repository';
 import { PushRepository } from './infrastructure/persistence/push-repository';
 import { RpcCreditLedgerRepository } from './infrastructure/persistence/rpc-credit-ledger-repository';
+import { SwapFlowRepository } from './infrastructure/persistence/swap-flow-repository';
 import { WalletFlowRepository } from './infrastructure/persistence/wallet-flow-repository';
 import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { DlmmIngest } from './infrastructure/solana/dlmm/dlmm-ingest';
@@ -157,6 +159,11 @@ export function compose(config: AppConfig): App {
   // PnL curve is served by SQL instead of re-paging the chain per request.
   const walletFlowRepo = new WalletFlowRepository(db);
   const walletFlowIngest = new WalletFlowIngest(enhanced, walletFlowRepo, logger);
+  // Persisted decoded SWAP legs (realized-PnL FIFO inputs): seeded once at backfill + topped up on the
+  // SAME cadence as the wallet cash-flow, so a restart/close reads them from the DB instead of re-paging
+  // the whole Enhanced SWAP history (the incident this kills).
+  const swapFlowRepo = new SwapFlowRepository(db);
+  const swapFlowIngest = new SwapFlowIngest(enhanced, swapFlowRepo, logger);
   // Exact per-position SOL leg + net residual from the decoded DLMM event history (LPAgent-grade:
   // per-position amounts, not the wallet's aggregate native flow which over-counts multi-position opens).
   const positionFlow = async (address: string) => {
@@ -217,6 +224,7 @@ export function compose(config: AppConfig): App {
     dlmmIngest,
     positionSync,
     walletFlowIngest,
+    swapFlowIngest,
     realizedPnl,
   });
   const notifications = new NotificationManager(bus, configRepo, presence, bark, webPush, logger);

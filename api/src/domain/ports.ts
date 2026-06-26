@@ -21,6 +21,7 @@ import type {
   ResidualSell,
   SnapshotPlan,
   StoredLeg,
+  SwapFlowRow,
   WalletFlowRow,
 } from '@/domain/dlmm';
 
@@ -290,6 +291,17 @@ export interface WalletFlowRepository {
   allCursorsComplete(wallets: string[]): Promise<boolean>;
 }
 
+/** Persists the decoded swap legs that feed the realized-PnL FIFO walk (immutable legs + ingest cursor),
+ *  so a restart/close reads them from the DB instead of re-paging the Enhanced SWAP history. */
+export interface SwapFlowRepository {
+  /** Idempotently store decoded swap legs (PK wallet,signature,mint) — re-ingesting a tx is a no-op. */
+  upsertMany(rows: SwapFlowRow[]): Promise<void>;
+  /** All persisted swap legs for a wallet, oldest→newest — the order the FIFO walk consumes them. */
+  byWallet(wallet: string): Promise<SwapFlowRow[]>;
+  getCursor(wallet: string): Promise<FlowCursor | null>;
+  setCursor(wallet: string, cursor: FlowCursor): Promise<void>;
+}
+
 /** 100%-on-chain DLMM wallet snapshot + per-position bins/history reader (Solana RPC). */
 /** A presence signal the notification manager reads (is any client actively viewing right now?). */
 export interface PresenceReader {
@@ -340,6 +352,23 @@ export interface EnhancedTxGateway {
       untilSig?: string | null;
       startBefore?: string | null;
       onPage: (flows: WalletFlowRow[]) => Promise<void>;
+    },
+  ): Promise<{
+    added: number;
+    complete: boolean;
+    /** top-up only: the run reached the previously-ingested top signature (no gap left behind). */
+    hitKnownTop: boolean;
+    newestSig: string | null;
+    oldestSig: string | null;
+  }>;
+  /** Same incremental paging as {@link pageFlows} but over `?type=SWAP`, decoding each tx into clean
+   *  buy/sell legs (SwapFlowRow) for the realized-PnL FIFO walk. Same hitKnownTop/cursor semantics. */
+  pageSwaps(
+    wallet: string,
+    opts: {
+      untilSig?: string | null;
+      startBefore?: string | null;
+      onPage: (rows: SwapFlowRow[]) => Promise<void>;
     },
   ): Promise<{
     added: number;
