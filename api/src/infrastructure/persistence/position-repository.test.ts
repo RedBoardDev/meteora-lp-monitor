@@ -127,20 +127,20 @@ describe('PostgresPositionRepository — strategy', () => {
     expect((await read(repo)).strategy).toBe('BidAsk'); // travels onto the closed read
   });
 
-  it('addressesMissingStrategy lists unresolved positions (open ones first) and drops them once set', async () => {
+  it('addressesMissingStrategy returns OPEN positions only — never the closed-history tail (RPC drain guard)', async () => {
     const repo = await newRepo();
+    // WHY open-only: strategy is resolved from the open tx (an expensive getParsedTransaction) while a
+    // position is OPEN, then persisted and travels into closed history. Returning the closed tail here
+    // made the backfill re-page tens of thousands of closed positions' open txs — millions of Helius
+    // credits to label already-closed rows. Closed positions missing strategy must NOT be listed.
     await repo.upsertClosed([
       { ...base, positionAddress: 'M1', pnlSol: 0, pnlSource: 'pool' },
       { ...base, positionAddress: 'M2', pnlSol: 0, pnlSource: 'pool' },
     ]);
-    // An OPEN position missing its strategy must be backfilled too — and prioritised, since it drives
-    // the live card/badge. (Regression guard: the query used to be closed-only.)
     await repo.replaceOpenForWallet('w', [{ ...openBase, positionAddress: 'O1' }]);
-    const missing = await repo.addressesMissingStrategy(10);
-    expect(missing[0]).toBe('O1'); // open first
-    expect(missing.slice(1).sort()).toEqual(['M1', 'M2']);
+    expect(await repo.addressesMissingStrategy(10)).toEqual(['O1']); // open only — M1/M2 (closed) excluded
     await repo.setStrategy('O1', 'Spot');
-    expect((await repo.addressesMissingStrategy(10)).sort()).toEqual(['M1', 'M2']);
+    expect(await repo.addressesMissingStrategy(10)).toEqual([]); // nothing open left to resolve
   });
 });
 

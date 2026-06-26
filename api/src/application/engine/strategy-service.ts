@@ -37,9 +37,12 @@ export class StrategyService {
   }
 
   /**
-   * Resolve strategy for any position still missing it — OPEN ones first (so the live card/badge gets
-   * its Spot/Curve/BidAsk tag even when the burst one-shot live resolution lost to RPC limits), then
-   * the closed-history tail. Bounded per run and paced so it never hammers the RPC; safe on a schedule.
+   * Resolve strategy for OPEN positions still missing it (the repo now returns open-only) — so the live
+   * card/badge gets its Spot/Curve/BidAsk tag even when the burst one-shot live resolution lost to RPC
+   * limits. Closed positions are NOT bulk-backfilled: re-paging tens of thousands of closed positions'
+   * open txs (getParsedTransaction) burned millions of credits for a label on already-closed rows. A
+   * position resolved while open keeps its strategy into closed history; old closed rows show no badge.
+   * Bounded per run and paced so it never hammers the RPC; safe on a schedule.
    */
   async backfill(maxPerRun = 60): Promise<void> {
     if (this.backfilling) return;
