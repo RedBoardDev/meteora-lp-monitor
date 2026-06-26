@@ -61,4 +61,22 @@ describe('SolanaRpcRateLimiter', () => {
     // A regular call must fire AFTER the last real fire (1200), not collide at 1200.
     expect(lim.reserveSlot('getBalance')).toBe(1300);
   });
+
+  it('stats() breaks calls down by exact method — telemetry to find the credit-heavy call', () => {
+    const lim = new SolanaRpcRateLimiter(limits, () => 0);
+    lim.reserveSlot('getParsedTransaction');
+    lim.reserveSlot('getParsedTransaction');
+    lim.reserveSlot('getMultipleAccounts');
+    lim.reserveSlot('getProgramAccounts');
+    lim.reserveSlot(undefined);
+    const s = lim.stats();
+    expect(s.total).toBe(5);
+    expect(s.byMethod).toEqual({
+      getParsedTransaction: 2,
+      getMultipleAccounts: 1,
+      getProgramAccounts: 1,
+      unknown: 1,
+    });
+    expect(s.gpa).toBe(1); // coarse class buckets still tracked alongside the per-method split
+  });
 });
