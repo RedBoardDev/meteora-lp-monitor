@@ -105,8 +105,13 @@ function makeEngine() {
     config: { pingIntervalMs: 1e9, gapCheckIntervalMs: 1e9 },
   });
 
-  // The single assertion target: triggerOnchainSync delta-ingests via dlmmIngest.ingest(wallet).
-  const dlmmIngest = { ingest: vi.fn(async () => ({ legs: 0, txs: 0, complete: true })) };
+  // The single assertion target: triggerOnchainSync delta-ingests via dlmmIngest.ingest(wallet). `nextTxs`
+  // lets a test choose how many NEW txs the delta reports — the signal the Enhanced top-up gate keys off.
+  let nextTxs = 0;
+  const dlmmIngest = { ingest: vi.fn(async () => ({ legs: 0, txs: nextTxs, complete: true })) };
+  // Spied so a test can assert the Enhanced cash-flow/swap top-up is GATED (skipped when nothing new landed).
+  const walletFlowIngest = { ingest: vi.fn(async () => {}) };
+  const swapFlowIngest = { ingest: vi.fn(async () => {}) };
   // Legacy logsSubscribe backbone — its watch MUST stay untouched in onchain mode (we assert this).
   const subscriberWatch = vi.fn();
 
@@ -163,13 +168,24 @@ function makeEngine() {
     appConfig,
     dlmmIngest: dlmmIngest as unknown as EngineDeps['dlmmIngest'],
     positionSync: { sync: vi.fn(), refreshOpen: vi.fn() } as unknown as EngineDeps['positionSync'],
-    walletFlowIngest: { ingest: noopAsync } as unknown as EngineDeps['walletFlowIngest'],
-    swapFlowIngest: { ingest: noopAsync } as unknown as EngineDeps['swapFlowIngest'],
+    walletFlowIngest: walletFlowIngest as unknown as EngineDeps['walletFlowIngest'],
+    swapFlowIngest: swapFlowIngest as unknown as EngineDeps['swapFlowIngest'],
     realizedPnl: { computeForWallet: vi.fn() } as unknown as EngineDeps['realizedPnl'],
   };
 
   const engine = new Engine(deps);
-  return { engine, stream, dlmmIngest, subscriberWatch, transport: () => transports.at(-1)! };
+  return {
+    engine,
+    stream,
+    dlmmIngest,
+    walletFlowIngest,
+    swapFlowIngest,
+    setNextTxs: (n: number) => {
+      nextTxs = n;
+    },
+    subscriberWatch,
+    transport: () => transports.at(-1)!,
+  };
 }
 
 /** Build a transactionNotification (jsonParsed accountKeys = `{ pubkey }[]`) touching `wallet` + DLMM. */
@@ -202,6 +218,8 @@ async function startSettled(h: ReturnType<typeof makeEngine>) {
   await h.stream.idle();
   await vi.advanceTimersByTimeAsync(2_000); // drain backfill + the on-connect resync + one engine tick
   h.dlmmIngest.ingest.mockClear();
+  h.walletFlowIngest.ingest.mockClear();
+  h.swapFlowIngest.ingest.mockClear();
 }
 
 beforeEach(() => vi.useFakeTimers());
@@ -245,6 +263,35 @@ describe('Step 5b: TransactionStream is wired as the on-chain trigger', () => {
     await vi.advanceTimersByTimeAsync(301_000);
 
     expect(h.dlmmIngest.ingest).not.toHaveBeenCalled();
+
+    h.engine.stop();
+  });
+
+  it('the Enhanced cash-flow/swap top-up is GATED on new signatures — an empty resync spends ZERO Enhanced', async () => {
+    // WHY: each ingestWalletFlows call pages the Helius Enhanced API at 100 credits/page EVEN when nothing
+    // is new. A flapping WS fires triggerOnchainSync on every reconnect; ungated this burned ~200cr per
+    // EMPTY resync (measured live: 34 of 44 pages found added:0 → ~3,400cr wasted/hour, budget gone in ~3h).
+    // The gate must SKIP the top-up when the DLMM delta ingested no new txs, and still RUN it on real
+    // activity. The DlmmIngest pages every wallet sig, so a non-DLMM Jupiter sell still makes txs>0 (no miss).
+    const h = makeEngine();
+    await startSettled(h);
+
+    // Empty activity: the delta finds nothing new (txs:0) → the Enhanced top-up MUST be skipped entirely.
+    h.setNextTxs(0);
+    h.transport().emit(notification('sigNoop', 1_000, WALLET));
+    await h.stream.idle();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(h.dlmmIngest.ingest).toHaveBeenCalledTimes(1); // the cheap delta still runs…
+    expect(h.walletFlowIngest.ingest).not.toHaveBeenCalled(); // …but the 100cr Enhanced pages do NOT
+    expect(h.swapFlowIngest.ingest).not.toHaveBeenCalled();
+
+    // Real activity: the delta ingests a new tx (txs:1) → the top-up MUST run to capture post-close dumps.
+    h.setNextTxs(1);
+    h.transport().emit(notification('sigReal', 2_000, WALLET));
+    await h.stream.idle();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(h.walletFlowIngest.ingest).toHaveBeenCalledWith(WALLET);
+    expect(h.swapFlowIngest.ingest).toHaveBeenCalledWith(WALLET);
 
     h.engine.stop();
   });

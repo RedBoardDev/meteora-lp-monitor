@@ -600,15 +600,18 @@ export class Engine {
   private onchainBackfill(rt: WalletRuntime): Promise<void> {
     // Admission control: at most MAX_CONCURRENT_BACKFILLS wallets backfill at once.
     return this.backfillSemaphore.run(async () => {
+      // Default 1 so a thrown backfill still falls back to the cash-flow top-up; a success overwrites it.
+      let newTxs = 1;
       try {
         rt.lastIngestAt = Date.now();
-        await this.ingestLock.run(rt.address, () =>
+        const r = await this.ingestLock.run(rt.address, () =>
           this.dlmmIngest.ingest(rt.address, {
             onProgress: (txs) => {
               rt.ingestedTxs = txs; // surfaced as the UI's "indexing… (N txs)" onboarding progress
             },
           }),
         );
+        newTxs = r.txs;
         rt.needsSync = true;
         await this.doSnapshot(rt); // full reproject; emits closed_changed iff the closed count moved
         this.logger.info({ address: rt.address }, 'onchain backfill complete');
@@ -619,8 +622,9 @@ export class Engine {
         );
       }
       // Cash-flow backfill for the wallet PnL curve — best-effort & isolated so a flow failure never
-      // blocks the positions path; still inside the backfill semaphore so onboarding stays rate-bounded.
-      await this.ingestWalletFlows(rt.address);
+      // blocks the positions path. GATED on new signatures: a restart that finds nothing new since the
+      // cursor skips the Enhanced paging (100cr/page) entirely (a fresh wallet's full backfill has txs>0).
+      if (newTxs > 0) await this.ingestWalletFlows(rt.address);
     });
   }
 
@@ -673,9 +677,13 @@ export class Engine {
   private async triggerOnchainSync(address: string): Promise<void> {
     const rt = this.wallets.get(address);
     if (!rt) return;
+    // Default 1 (= "run the cash-flow top-up") so a THROWN leg sync still falls back to it; a SUCCESSFUL
+    // sync overwrites this with the real new-tx count, which gates the (Enhanced, 100cr/page) top-up below.
+    let newTxs = 1;
     try {
       rt.lastIngestAt = Date.now();
       const r = await this.ingestLock.run(address, () => this.dlmmIngest.ingest(address));
+      newTxs = r.txs;
       // Only force a full reproject when the delta actually ingested new txs (a real open/close/add/
       // claim). A delta sync that finds nothing (e.g. a gap-backfill recovery) must NOT re-write the whole
       // closed history — that was a recurring 15k-row write per wallet. doSnapshot still refreshes net-worth.
@@ -687,9 +695,11 @@ export class Engine {
         'onchain delta sync failed (next stream activity will retry)',
       );
     }
-    // Delta-ingest the wallet's cash-flow too — captures post-close SWAP dumps the DLMM ingest can't
-    // see. Outside the try above so it runs even if the leg sync threw; isolated and cheap (1 page).
-    await this.ingestWalletFlows(address);
+    // Cash-flow + swap top-up — captures post-close SWAP dumps the DLMM ingest can't see. GATED on new
+    // signatures: the DlmmIngest already paged EVERY wallet sig (a non-DLMM Jupiter sell makes newTxs>0
+    // too), so when nothing new landed there is nothing to top up — skip the Enhanced paging that a no-op
+    // WS reconnect / gap-resync would otherwise burn (the dominant idle cost: ~200cr per empty resync).
+    if (newTxs > 0) await this.ingestWalletFlows(address);
   }
 
   /** WS reconnect / manual refresh: a staggered safety delta-ingest of every wallet to self-heal gaps. */
