@@ -460,6 +460,10 @@ export class Engine {
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
   private async runRealizedPnl(wallet: string, opts: { incremental?: boolean } = {}): Promise<void> {
+    // Master switch: when disabled, NO buys/sells fetch ever runs — no cold-cache full re-page on a
+    // restart, no per-close re-page. Closed positions keep their persisted market_pnl_sol; new closes
+    // fall back to the pool mark. This is what keeps RPC ≈ 0 and lets the engine scale to many wallets.
+    if (!this.appConfig.REALIZED_PNL_ENABLED) return;
     if (this.realizedPnlRunning.has(wallet)) {
       this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
       return;
