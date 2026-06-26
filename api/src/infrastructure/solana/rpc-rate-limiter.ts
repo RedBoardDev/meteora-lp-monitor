@@ -1,5 +1,7 @@
 import type { FetchMiddleware } from '@solana/web3.js';
 import { sleep } from '@/util/sleep';
+import { currentCodePath } from './code-path';
+import type { CreditMeter } from './credit-meter';
 
 /**
  * Evenly-spaced slot reserver. `reserve()` hands out the next instant a call may run and advances
@@ -89,6 +91,9 @@ export class SolanaRpcRateLimiter {
   constructor(
     limits: SolanaRpcLimits,
     private readonly now: () => number = () => Date.now(),
+    // Shared credit meter (optional so the unit tests construct the limiter bare). When present, every
+    // gated method is recorded with its active code path, and the middleware honors the kill-switch.
+    private readonly meter?: CreditMeter,
   ) {
     this.overall = new Spacer(limits.rps, now);
     this.gpa = new Spacer(limits.gpaRps, now);
@@ -104,6 +109,8 @@ export class SolanaRpcRateLimiter {
     this.callCounts.total++;
     const m = method ?? 'unknown';
     this.byMethod[m] = (this.byMethod[m] ?? 0) + 1;
+    // Credit attribution: every gated JSON-RPC call costs its method's credits on the active code path.
+    this.meter?.record(m, { codePath: currentCodePath() });
     if (sub === this.gpa) this.callCounts.gpa++;
     else if (sub === this.das) this.callCounts.das++;
     else if (sub === this.send) this.callCounts.send++;
@@ -140,6 +147,18 @@ export class SolanaRpcRateLimiter {
   /** web3.js fetch middleware: read the JSON-RPC method, gate on its limits, then let it proceed. */
   middleware(): FetchMiddleware {
     return (info, init, fetch) => {
+      // Kill-switch: when the global rolling budget is breached, skip the network call entirely — but
+      // STILL settle web3.js's promise (an already-aborted signal rejects the fetch locally, with no
+      // request issued and so no credits spent), so the caller surfaces an RPC error instead of hanging.
+      if (this.meter?.shouldBlock()) {
+        this.meter.recordBlocked(rpcMethodOf(init?.body) ?? 'unknown', {
+          codePath: currentCodePath(),
+        });
+        const aborter = new AbortController();
+        aborter.abort();
+        fetch(info, { ...init, signal: aborter.signal });
+        return;
+      }
       // Proceed with the fetch whether the gate resolves OR rejects (a sleep/abort must never strand
       // the request — web3.js would then hang forever waiting on a promise that never settles).
       void this.gate(rpcMethodOf(init?.body)).then(

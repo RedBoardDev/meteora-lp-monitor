@@ -8,6 +8,7 @@ import type {
   PositionRepository,
   PriceGateway,
 } from '@/domain/ports';
+import { withCodePath } from '@/infrastructure/solana/code-path';
 
 /**
  * Per-position realized PnL via a CHAINED FIFO COST-BASIS engine — 100% on-chain (no Meteora datapi).
@@ -206,6 +207,15 @@ export class RealizedPnlEngine {
    * inflated ones). Both legs matter: missing buys lose cost basis, missing sells leave residual unsold.
    */
   async computeForWallet(
+    wallet: string,
+    opts: { incremental?: boolean } = {},
+  ): Promise<Map<string, number> | null> {
+    // Realized path: tag so the decimals/price RPC issued underneath is attributed to 'realized'
+    // (the Enhanced buy/sell calls self-tag 'enhanced' at their own chokepoint).
+    return withCodePath('realized', () => this.computeForWalletInner(wallet, opts));
+  }
+
+  private async computeForWalletInner(
     wallet: string,
     opts: { incremental?: boolean } = {},
   ): Promise<Map<string, number> | null> {

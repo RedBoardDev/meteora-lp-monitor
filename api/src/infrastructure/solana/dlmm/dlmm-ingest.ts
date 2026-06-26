@@ -3,6 +3,7 @@ import type { Logger } from 'pino';
 import type { DlmmLeg } from '@/domain/dlmm';
 import type { DlmmIngest as DlmmIngestPort, LegRepository } from '@/domain/ports';
 import { sleep } from '@/util/sleep';
+import { withCodePath } from '../code-path';
 import { decodeDlmmLegs } from './dlmm-event-decoder';
 
 const SIG_PAGE = 1000; // getSignaturesForAddress hard cap
@@ -34,6 +35,14 @@ export class DlmmIngest implements DlmmIngestPort {
   ) {}
 
   async ingest(
+    wallet: string,
+    opts: { onProgress?: (txs: number) => void; maxPages?: number } = {},
+  ): Promise<{ legs: number; txs: number; complete: boolean }> {
+    // Ingest path: tag so the getSignaturesForAddress + getParsedTransactions spend is attributed.
+    return withCodePath('ingest', () => this.ingestInner(wallet, opts));
+  }
+
+  private async ingestInner(
     wallet: string,
     opts: { onProgress?: (txs: number) => void; maxPages?: number } = {},
   ): Promise<{ legs: number; txs: number; complete: boolean }> {

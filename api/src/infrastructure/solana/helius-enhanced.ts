@@ -5,6 +5,7 @@ import type { ResidualSell, WalletFlowRow } from '@/domain/dlmm';
 import { LAMPORTS_PER_SOL } from '@/domain/dlmm-pnl';
 import type { EnhancedTxGateway } from '@/domain/ports';
 import { TokenBucket } from '@/util/cache';
+import type { CreditMeter } from './credit-meter';
 
 export interface EnhancedTx {
   timestamp: number;
@@ -74,6 +75,9 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     // The Enhanced REST endpoint bypasses the Connection rate-limiter, so it gets its OWN token bucket
     // to coordinate concurrent cold curve requests (different wallets) instead of bursting uncapped.
     enhancedRps = 5,
+    // Shared credit meter (optional). Enhanced calls cost 100 credits each — the meter both records every
+    // attempt and gates them via the per-wallet kill-switch (a runaway re-page is what drained the key).
+    private readonly meter?: CreditMeter,
   ) {
     this.bucket = new TokenBucket(enhancedRps, enhancedRps);
     let key: string | null = null;
@@ -364,6 +368,12 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
     page: number,
     tag: EnhancedCallTag,
   ): Promise<EnhancedTx[] | null> {
+    // Per-wallet kill-switch: if this wallet (or the global budget) is already over budget, treat the
+    // page like an auth failure — return null (incomplete) rather than spam more 100-credit calls.
+    if (this.meter?.shouldBlock(wallet)) {
+      this.logger.warn({ wallet, page }, 'enhanced API blocked by credit kill-switch — INCOMPLETE');
+      return null;
+    }
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         await this.bucket.acquire();
@@ -371,6 +381,8 @@ export class HeliusEnhancedGateway implements EnhancedTxGateway {
         // and is retried is two billed requests — the telemetry must reflect real cost, not logical pages.
         this.callCounts.total++;
         this.callCounts[tag]++;
+        // 100 credits per Enhanced request (Helius credit model), attributed to this wallet's spend.
+        this.meter?.record('enhancedTx', { wallet, codePath: 'enhanced' });
         const res = await fetch(url, { headers: { 'User-Agent': 'binsight/1.0' } });
         if (res.ok) return (await res.json()) as EnhancedTx[];
         // Retry EVERY non-200 (Helius intermittently returns 5xx/4xx mid-pagination on deep history);

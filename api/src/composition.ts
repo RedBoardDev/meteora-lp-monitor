@@ -36,6 +36,7 @@ import { DlmmIngest } from './infrastructure/solana/dlmm/dlmm-ingest';
 import { OnchainDlmmGateway } from './infrastructure/solana/dlmm/onchain-gateway';
 import { OnchainPoolMetaReader } from './infrastructure/solana/dlmm/pool-meta';
 import { StrategyResolver } from './infrastructure/solana/dlmm/strategy-resolver';
+import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { HeliusEnhancedGateway } from './infrastructure/solana/helius-enhanced';
 import { HeliusSubscriber } from './infrastructure/solana/helius-subscriber';
 import { SolanaRpcRateLimiter } from './infrastructure/solana/rpc-rate-limiter';
@@ -64,6 +65,9 @@ export function compose(config: AppConfig): App {
 
   const bus = new EventBus();
   const health = new HealthMonitor();
+  // ONE shared credit meter wired into every billable chokepoint (both RPC lanes, the Enhanced REST
+  // gateway, the DAS metadata gateway) — the single in-memory ledger behind /debug/rpc + the kill-switch.
+  const meter = new CreditMeter();
   const gateway = new MeteoraGateway(logger);
   // Resource-keyed (per-mint) price cache + single-flight + token bucket: N wallets/snapshots
   // needing the same token in one window collapse to ONE Jupiter call (cross-user dedup).
@@ -79,12 +83,16 @@ export function compose(config: AppConfig): App {
   const liveFrac = config.SOLANA_LIVE_FRACTION;
   // LIVE lane — the snapshot/valuation path. Reserved share of the overall budget so a history backfill
   // on the other lane can never starve live valuation.
-  const rpcLimiter = new SolanaRpcRateLimiter({
-    rps: config.SOLANA_RPS * RPS_SAFETY * liveFrac,
-    gpaRps: config.SOLANA_GPA_RPS * RPS_SAFETY,
-    dasRps: config.SOLANA_DAS_RPS * RPS_SAFETY,
-    sendRps: config.SOLANA_SEND_RPS * RPS_SAFETY,
-  });
+  const rpcLimiter = new SolanaRpcRateLimiter(
+    {
+      rps: config.SOLANA_RPS * RPS_SAFETY * liveFrac,
+      gpaRps: config.SOLANA_GPA_RPS * RPS_SAFETY,
+      dasRps: config.SOLANA_DAS_RPS * RPS_SAFETY,
+      sendRps: config.SOLANA_SEND_RPS * RPS_SAFETY,
+    },
+    undefined,
+    meter,
+  );
   const connection = new Connection(config.solanaHttpUrl, {
     commitment: 'confirmed',
     fetchMiddleware: rpcLimiter.middleware(),
@@ -97,12 +105,16 @@ export function compose(config: AppConfig): App {
   // method sub-limits are pinned to its overall rate (they never bind); the live lane keeps the FULL
   // per-method plan limits (it's the sole gpa user; das is the token-metadata gateway's own budget).
   const backfillRps = config.SOLANA_RPS * RPS_SAFETY * (1 - liveFrac);
-  const backfillLimiter = new SolanaRpcRateLimiter({
-    rps: backfillRps,
-    gpaRps: backfillRps,
-    dasRps: backfillRps,
-    sendRps: backfillRps,
-  });
+  const backfillLimiter = new SolanaRpcRateLimiter(
+    {
+      rps: backfillRps,
+      gpaRps: backfillRps,
+      dasRps: backfillRps,
+      sendRps: backfillRps,
+    },
+    undefined,
+    meter,
+  );
   const backfillConnection = new Connection(config.solanaHttpUrl, {
     commitment: 'confirmed',
     fetchMiddleware: backfillLimiter.middleware(),
@@ -123,10 +135,12 @@ export function compose(config: AppConfig): App {
     config.solanaHttpUrl,
     logger,
     config.SOLANA_DAS_RPS * RPS_SAFETY,
+    undefined,
+    meter,
   );
   const positionSync = new PositionSync(dlmmPositionPnl, tokenMetadata, positionRepo, logger);
   const strategy = new StrategyService(new StrategyResolver(connection), positionRepo, logger);
-  const enhanced = new HeliusEnhancedGateway(config.solanaHttpUrl, logger);
+  const enhanced = new HeliusEnhancedGateway(config.solanaHttpUrl, logger, undefined, undefined, meter);
   // Free OHLCV candle source (no key) for the position price chart.
   const gecko = new GeckoTerminalGateway(logger);
   // Persisted wallet cash-flow: ingested once at backfill + topped up on the cadence, so the wallet
@@ -221,6 +235,7 @@ export function compose(config: AppConfig): App {
         presence,
         pushRepo,
         gecko,
+        meter,
         vapidPublicKey: config.VAPID_PUBLIC_KEY,
         sendTestPush: (userId) => pushRepo.forUser(userId).then((subs) => webPush.sendTest(subs)),
         openAccess: config.OPEN_ACCESS_MODE,
@@ -236,6 +251,8 @@ export function compose(config: AppConfig): App {
             // Enhanced REST (getEnhancedTransactionsByAddress): billed per request and BYPASSES the
             // JSON-RPC limiter, so it had no counter — this is the line that exposes the real RPC spend.
             enhanced: enhanced.stats(),
+            // The unified CREDIT ledger across every chokepoint (totals + by method/codePath/wallet).
+            credits: meter.stats(),
           },
           'rpc call counts (Helius tier instrumentation)',
         );

@@ -1,6 +1,7 @@
 import type { StrategyFamily } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PositionRepository, StrategyResolver } from '@/domain/ports';
+import { withCodePath } from '@/infrastructure/solana/code-path';
 import { sleep } from '@/util/sleep';
 
 const BACKFILL_PAUSE_MS = 400; // gentle pacing for the historical backfill (~2-3 positions/s of RPC)
@@ -66,7 +67,9 @@ export class StrategyService {
   private async resolve(positionAddress: string): Promise<void> {
     this.attempted.add(positionAddress);
     try {
-      const family = await this.resolver.resolve(positionAddress);
+      // Strategy path: tag the resolver's getSignaturesForAddress + getParsedTransaction spend. Both the
+      // live get() and the bounded backfill() funnel through here, so this one wrap covers both callers.
+      const family = await withCodePath('strategy', () => this.resolver.resolve(positionAddress));
       if (family) {
         this.cache.set(positionAddress, family);
         await this.repo.setStrategy(positionAddress, family);
