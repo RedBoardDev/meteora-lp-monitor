@@ -205,6 +205,15 @@ export const copyJournal = pgTable(
   ],
 )
 
+
+// Copy-bot process heartbeat + status snapshot (one row per process). Each process upserts its row periodically;
+// the web derives online/offline from the freshness of `ts` (see domain/copybot/status.ts) and renders `detail`.
+export const copybotStatus = pgTable('copybot_status', {
+  process: text('process').primaryKey(), // brain | coffre
+  ts: ms('ts').notNull(), // last heartbeat (Date.now)
+  detail: jsonb('detail'), // process-specific snapshot (positions/exposure/latency for brain; signing for coffre)
+})
+
 // Per-pool DLMM metadata (binStep / SOL side / mints), decoded once from the LbPair account. These are
 // immutable on-chain, so caching them here lets the projection skip the per-pool getAccountInfo on every
 // boot — the dominant first-sync RPC cost. `sol_side` is null for a non-SOL-quote pool.

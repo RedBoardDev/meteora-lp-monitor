@@ -42,6 +42,8 @@ import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metada
 import { alert } from '@/copybot/alert';
 import { ConfigStore } from '@/copybot/config-store';
 import { CopyJournalStore } from '@/copybot/journal-store';
+import { HeartbeatStore } from '@/copybot/heartbeat-store';
+import { type BrainStatusDetail, HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
@@ -154,6 +156,13 @@ async function main(): Promise<void> {
     runtimeConfig = mergeConfig(await configStore.load(), ENV_CONFIG_OVERRIDE);
   };
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
+  const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
+  let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
+  let lastLatencyMs: number | null = null; // brainMs of that last action
+  const brainStatus = (): BrainStatusDetail => {
+    const open = registry.openPositions();
+    return { leader: cfg.leader, openPositions: open.length, exposureSol: open.reduce((s, m) => s + m.sizeSol, 0), lastActionAt, lastLatencyMs };
+  };
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
   const snapshotCache = new TtlCache<TokenSnapshot>(SNAPSHOT_TTL_MS);
@@ -723,7 +732,11 @@ async function main(): Promise<void> {
               : null;
     if (act) {
       act
-        .then(() => log.info({ kind, brainMs: Date.now() - t0 }, '🧠 build+publish'))
+        .then(() => {
+          lastActionAt = Date.now();
+          lastLatencyMs = Date.now() - t0;
+          log.info({ kind, brainMs: lastLatencyMs }, '🧠 build+publish');
+        })
         .catch((err) => log.error({ err: (err as Error).message }, 'mirror error'));
     }
   };
@@ -778,6 +791,9 @@ async function main(): Promise<void> {
     log.info('🔁 control: config-changed → reloading config now');
     void reloadConfig();
   });
+  // Process heartbeat: beat now (web sees the brain online immediately) then on an interval.
+  void heartbeat.beat(brainStatus());
+  const heartbeatTimer = setInterval(() => void heartbeat.beat(brainStatus()), HEARTBEAT_INTERVAL_MS);
 
   // ev:executed consumer on a SEPARATE Redis connection (a blocking XREAD must never stall publishes). Crash-proof.
   let stopped = false;
@@ -819,6 +835,7 @@ async function main(): Promise<void> {
     clearInterval(reconTimer);
     clearInterval(sweepTimer);
     clearInterval(configTimer);
+    clearInterval(heartbeatTimer);
     blockhashCache.stop();
     sub.stop();
     await Promise.all([bus.quit(), evBus.quit(), control.quit()]);

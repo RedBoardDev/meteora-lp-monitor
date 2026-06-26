@@ -12,6 +12,8 @@ import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
 import { alert } from '@/copybot/alert';
 import { CopyJournalStore } from '@/copybot/journal-store';
+import { HeartbeatStore } from '@/copybot/heartbeat-store';
+import { HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
 import { claimExecution } from '@/copybot/coffre/idempotency';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
@@ -66,6 +68,7 @@ async function main(): Promise<void> {
     runtimeConfig = await configStore.load();
   };
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (re-clamp ceiling in <100ms)
+  const heartbeat = new HeartbeatStore(db, log, 'coffre'); // process status the web reads (vault online + signing state)
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
@@ -97,9 +100,13 @@ async function main(): Promise<void> {
     log.info('🔁 control: config-changed → reloading config now');
     void reloadConfig();
   });
+  // Process heartbeat: beat now (web sees the vault online immediately) then on an interval.
+  void heartbeat.beat({ signingEnabled: cfg.signingEnabled });
+  const heartbeatTimer = setInterval(() => void heartbeat.beat({ signingEnabled: cfg.signingEnabled }), HEARTBEAT_INTERVAL_MS);
   const stop = async (): Promise<void> => {
     stopped = true;
     clearInterval(configTimer);
+    clearInterval(heartbeatTimer);
     blockhashCache.stop();
     await Promise.all([bus.quit(), control.quit()]);
     process.exit(0);
