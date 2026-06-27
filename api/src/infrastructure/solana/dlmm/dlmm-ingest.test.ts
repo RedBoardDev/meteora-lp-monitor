@@ -1,6 +1,6 @@
 import type { Connection } from '@solana/web3.js';
 import { pino } from 'pino';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { LegRepository } from '@/domain/ports';
 import { DlmmIngest } from './dlmm-ingest';
 
@@ -68,5 +68,50 @@ describe('DlmmIngest — free-tier single-call fallback', () => {
     expect(repo.replaced).toHaveLength(1);
     expect(repo.replaced[0]!.sigs).toEqual(['sigA', 'sigB']);
     expect(res.complete).toBe(true);
+  });
+
+  it('a FAILED page fetch does NOT advance the cursor past un-ingested txs (no silent no-miss gap)', async () => {
+    // WHY (regression): the top-up set newestSig from the page BEFORE fetching. A failed fetch (a free-tier
+    // batch-403 abort, a network blip) then aborted the page but the cursor had ALREADY moved to the new
+    // top → those txs were never re-fetched. A leader's RemoveLiquidity withdraw was silently dropped (wrong
+    // PnL). The cursor must only advance to a SUCCESSFULLY-ingested page; a failure keeps the old top so the
+    // next run re-fetches.
+    vi.useFakeTimers();
+    const conn = {
+      async getSignaturesForAddress(_o: unknown, opts: { before?: string }) {
+        // top-up: two NEW sigs above the known top, then the known top ends the scan.
+        return opts?.before
+          ? []
+          : [
+              { signature: 'newSig', err: null, blockTime: 200 },
+              { signature: 'oldTop', err: null, blockTime: 100 },
+            ];
+      },
+      async getParsedTransactions() {
+        throw new Error('network down'); // hard failure (NOT batch-unsupported) → retries then aborts
+      },
+      async getParsedTransaction() {
+        throw new Error('network down');
+      },
+    } as unknown as Connection;
+    const setCursors: { newestSig: string | null }[] = [];
+    const repo = {
+      async getCursor() {
+        return { newestSig: 'oldTop', oldestSig: 'oldBottom', complete: true };
+      },
+      async replaceForSignatures() {},
+      async setCursor(_w: string, c: { newestSig: string | null }) {
+        setCursors.push(c);
+      },
+    } as unknown as LegRepository;
+
+    const ingest = new DlmmIngest(conn, repo, logger);
+    const p = ingest.ingest(WALLET);
+    await vi.runAllTimersAsync(); // flush the retry back-off sleeps
+    await p;
+    vi.useRealTimers();
+
+    // the cursor stayed at the OLD top — the un-ingested 'newSig' will be re-fetched next run (no gap).
+    expect(setCursors.at(-1)?.newestSig).toBe('oldTop');
   });
 });

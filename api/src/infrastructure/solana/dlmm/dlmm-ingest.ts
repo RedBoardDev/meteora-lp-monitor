@@ -79,7 +79,6 @@ export class DlmmIngest implements DlmmIngestPort {
         reachedGenesis = !toppingUp; // an empty page at the bottom = genesis; at the top = nothing new
         break;
       }
-      if (newestSig === null) newestSig = page[0]!.signature;
 
       const sigs: string[] = [];
       let hitKnownTop = false;
@@ -107,6 +106,11 @@ export class DlmmIngest implements DlmmIngestPort {
         break;
       }
       await this.repo.replaceForSignatures(wallet, sigs, legs);
+      // Advance the "newest seen" ONLY AFTER a page is successfully fetched + persisted. Setting it BEFORE
+      // the fetch (the old bug) let a FAILED fetch — e.g. a free-tier batch-403 abort — move the top PAST
+      // un-ingested txs, which were then NEVER re-fetched: a silent no-miss gap that dropped a leader's
+      // RemoveLiquidity withdraw (→ wrong PnL). On the first successful page, page[0] is the true newest sig.
+      if (newestSig === null) newestSig = page[0]!.signature;
       totalLegs += legs.length;
       totalTxs += txs;
       opts.onProgress?.(totalTxs);
