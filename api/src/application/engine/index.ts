@@ -255,13 +255,6 @@ export class Engine {
 
   /** A wallet warrants the recurring snapshot if a client is viewing it OR it has an enabled
    *  notification rule (global or wallet-scoped) — the owner's alert path is never gated on viewers. */
-  private isWalletActive(address: string): boolean {
-    if (this.viewedWallets.has(address)) return true;
-    return this.config
-      .listNotifRules()
-      .some((r) => r.enabled && (r.wallet === null || r.wallet === address));
-  }
-
   private async registerWallet(address: string): Promise<void> {
     const rt = makeRuntime(address, await this.repo.getOpen(address));
     this.wallets.set(address, rt);
@@ -484,21 +477,23 @@ export class Engine {
 
   /**
    * Shared price-mark tick — the value-on-demand replacement for the deleted 30s per-wallet snapshot.
-   * Re-marks every ACTIVE wallet's (viewed OR notify-enabled — the same `isWalletActive` gate the old
-   * recurring snapshot used) OPEN positions from its CACHED on-chain snapshot + ONE shared Jupiter price
-   * fetch (free — not a Helius RPC), so it touches NO getMultipleAccounts/getAccountInfo. The result is
-   * the APPROXIMATE live mark (token amounts held fixed, re-priced): `liveMarkWallet` flags it
-   * `complete: false` so `emitMarked` surfaces freshness!=='fresh' and the NetworthRecorder never persists
-   * it — only an EXACT on-chain read is authoritative. Idle wallets (no viewer, no notify rule) are
-   * skipped → they contribute ZERO recurring cost. Single-flight so two ticks never overlap the fetch.
+   * Re-marks EVERY wallet that has OPEN positions from its CACHED on-chain snapshot + ONE shared Jupiter
+   * price fetch (free — not a Helius RPC), so it touches NO getMultipleAccounts/getAccountInfo. The result
+   * is the APPROXIMATE live mark (token amounts held fixed, re-priced); it is both EMITTED to live WS
+   * viewers AND PERSISTED to the open set so HTTP/DB-backed clients (the macOS widget polls — it never sees
+   * the WS marks) track the price in real time too. The NetworthRecorder still skips marks (complete:false)
+   * — only an EXACT on-chain read is authoritative for net worth, and it overwrites the mark the moment
+   * real activity lands. Wallets with no open positions are skipped → zero recurring cost. Single-flight so
+   * two ticks never overlap the fetch.
    */
   private async runPriceMark(): Promise<void> {
     if (this.priceMarking) return;
     const targets: { rt: WalletRuntime; snap: OnchainWalletSnapshot }[] = [];
     for (const rt of this.wallets.values()) {
-      // Same gate as the old recurring snapshot: a wallet a client is viewing OR one with an enabled
-      // notify rule. An idle wallet (no viewer, no notify rule) is skipped → it contributes nothing.
-      if (!this.isWalletActive(rt.address)) continue;
+      // Re-mark every wallet with OPEN positions — not just viewed ones. DB-backed clients (the widget
+      // polls over HTTP, never receives the WS marks) need the PERSISTED value to follow the price. The
+      // Jupiter price fetch is FREE (0 Helius). At large scale, bound this to a recently-requested set so
+      // the per-tick DB writes stay cheap; fine at the current wallet count.
       const snap = rt.lastSnapshot;
       if (!snap || snap.positions.length === 0) continue; // nothing open → nothing to re-mark
       targets.push({ rt, snap });
@@ -513,6 +508,12 @@ export class Engine {
       for (const { rt, snap } of targets) {
         const { valued, open } = liveMarkWallet(snap, [...rt.open.values()], priceMap);
         this.emitter.emitMarked(rt.address, open, valued);
+        // PERSIST the live mark so HTTP/DB-backed clients (the widget) see the fresh price too — 0 Helius
+        // (Jupiter), just a rewrite of the open set. Isolated so a write hiccup never breaks the tick; an
+        // EXACT on-chain read still overwrites this the moment real activity lands.
+        await this.positionSync
+          .refreshOpen(rt.address, snap, valued)
+          .catch((err) => this.logger.warn({ err, wallet: rt.address }, 'price-mark persist failed'));
       }
     } catch (err) {
       this.logger.warn({ err }, 'price-mark tick failed — keeping last emitted state');
