@@ -1,4 +1,4 @@
-import { type Connection, PublicKey } from '@solana/web3.js';
+import { type Connection, type ParsedTransactionWithMeta, PublicKey } from '@solana/web3.js';
 import type { Logger } from 'pino';
 import type { DlmmLeg, SwapFlowRow } from '@/domain/dlmm';
 import type { DlmmIngest as DlmmIngestPort, LegRepository } from '@/domain/ports';
@@ -14,6 +14,13 @@ const BATCH_PAUSE_MS = 600; // pause between requests so a full-history backfill
 // Bound the backfill to a recent window (days) to keep volume under a limited key's rate limit. 0 =
 // full history. Settable via env so the window can be widened incrementally ("petit à petit").
 const SINCE_DAYS = Number(process.env.INGEST_SINCE_DAYS) || 0;
+
+/** True when an RPC error is a FREE-tier "batch requests not allowed" rejection (Helius code -32403 /
+ *  403 "Batch requests are only available for paid plans") — the signal to fall back to single calls. */
+function isBatchUnsupported(err: unknown): boolean {
+  const m = err instanceof Error ? err.message : String(err);
+  return m.includes('Batch requests are only available') || m.includes('-32403');
+}
 
 /**
  * Ingests a wallet's FULL Meteora DLMM history from chain into Postgres — paged signatures →
@@ -204,11 +211,43 @@ export class DlmmIngest implements DlmmIngestPort {
         });
       } catch (err) {
         lastErr = err;
+        // FREE-TIER fallback: getParsedTransactions sends a BATCH JSON-RPC, which free plans reject
+        // ("Batch requests are only available for paid plans"). Fall back to ONE getParsedTransaction per
+        // sig (single calls are allowed on free) — slower (the shared limiter throttles it) but functional,
+        // so the DLMM leg ingest no longer aborts the page (= no missed legs) on a free key.
+        if (isBatchUnsupported(err)) return this.parsedTransactionsSingly(sigs);
         this.logger.debug({ err, i }, 'getParsedTransactions retry');
         await sleep(Math.min(8000, 500 * (i + 1)));
       }
     }
     // exhausted retries → signal failure (the caller aborts the page rather than deleting legs).
     throw lastErr ?? new Error('getParsedTransactions failed');
+  }
+
+  /** Free-tier fallback: fetch each sig with a SINGLE getParsedTransaction (not a batch). Sequential so the
+   *  shared rate-limiter paces it; a per-sig hard failure throws so the caller aborts the page (never deletes
+   *  real legs). Returns the same `(tx | null)[]` shape the batch call would, so the decoder is unchanged. */
+  private async parsedTransactionsSingly(
+    sigs: string[],
+  ): Promise<(ParsedTransactionWithMeta | null)[]> {
+    const out: (ParsedTransactionWithMeta | null)[] = [];
+    for (const sig of sigs) {
+      let lastErr: unknown;
+      let got: ParsedTransactionWithMeta | null | undefined;
+      for (let i = 0; i < 4 && got === undefined; i++) {
+        try {
+          got = await this.conn.getParsedTransaction(sig, {
+            maxSupportedTransactionVersion: 0,
+            commitment: 'confirmed',
+          });
+        } catch (err) {
+          lastErr = err;
+          await sleep(Math.min(8000, 500 * (i + 1)));
+        }
+      }
+      if (got === undefined) throw lastErr ?? new Error('getParsedTransaction failed (single)');
+      out.push(got);
+    }
+    return out;
   }
 }
