@@ -9,7 +9,7 @@
  * COPYBOT_FILTER_{SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
  * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS} +
  * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN +
- * COPYBOT_PRIORITY_FEE_TIER, COPYBOT_PRIORITY_FEE_MAX_CAP_SOL.
+ * COPYBOT_PRIORITY_FEE_TIER, COPYBOT_PRIORITY_FEE_MAX_CAP_SOL, COPYBOT_RUG_SL.
  */
 import type { EffectiveOverride, ExecutionConfig, TwoSidedMode } from '@/domain/copybot/config';
 import type { FilterConfig } from '@/domain/copybot/filters';
@@ -95,6 +95,7 @@ export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride 
     twoSidedMode: env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined,
     execution: envExecution(env),
     priorityFee: envPriorityFee(env),
+    rugSl: env.COPYBOT_RUG_SL !== undefined ? { enabled: env.COPYBOT_RUG_SL === TRUE } : undefined,
     ...envFilters(env),
   };
 }

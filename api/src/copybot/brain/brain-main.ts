@@ -15,6 +15,7 @@ import { decideEntry } from '@/domain/copybot/decision';
 import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
+import { RugSlTracker } from '@/domain/copybot/rug-sl';
 import { type EffectiveConfig, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
 
 import { type FilterContext, filtersActive, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
@@ -34,6 +35,7 @@ import { openDatabase } from '@/infrastructure/persistence/database';
 import { decodeDlmmLegs } from '@/infrastructure/solana/dlmm/dlmm-event-decoder';
 import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildOpenByWeight, buildRemovePartial, createDlmmPair } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
 import { readLeaderPositionShape, type UserPosition, readUserPositions } from '@/infrastructure/solana/dlmm/leader-position-reader';
+import { readActiveTokenPrice } from '@/infrastructure/solana/dlmm/active-bin-price';
 import { OnchainPoolMetaReader } from '@/infrastructure/solana/dlmm/pool-meta';
 import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
 import { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
@@ -63,6 +65,8 @@ const DEADLINE_SLOTS = 150; // ~60s
 // Swap/reshape execution tunables now live in the runtime config (eff().execution) — see config/defaults.ts.
 const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL safety-sweep cadence (SYSTEM): the no-miss backstop behind the close-triggered sell (catches any dormant non-SOL left by downtime/a missed close)
 const EV_EXECUTED_STREAM = 'copybot:ev:executed';
+const RUG_SL_POLL_MS = 15_000; // rug-SL price-poll cadence: ~4 samples per a 60s window — fast enough to catch a crash, one lbPair read per open pool (economical)
+const RUG_SL_RETAIN_MS = 180_000; // keep ≥ any sane windowSeconds so the detector always has its full lookback
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
@@ -128,6 +132,7 @@ async function main(): Promise<void> {
   // Resolve the EFFECTIVE config for our (single) leader, then apply the env/bench override (migration bridge).
   // Pure + cheap → recomputed at each point of use so a live reload always takes effect on the next event.
   const eff = (): EffectiveConfig => withEnvOverride(effectiveFor(runtimeConfig, cfg.leader), ENV_EFFECTIVE_OVERRIDE);
+  const rugSlTracker = new RugSlTracker(RUG_SL_RETAIN_MS); // per-position price windows for the rug-SL crash check
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
   const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
   let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
@@ -560,6 +565,7 @@ async function main(): Promise<void> {
       await store.markClosed(m.leaderPosition);
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
+      rugSlTracker.forget(our);
       void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, detail: { via: 'reconcile' } });
     }
     for (const rc of plan.reClose) {
@@ -577,14 +583,44 @@ async function main(): Promise<void> {
     }
   }
 
-  // Re-publish a failsafe close for a mirror still on-chain whose leader has closed. Deterministic commandId →
-  // the vault retries it (idempotency re-claims a previously failed close) until it lands.
-  async function publishReClose(m: Mirror): Promise<void> {
-    const eventKey = `${cfg.leader}:${m.pool}:failsafe:${m.leaderPosition}`;
+  // Publish a safety close for a tracked mirror (failsafe leader-closed, or rug-SL crash). Deterministic commandId
+  // (per `tag`) → the vault retries it (idempotency re-claims a previously failed close) until it lands.
+  async function publishSafetyClose(m: Mirror, tag: string, reason: string): Promise<void> {
+    const eventKey = `${cfg.leader}:${m.pool}:${tag}:${m.leaderPosition}`;
     const built = await buildCloseTx(conn, new PublicKey(m.pool), ownerPk, new PublicKey(m.ourPosition), m.lowerBin, m.upperBin);
     const { issuedAtSlot, deadlineSlot } = await slots();
-    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason: 'leader_closed', leaderPosition: m.leaderPosition });
-    recentlyPublishedClose.set(m.ourPosition, Date.now()); // journaled as a failsafe-published event in publish()
+    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason, leaderPosition: m.leaderPosition });
+    recentlyPublishedClose.set(m.ourPosition, Date.now()); // grace; journaled as a failsafe-published event in publish()
+  }
+
+  // Re-publish a failsafe close for a mirror still on-chain whose leader has closed.
+  const publishReClose = (m: Mirror): Promise<void> => publishSafetyClose(m, 'failsafe', 'leader_closed');
+
+  // Rug-SL: poll each open pool's active-bin token price (one cheap lbPair read per pool), feed the tracker, and
+  // close any position whose price crashed ≥ dropPercent within the window. The leader keeps holding (it's OUR
+  // independent safety exit) → close + drop the tracker window; re-copy only on a NEW leader open (no auto-reopen
+  // path exists: planReconcile never opens, handleResync no-ops on a closed mirror). A failed price read yields
+  // null → NOT recorded, so a transient RPC blip can never fabricate a crash.
+  async function rugSlSweep(): Promise<void> {
+    const open = registry.openPositions();
+    if (open.length === 0) return;
+    const now = Date.now();
+    const byPool = new Map<string, Mirror[]>();
+    for (const m of open) byPool.set(m.pool, [...(byPool.get(m.pool) ?? []), m]);
+    for (const [pool, mirrors] of byPool) {
+      const price = await readActiveTokenPrice(conn, new PublicKey(pool));
+      if (price === null) continue; // never record a garbage price → no false trigger
+      const rugCfg = eff().rugSl;
+      for (const m of mirrors) {
+        rugSlTracker.record(m.ourPosition, price, now);
+        if (!rugCfg.enabled) continue;
+        if (now - (recentlyPublishedClose.get(m.ourPosition) ?? 0) < RECLOSE_GRACE_MS) continue; // a close is already in flight
+        if (!rugSlTracker.check(m.ourPosition, rugCfg, now)) continue;
+        await publishSafetyClose(m, 'rugsl', 'rug_sl');
+        registry.close(m.leaderPosition); // in-memory; DB markClosed by the reconcile once the close lands
+        rugSlTracker.forget(m.ourPosition);
+      }
+    }
   }
 
   // Force-close a STRAY (untracked) position on our wallet — pool + bins come from the on-chain enumerator. The
@@ -608,6 +644,7 @@ async function main(): Promise<void> {
     await store.markClosed(m.leaderPosition);
     registry.close(m.leaderPosition);
     recentlyPublishedClose.delete(ourPosition);
+    rugSlTracker.forget(ourPosition);
     void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, detail: { via: 'ev_executed' } });
   }
 
@@ -752,6 +789,7 @@ async function main(): Promise<void> {
   const timer = setInterval(() => detector.poll().catch((e) => log.error({ e: (e as Error).message }, 'poll')), POLL_MS);
   const reconTimer = setInterval(() => reconcileSweep().catch((e) => log.error({ e: (e as Error).message }, 'reconcile')), RECON_MS);
   const sweepTimer = setInterval(() => sweepWallet().catch((e) => log.error({ e: (e as Error).message }, 'sweep')), SWEEP_MS);
+  const rugSlTimer = setInterval(() => rugSlSweep().catch((e) => log.error({ e: (e as Error).message }, 'rug-sl')), RUG_SL_POLL_MS);
   // Live config reload. A web config edit publishes a control ping → reload from the DB NOW (kill-switch in <100ms);
   // the periodic poll is the backstop if a ping is ever missed. load() is fail-safe (defaults on corruption); these
   // are the only writes to runtimeConfig post-boot.
@@ -803,6 +841,7 @@ async function main(): Promise<void> {
     clearInterval(timer);
     clearInterval(reconTimer);
     clearInterval(sweepTimer);
+    clearInterval(rugSlTimer);
     clearInterval(configTimer);
     clearInterval(heartbeatTimer);
     blockhashCache.stop();

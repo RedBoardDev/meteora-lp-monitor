@@ -46,4 +46,10 @@ describe('envEffectiveOverride — SPARSE env bridge (DB stays authoritative)', 
   it('no execution env → execution override absent', () => {
     expect(envEffectiveOverride({}).execution).toBeUndefined();
   });
+
+  it('COPYBOT_RUG_SL toggles rug-SL only when set (so the bench can disable the price poll)', () => {
+    expect(envEffectiveOverride({}).rugSl).toBeUndefined();
+    expect(envEffectiveOverride({ COPYBOT_RUG_SL: 'false' }).rugSl).toEqual({ enabled: false });
+    expect(envEffectiveOverride({ COPYBOT_RUG_SL: 'true' }).rugSl).toEqual({ enabled: true });
+  });
 });
