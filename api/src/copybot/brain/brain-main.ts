@@ -178,9 +178,9 @@ async function main(): Promise<void> {
     const full: SignRequest = { ...sr, issuedAtMs: Date.now() }; // timestamp at publish time (latency)
     SignRequestSchema.parse(full); // local guardrail: we only publish a valid contract
     const id = await bus.publish(STREAM, HOP, cfg.hmacKey, full);
-    log.info({ id, kind: full.kind, pool: full.pool, our: full.positionPubkey, bins: full.targetBinRange }, '📤 cmd:sign published');
-    // Activity journal: EVERY published intent is recorded once here (single backstop). Context-specific publishes
-    // (a failsafe/orphan re-close, a reshape-funding buy) pass a hint to override stage/severity/leaderPosition.
+    // Activity journal: EVERY published intent is recorded once here (single backstop) → the store emits the clean
+    // log line. Context-specific publishes (a failsafe/orphan re-close, a reshape-funding buy) pass a hint to
+    // override stage/severity/leaderPosition.
     void journal.record({
       stage: stageForKind(full.kind),
       outcome: 'published',
@@ -191,7 +191,7 @@ async function main(): Promise<void> {
       commandId: full.commandId,
       eventKey: full.eventKey,
       ourSizeSol: full.sizeSol,
-      detail: { targetBinRange: full.targetBinRange },
+      detail: { targetBinRange: full.targetBinRange, streamId: id },
       ...journalHint,
     });
   }
@@ -214,12 +214,12 @@ async function main(): Promise<void> {
     const decision = decideEntry(e, { ...ec.sizing, skipNonSolPaired: true }, { availableBalanceSol: cfg.balanceSol });
     if (decision.outcome === 'skipped') {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol });
-      return log.info({ reason: decision.reason }, 'open skipped');
+      return;
     }
     const cap = checkCaps(ec.caps, capsState(), decision.sizeSol, Date.now());
     if (cap.action === 'block') {
       void journal.record({ stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol });
-      return log.warn({ reason: cap.reason }, 'open blocked (cap)');
+      return;
     }
 
     const poolPk = new PublicKey(e.pool);
@@ -235,14 +235,14 @@ async function main(): Promise<void> {
     if (!meta?.solSide) {
       void pairP.catch(() => undefined); // non-SOL skip → discard the in-flight pair read (no unhandled rejection)
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
-      return log.info('non-SOL pool → skip');
+      return;
     }
 
     const pair = await pairP;
     const shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
     if (!shape) {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
-      return log.warn({ position: e.position }, 'leader position not found on-chain → skip');
+      return;
     }
 
     // Entry filters gate the OPEN only. Context = local (open tokens) + leader-shape (range) + resolved data.
@@ -272,7 +272,7 @@ async function main(): Promise<void> {
     if (verdict.action === 'skip') {
       if (!ec.filterShadow) {
         void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
-        return log.info({ reason: verdict.reason }, '🚧 open filtered → skip');
+        return;
       }
       log.info({ reason: verdict.reason }, '👻 filter shadow: WOULD skip (not enforced)');
     }
@@ -343,8 +343,7 @@ async function main(): Promise<void> {
       // the open entirely. Nothing is stashed or published before this point, so it's a clean no-op (no partial
       // position, no stranded token, no dormant state).
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_unbuyable', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { tokenMint, err: (err as Error).message } });
-      log.warn({ tokenMint, err: (err as Error).message }, '🚫 two-sided buy unavailable → SKIP open (never a partial/one-sided copy)');
-      return;
+      return; // SAFE: never a partial/one-sided copy
     }
     const buyKey = `${cfg.leader}:${e.pool}:buy:${e.signature}`;
     const buyCommandId = deriveCommandId(buyKey);
@@ -436,7 +435,7 @@ async function main(): Promise<void> {
     const meta = await poolReader.loadPoolMeta(m.pool);
     if (!meta?.solSide) {
       void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
-      return log.info('non-SOL pool → skip resync');
+      return;
     }
     const solSide = meta.solSide;
     const pair = await createDlmmPair(conn, poolPk);
@@ -445,7 +444,7 @@ async function main(): Promise<void> {
     const ourShape = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
     if (!ourShape) {
       void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
-      return log.warn({ our: m.ourPosition }, 'our position not on-chain yet → skip resync (next event/reconcile catches up)');
+      return;
     }
 
     // SHAPE-EXACT re-sync. Align by offset-from-LOWER (the open re-anchor maps leader.lower ↔ our.lower), so the
@@ -462,7 +461,7 @@ async function main(): Promise<void> {
     const twoSidedAdd = ec.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
       void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
-      return log.info({ position: e.position }, '⚖️ in sync — no adjustment');
+      return;
     }
 
     const calls = reshapeToCalls(ops, ourShape.lowerBinId);
@@ -470,7 +469,6 @@ async function main(): Promise<void> {
     const adds = calls.adds.filter((a) => a.binId >= ourShape.lowerBinId && a.binId <= ourShape.upperBinId);
     if (adds.length < calls.adds.length) {
       void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'partial_range', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, detail: { dropped: calls.adds.length - adds.length } });
-      log.warn({ position: e.position, dropped: calls.adds.length - adds.length }, '⚠️ reshape: leader bins beyond our range — partial copy');
     }
 
     const { issuedAtSlot, deadlineSlot } = await slots();
@@ -588,7 +586,6 @@ async function main(): Promise<void> {
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
       void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, detail: { via: 'reconcile' } });
-      log.info({ leaderPosition: m.leaderPosition, our }, '✅ reconcile: close confirmed on-chain');
     }
     for (const rc of plan.reClose) {
       // Grace: skip if we published a close for this position recently (let the in-flight close land first).
@@ -612,8 +609,7 @@ async function main(): Promise<void> {
     const built = await buildCloseTx(conn, new PublicKey(m.pool), ownerPk, new PublicKey(m.ourPosition), m.lowerBin, m.upperBin);
     const { issuedAtSlot, deadlineSlot } = await slots();
     await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: m.sizeSol, targetBinRange: { lower: m.lowerBin, upper: m.upperBin }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason: 'leader_closed', leaderPosition: m.leaderPosition });
-    recentlyPublishedClose.set(m.ourPosition, Date.now());
-    log.warn({ leaderPosition: m.leaderPosition, our: m.ourPosition }, '🛟 failsafe re-close (still on-chain, leader closed)');
+    recentlyPublishedClose.set(m.ourPosition, Date.now()); // journaled as a failsafe-published event in publish()
   }
 
   // Force-close a STRAY (untracked) position on our wallet — pool + bins come from the on-chain enumerator. The
@@ -638,7 +634,6 @@ async function main(): Promise<void> {
     registry.close(m.leaderPosition);
     recentlyPublishedClose.delete(ourPosition);
     void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, detail: { via: 'ev_executed' } });
-    log.info({ leaderPosition: m.leaderPosition, our: ourPosition }, '✅ close confirmed (ev:executed) → marked closed');
   }
 
   // ev:executed feedback → fast residual sell. Once the vault confirms a CLOSE landed, the close returned SOL +
@@ -654,7 +649,6 @@ async function main(): Promise<void> {
     const minOut = minOutWithSlippage(BigInt(quote.outAmount), ec.execution.slippageBps);
     if (minOut < BigInt(ec.execution.minSellOutLamports)) {
       void journal.record({ stage: 'sell', outcome: 'skipped', reason: 'below_min_sell_out', leader: cfg.leader, pool, detail: { tokenMint, outAmount: quote.outAmount, source } });
-      log.info({ tokenMint, outAmount: quote.outAmount, source }, '💱 sell skipped (below min SOL out)');
       return false;
     }
     const txBase64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, quote, ownerPk.toBase58());
@@ -687,7 +681,7 @@ async function main(): Promise<void> {
     const decision = decideResidualSell(residual, BigInt(eff().execution.dustTokenRaw));
     if (!decision.sell) {
       void journal.record({ stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, detail: { tokenMint } });
-      return log.info({ tokenMint, reason: decision.reason }, '💱 residual sell skipped');
+      return;
     }
     await publishSell(tokenMint, residual, ev.pool, 'close');
   }
@@ -700,7 +694,6 @@ async function main(): Promise<void> {
     const toSweep = planWalletSweep(balances, WSOL_MINT, BigInt(eff().execution.dustTokenRaw));
     if (toSweep.length === 0) return;
     void journal.record({ stage: 'sweep', outcome: 'detected', leader: cfg.leader, detail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
-    log.info({ count: toSweep.length, mints: toSweep.map((b) => b.mint) }, '🧹 wallet sweep — dormant non-SOL token(s) found');
     for (const b of toSweep) {
       await publishSell(b.mint, b.amountRaw, ownerPk.toBase58(), 'sweep').catch((e) => {
         void journal.record({ stage: 'sweep', outcome: 'failed', reason: 'build_error', leader: cfg.leader, detail: { mint: b.mint, error: (e as Error).message } });
