@@ -119,6 +119,30 @@ describe('config · effectiveFor', () => {
   });
 });
 
+describe('config · execution group', () => {
+  it('effectiveFor returns the user execution defaults with no override', () => {
+    expect(effectiveFor(CONFIG_DEFAULTS, LEADER).execution).toEqual(CONFIG_DEFAULTS.user.execution);
+  });
+
+  it('a leader sparsely overrides one execution field, the rest inherit', () => {
+    // WHY: a volatile-token leader may need more slippage without touching the other execution tunables.
+    const cfg: CopybotConfig = {
+      user: CONFIG_DEFAULTS.user,
+      leaders: [{ address: LEADER, enabled: true, overrides: { execution: { slippageBps: 300 } } }],
+    };
+    const ex = effectiveFor(cfg, LEADER).execution;
+    expect(ex.slippageBps).toBe(300);
+    expect(ex.dustTokenRaw).toBe(CONFIG_DEFAULTS.user.execution.dustTokenRaw); // sibling preserved
+    expect(ex.reshapeBinDeadbandSol).toBe(CONFIG_DEFAULTS.user.execution.reshapeBinDeadbandSol);
+  });
+
+  it('a partial execution blob merges onto defaults (no silent reset of the other tunables)', () => {
+    const cfg = parseConfig(JSON.stringify({ user: { execution: { minSellOutLamports: 1 } } }));
+    expect(cfg.user.execution.minSellOutLamports).toBe(1);
+    expect(cfg.user.execution.slippageBps).toBe(CONFIG_DEFAULTS.user.execution.slippageBps);
+  });
+});
+
 describe('config · withEnvOverride (migration bridge)', () => {
   it('applies only the provided fields, leaving the rest of the resolved config intact', () => {
     const eff = effectiveFor(CONFIG_DEFAULTS, LEADER);

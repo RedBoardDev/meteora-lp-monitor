@@ -18,6 +18,13 @@ export const USER_DEFAULTS: UserSettings = {
   twoSidedMode: 'off',
   filters: { ...FILTERS_ALL_OFF }, // all entry filters OFF by default
   filterShadow: true, // safe rollout: evaluate + log, never block (flip off to enforce)
+  execution: {
+    slippageBps: 100, // 1% — permissive enough to land
+    dustTokenRaw: 0, // sell any residual by default
+    minSellOutLamports: 50_000, // ~0.00005 SOL floor: below it a residual sell isn't worth the fees
+    reshapeBinDeadbandSol: 0.0002, // LOW: reshapes are event-driven (not arb), so a low threshold maximizes fidelity
+    reshapeBinDeadbandToken: 100, // LOW per-bin token-leg threshold (two-sided reshape), same rationale as the SOL one
+  },
 };
 
 export const CONFIG_DEFAULTS: CopybotConfig = {

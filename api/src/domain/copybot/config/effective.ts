@@ -8,7 +8,7 @@
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
 import type { SizingConfig } from '../sizing';
-import type { CopybotConfig, EffectiveConfig, EffectiveOverride } from './types';
+import type { CopybotConfig, EffectiveConfig, EffectiveOverride, ExecutionConfig } from './types';
 
 /** Merge a sparse leader sizing override onto the user sizing. `maxTradeSizeSol` is lower-only (tighten, never raise). */
 function mergeSizing(base: SizingConfig, ov?: Partial<SizingConfig>): SizingConfig {
@@ -20,6 +20,11 @@ function mergeSizing(base: SizingConfig, ov?: Partial<SizingConfig>): SizingConf
 
 /** Merge a sparse filter override (per-leader, or env bridge) onto a base filter config. */
 function mergeFilters(base: FilterConfig, ov?: Partial<FilterConfig>): FilterConfig {
+  return ov ? { ...base, ...ov } : base;
+}
+
+/** Merge a sparse execution override (per-leader, or env bridge) onto a base execution config. */
+function mergeExecution(base: ExecutionConfig, ov?: Partial<ExecutionConfig>): ExecutionConfig {
   return ov ? { ...base, ...ov } : base;
 }
 
@@ -39,6 +44,7 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     twoSidedMode: ov.twoSidedMode ?? user.twoSidedMode,
     filters: mergeFilters(user.filters, ov.filters),
     filterShadow: user.filterShadow, // account-wide (not per-leader)
+    execution: mergeExecution(user.execution, ov.execution),
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
@@ -57,6 +63,7 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     twoSidedMode: ov.twoSidedMode ?? eff.twoSidedMode,
     filters: mergeFilters(eff.filters, ov.filters),
     filterShadow: ov.filterShadow ?? eff.filterShadow,
+    execution: mergeExecution(eff.execution, ov.execution),
     userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }

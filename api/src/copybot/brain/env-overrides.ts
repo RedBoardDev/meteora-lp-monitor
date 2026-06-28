@@ -7,9 +7,10 @@
  *
  * Env keys: COPYBOT_{KILL_SWITCH,KILL_SWITCH_LEADER,MAX_OPEN_POSITIONS,MIN_POSITION_SOL,TWO_SIDED} +
  * COPYBOT_FILTER_{SHADOW,SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
- * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS}.
+ * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS} +
+ * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN.
  */
-import type { EffectiveOverride, TwoSidedMode } from '@/domain/copybot/config';
+import type { EffectiveOverride, ExecutionConfig, TwoSidedMode } from '@/domain/copybot/config';
 import type { FilterConfig } from '@/domain/copybot/filters';
 
 const TRUE = 'true';
@@ -45,6 +46,22 @@ function envFilters(env: NodeJS.ProcessEnv): { filters?: Partial<FilterConfig>; 
   return out;
 }
 
+/** Build the SPARSE execution override: only the tunables whose env var is a finite number (else the DB value stands). */
+function envExecution(env: NodeJS.ProcessEnv): Partial<ExecutionConfig> | undefined {
+  const e: Partial<ExecutionConfig> = {};
+  const set = (key: keyof ExecutionConfig, raw: string | undefined): void => {
+    if (raw === undefined) return;
+    const n = Number(raw);
+    if (Number.isFinite(n)) e[key] = n;
+  };
+  set('slippageBps', env.SELL_SLIPPAGE_BPS);
+  set('dustTokenRaw', env.DUST_TOKEN_RAW);
+  set('minSellOutLamports', env.MIN_SELL_OUT_LAMPORTS);
+  set('reshapeBinDeadbandSol', env.RESHAPE_BIN_DEADBAND_SOL);
+  set('reshapeBinDeadbandToken', env.RESHAPE_BIN_DEADBAND_TOKEN);
+  return Object.keys(e).length > 0 ? e : undefined;
+}
+
 /** The full sparse env override applied after `effectiveFor` (see `withEnvOverride`). */
 export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride {
   const toNum = (v: string | undefined): number | undefined => (v === undefined ? undefined : Number(v));
@@ -66,6 +83,7 @@ export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride 
     sizing,
     caps,
     twoSidedMode: env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined,
+    execution: envExecution(env),
     ...envFilters(env),
   };
 }

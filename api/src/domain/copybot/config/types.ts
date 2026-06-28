@@ -14,12 +14,28 @@ import type { SizingConfig } from '../sizing';
 export const TWO_SIDED_MODES = ['off', 'shadow', 'on'] as const;
 export type TwoSidedMode = (typeof TWO_SIDED_MODES)[number];
 
+/** Swap + reshape execution tunables. Raw-unit fields are JS numbers in the JSON config, widened to BigInt at use. */
+export interface ExecutionConfig {
+  /** Swap slippage tolerance (residual sell + two-sided buy), basis points. */
+  slippageBps: number;
+  /** Residual token units at/below which we don't bother selling (dust). */
+  dustTokenRaw: number;
+  /** Skip a residual sell whose SOL-out floor is below this (lamports) — not worth the fees. */
+  minSellOutLamports: number;
+  /** Per-bin reshape threshold (SOL): act on a bin whose SOL differs from target by more than this. */
+  reshapeBinDeadbandSol: number;
+  /** Per-bin reshape threshold (raw token units) for the two-sided token leg. */
+  reshapeBinDeadbandToken: number;
+}
+
 /** The fields a leader may override on top of the user defaults. */
 export interface Overridable {
   sizing: SizingConfig;
   twoSidedMode: TwoSidedMode;
   /** Entry-filter thresholds/toggles (the filter brick registry consumes this). */
   filters: FilterConfig;
+  /** Swap/reshape execution tunables. */
+  execution: ExecutionConfig;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -37,6 +53,7 @@ export type LeaderOverride = {
   sizing?: Partial<SizingConfig>;
   twoSidedMode?: TwoSidedMode;
   filters?: Partial<FilterConfig>;
+  execution?: Partial<ExecutionConfig>;
 };
 
 /** One followed leader. */
@@ -73,5 +90,6 @@ export type EffectiveOverride = {
   twoSidedMode?: TwoSidedMode;
   filters?: Partial<FilterConfig>;
   filterShadow?: boolean;
+  execution?: Partial<ExecutionConfig>;
   userEnabled?: boolean;
 };

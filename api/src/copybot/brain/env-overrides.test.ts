@@ -39,4 +39,18 @@ describe('envEffectiveOverride — SPARSE env bridge (DB stays authoritative)', 
   it('ignored-tokens csv is trimmed and blanks dropped', () => {
     expect(envEffectiveOverride({ COPYBOT_FILTER_IGNORED_TOKENS: ' A , ,B ' }).filters).toEqual({ ignoredTokens: ['A', 'B'] });
   });
+
+  it('execution tunables are sparse: only env-set finite numbers appear', () => {
+    const ov = envEffectiveOverride({ SELL_SLIPPAGE_BPS: '300', RESHAPE_BIN_DEADBAND_SOL: '0.001' });
+    expect(ov.execution).toEqual({ slippageBps: 300, reshapeBinDeadbandSol: 0.001 });
+  });
+
+  it('a non-finite execution env var is ignored (DB value stands, never NaN)', () => {
+    // WHY: a typo must not poison a numeric tunable with NaN — fall through to the DB value.
+    expect(envEffectiveOverride({ DUST_TOKEN_RAW: 'abc' }).execution).toBeUndefined();
+  });
+
+  it('no execution env → execution override absent', () => {
+    expect(envEffectiveOverride({}).execution).toBeUndefined();
+  });
 });

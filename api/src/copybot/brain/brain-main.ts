@@ -58,12 +58,8 @@ const RECON_MS = 30_000; // on-chain reconcile cadence (no-miss-close backstop)
 const RECLOSE_GRACE_MS = 60_000; // wait this long after publishing a close before a reconcile re-close (let it land)
 const RECONCILE_OPEN_GRACE_MS = Number(process.env.RECONCILE_OPEN_GRACE_MS ?? '30000'); // a just-opened copy may be unconfirmed for ~1-2s (direct getAccountInfo) → skip the 1st reconcile tick after open; 30s = generous margin, minimal backstop delay (anti false-close → no-dormant)
 const DEADLINE_SLOTS = 150; // ~60s
-const RESHAPE_BIN_DEADBAND_SOL = Number(process.env.RESHAPE_BIN_DEADBAND_SOL ?? '0.0002'); // PER-BIN re-shape threshold (SOL): act on a bin whose SOL differs from target by more than this. LOW on purpose — reshapes are event-driven (only on a real leader add/remove, never on arb), so a low threshold maximizes fidelity (proven 0.00% on-chain) without continuous churn; raise it to trade fidelity for fewer txs on tiny leader adjustments
-const SELL_SLIPPAGE_BPS = Number(process.env.SELL_SLIPPAGE_BPS ?? '100'); // 1% residual-sell tolerance (permissive enough to land)
-const DUST_TOKEN_RAW = BigInt(process.env.DUST_TOKEN_RAW ?? '0'); // residual token units at/below which we don't sell
-const MIN_SELL_OUT_LAMPORTS = BigInt(process.env.MIN_SELL_OUT_LAMPORTS ?? '50000'); // skip if the SOL out floor < ~0.00005 SOL (not worth fees)
-const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL safety-sweep cadence: the no-miss backstop behind the close-triggered sell (catches any dormant non-SOL left by downtime/a missed close)
-const RESHAPE_BIN_DEADBAND_TOKEN = Number(process.env.RESHAPE_BIN_DEADBAND_TOKEN ?? '100'); // per-bin token-leg reshape threshold (RAW token units) — act on a token-leg add above this; LOW for fidelity (see RESHAPE_BIN_DEADBAND_SOL), raise to skip dust token adds (two-sided reshape only)
+// Swap/reshape execution tunables now live in the runtime config (eff().execution) — see config/defaults.ts.
+const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL safety-sweep cadence (SYSTEM): the no-miss backstop behind the close-triggered sell (catches any dormant non-SOL left by downtime/a missed close)
 const EV_EXECUTED_STREAM = 'copybot:ev:executed';
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
@@ -265,7 +261,7 @@ async function main(): Promise<void> {
     // deposit two-sided). 'shadow' logs the plan but still opens SOL-only; 'off' (default) = SOL-side-only.
     if (ec.twoSidedMode !== 'off') {
       const legs = shape.perBin.map((b) => ({ binId: b.binId, solRaw: meta.solSide === 'Y' ? b.y : b.x, tokenRaw: meta.solSide === 'Y' ? b.x : b.y }));
-      const plan = planTwoSided(legs, shape.activeBinId, shape.activeBinId, DUST_TOKEN_RAW);
+      const plan = planTwoSided(legs, shape.activeBinId, shape.activeBinId, BigInt(ec.execution.dustTokenRaw));
       if (plan.twoSided && plan.leaderSolRaw > 0n && e.nonSolMint) {
         log.info({ mode: ec.twoSidedMode, leaderTokenRaw: plan.leaderTokenRaw.toString(), bins: plan.weights.length }, '🪙 two-sided position detected');
         // SAFE: a two-sided leader is copied as BOTH legs or NOT AT ALL — NEVER a half (one-sided) position. 'on'
@@ -319,7 +315,7 @@ async function main(): Promise<void> {
     let buyQuote: Awaited<ReturnType<typeof getJupiterBuyQuote>>;
     let buyTxB64: string;
     try {
-      buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, tokenTarget, SELL_SLIPPAGE_BPS);
+      buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, tokenTarget, ec.execution.slippageBps);
       buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
     } catch (err) {
       // SAFE: the token leg can't be acquired (no Jupiter route / a 4xx quote — an illiquid or unroutable token).
@@ -442,7 +438,7 @@ async function main(): Promise<void> {
     const leaderTokenBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: tokenOf(b) }));
     const ourTokenBins = ourShape.perBin.map((b) => ({ offset: b.binId - ourShape.lowerBinId, sol: tokenOf(b) }));
     // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
-    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, ec.sizing.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
+    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, ec.sizing.maxTradeSizeSol, ec.execution.reshapeBinDeadbandSol, ec.execution.reshapeBinDeadbandToken);
     const twoSidedAdd = ec.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
       void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
@@ -494,7 +490,7 @@ async function main(): Promise<void> {
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
       const addLamports = BigInt(Math.round(totalAddSol * 1e9));
       const totalTokenRaw = BigInt(tokenAdds.reduce((s, a) => s + a.raw, 0));
-      const buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, totalTokenRaw, SELL_SLIPPAGE_BPS);
+      const buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, totalTokenRaw, ec.execution.slippageBps);
       const buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
       const buyKey = `${cfg.leader}:${m.pool}:reshape-buy:${e.signature}`;
       await publish({ commandId: deriveCommandId(buyKey), eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: totalTokenRaw.toString(), maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
@@ -633,9 +629,10 @@ async function main(): Promise<void> {
    *  a sell was published (false = quote below the SOL-out floor). */
   async function publishSell(tokenMint: string, residualRaw: bigint, pool: string, source: 'close' | 'sweep'): Promise<boolean> {
     const t0 = Date.now();
-    const quote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, residualRaw, SELL_SLIPPAGE_BPS);
-    const minOut = minOutWithSlippage(BigInt(quote.outAmount), SELL_SLIPPAGE_BPS);
-    if (minOut < MIN_SELL_OUT_LAMPORTS) {
+    const ec = eff();
+    const quote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, residualRaw, ec.execution.slippageBps);
+    const minOut = minOutWithSlippage(BigInt(quote.outAmount), ec.execution.slippageBps);
+    if (minOut < BigInt(ec.execution.minSellOutLamports)) {
       void journal.record({ stage: 'sell', outcome: 'skipped', reason: 'below_min_sell_out', leader: cfg.leader, pool, detail: { tokenMint, outAmount: quote.outAmount, source } });
       log.info({ tokenMint, outAmount: quote.outAmount, source }, '💱 sell skipped (below min SOL out)');
       return false;
@@ -667,7 +664,7 @@ async function main(): Promise<void> {
     if (!meta?.solSide) return; // non-SOL pool → nothing to re-swap into SOL
     const tokenMint = meta.solSide === 'X' ? meta.mintY : meta.mintX; // the non-SOL leg = residual to sell
     const residual = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
-    const decision = decideResidualSell(residual, DUST_TOKEN_RAW);
+    const decision = decideResidualSell(residual, BigInt(eff().execution.dustTokenRaw));
     if (!decision.sell) {
       void journal.record({ stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, detail: { tokenMint } });
       return log.info({ tokenMint, reason: decision.reason }, '💱 residual sell skipped');
@@ -680,7 +677,7 @@ async function main(): Promise<void> {
    *  sell, or a residual from any other source — so the wallet never holds a dormant non-SOL balance. */
   async function sweepWallet(): Promise<void> {
     const balances = await readAllOwnerTokenBalances(conn, ownerPk);
-    const toSweep = planWalletSweep(balances, WSOL_MINT, DUST_TOKEN_RAW);
+    const toSweep = planWalletSweep(balances, WSOL_MINT, BigInt(eff().execution.dustTokenRaw));
     if (toSweep.length === 0) return;
     void journal.record({ stage: 'sweep', outcome: 'detected', leader: cfg.leader, detail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
     log.info({ count: toSweep.length, mints: toSweep.map((b) => b.mint) }, '🧹 wallet sweep — dormant non-SOL token(s) found');

@@ -11,7 +11,7 @@ import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
 import type { SizingConfig } from '../sizing';
 import { CONFIG_DEFAULTS, DEFAULT_LEADER_ADDRESS, USER_DEFAULTS } from './defaults';
-import { type CopybotConfig, type LeaderSettings, TWO_SIDED_MODES, type UserSettings } from './types';
+import { type CopybotConfig, type ExecutionConfig, type LeaderSettings, TWO_SIDED_MODES, type UserSettings } from './types';
 
 // Zod mirrors of the reused domain interfaces — `satisfies` keeps each schema in lock-step with its interface.
 const SizingSchema = z.object({
@@ -46,8 +46,16 @@ const FilterConfigSchema = z.object({
   minHolders: z.number().nullable(),
 }) satisfies z.ZodType<FilterConfig>;
 
+const ExecutionSchema = z.object({
+  slippageBps: z.number().nonnegative(),
+  dustTokenRaw: z.number().int().nonnegative(),
+  minSellOutLamports: z.number().int().nonnegative(),
+  reshapeBinDeadbandSol: z.number().nonnegative(),
+  reshapeBinDeadbandToken: z.number().nonnegative(),
+}) satisfies z.ZodType<ExecutionConfig>;
+
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean() })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean(), execution: ExecutionSchema })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -55,7 +63,12 @@ const LeaderSchema = z
     address: z.string().min(1),
     enabled: z.boolean(),
     overrides: z
-      .object({ sizing: SizingSchema.partial().optional(), twoSidedMode: TwoSidedSchema.optional(), filters: FilterConfigSchema.partial().optional() })
+      .object({
+        sizing: SizingSchema.partial().optional(),
+        twoSidedMode: TwoSidedSchema.optional(),
+        filters: FilterConfigSchema.partial().optional(),
+        execution: ExecutionSchema.partial().optional(),
+      })
       .strict(),
   })
   .strict() satisfies z.ZodType<LeaderSettings>;
@@ -90,6 +103,7 @@ function mergeUser(partial: unknown): UserSettings {
     twoSidedMode: (p.twoSidedMode as UserSettings['twoSidedMode']) ?? USER_DEFAULTS.twoSidedMode,
     filters: { ...USER_DEFAULTS.filters, ...(isObj(p.filters) ? p.filters : {}) },
     filterShadow: typeof p.filterShadow === 'boolean' ? p.filterShadow : USER_DEFAULTS.filterShadow,
+    execution: { ...USER_DEFAULTS.execution, ...(isObj(p.execution) ? p.execution : {}) },
   } as UserSettings;
 }
 
