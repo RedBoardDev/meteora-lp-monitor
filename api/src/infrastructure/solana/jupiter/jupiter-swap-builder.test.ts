@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type HttpFetch, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterQuote } from './jupiter-swap-builder';
+import { type HttpFetch, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterBuyQuoteExactIn, getJupiterQuote } from './jupiter-swap-builder';
 
 const BASE = 'https://jup.test/v6';
 const MINT = 'TokenMintXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
@@ -98,6 +98,30 @@ describe('getJupiterBuyQuote — ExactOut SOL→token (two-sided copy)', () => {
   it('throws when the response is missing outAmount (no route to buy)', async () => {
     const { fetch } = fakeFetch({ body: { inAmount: '1' } });
     await expect(getJupiterBuyQuote(BASE, MINT, 1n, 50, fetch)).rejects.toThrow();
+  });
+});
+
+describe('getJupiterBuyQuoteExactIn — ExactIn SOL→token (memecoin-routable two-sided buy)', () => {
+  it('builds an ExactIn URL spending an exact SOL amount (input=WSOL, swapMode=ExactIn) — the token out is variable', async () => {
+    // WHY: ExactOut has NO route for most memecoins (NO_ROUTES_FOUND); ExactIn routes fully → the bot deposits the
+    // ACTUAL token received. The amount here is the SOL INPUT (not a token target).
+    const { fetch, calls } = fakeFetch({ body: { inAmount: '5000000', outAmount: '3620325', k: 1 } });
+    const q = await getJupiterBuyQuoteExactIn(BASE, MINT, 5_000_000n, 100, fetch);
+    expect(q).toMatchObject({ inputMint: WSOL_MINT, outputMint: MINT, inAmount: '5000000', outAmount: '3620325' });
+    expect(calls[0]?.url).toContain(`inputMint=${WSOL_MINT}`);
+    expect(calls[0]?.url).toContain(`outputMint=${MINT}`);
+    expect(calls[0]?.url).toContain('amount=5000000');
+    expect(calls[0]?.url).toContain('swapMode=ExactIn');
+    expect(calls[0]?.url).toContain('asLegacyTransaction=true');
+  });
+
+  it('retries a transient 429 then succeeds (shares the resilient fetch)', async () => {
+    const { fetch, count } = seqFetch([
+      { ok: false, status: 429, body: {} },
+      { body: { inAmount: '1000000', outAmount: '700000' } },
+    ]);
+    expect((await getJupiterBuyQuoteExactIn(BASE, MINT, 1_000_000n, 100, fetch)).outAmount).toBe('700000');
+    expect(count()).toBe(2);
   });
 });
 

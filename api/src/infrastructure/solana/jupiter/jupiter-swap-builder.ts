@@ -88,6 +88,24 @@ export async function getJupiterBuyQuote(
   return { inputMint: WSOL_MINT, outputMint, inAmount: raw.inAmount, outAmount: raw.outAmount, raw };
 }
 
+
+/**
+ * ExactIn BUY: spend `solInLamports` WSOL → receive a VARIABLE token amount. ExactIn has FULL Jupiter routing,
+ * whereas ExactOut has NO route for most memecoins (NO_ROUTES_FOUND) — so the two-sided copy MUST use this and then
+ * deposit the ACTUAL token amount received (read on-chain post-swap), not a pre-planned exact amount.
+ */
+export async function getJupiterBuyQuoteExactIn(
+  baseUrl: string,
+  outputMint: string,
+  solInLamports: bigint,
+  slippageBps: number,
+  fetchFn: HttpFetch = defaultFetch,
+): Promise<JupiterQuote> {
+  const url = `${baseUrl}/quote?inputMint=${WSOL_MINT}&outputMint=${outputMint}&amount=${solInLamports}&slippageBps=${slippageBps}&swapMode=ExactIn&asLegacyTransaction=true`;
+  const raw = QuoteResponseSchema.parse(await fetchJsonWithRetry(fetchFn, url, undefined, 'buy quote (ExactIn)'));
+  return { inputMint: WSOL_MINT, outputMint, inAmount: raw.inAmount, outAmount: raw.outAmount, raw };
+}
+
 /** Build the UNSIGNED legacy swap tx (base64) for `quote`, with `userPublicKey` as the signer/fee payer. */
 export async function buildJupiterSwapTx(
   baseUrl: string,
