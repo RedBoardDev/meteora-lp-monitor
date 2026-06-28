@@ -34,6 +34,7 @@ describe('config · defaults + schema', () => {
     expect(u.infiniteAdd).toBe(false); // spec §8: only the first deposit by default
     expect(u.claimFloorSol).toBe(0.01); // skip dust fee-claims (≈ Valhalla $2)
     expect(u.jitoEnabled).toBe(false); // Jito bundle landing is opt-in
+    expect(u.priorityFeeOracle).toBe(false); // live fee oracle is opt-in (spec §5)
   });
 });
 
@@ -85,6 +86,15 @@ describe('config · parseConfig (fail-safe + migration)', () => {
     expect(cfg.user.caps.killSwitchGlobal).toBe(true);
     expect(cfg.user.caps.maxOpenPositions).toBe(CONFIG_DEFAULTS.user.caps.maxOpenPositions);
     expect(cfg.user.sizing).toEqual(CONFIG_DEFAULTS.user.sizing);
+  });
+
+  it('a config persisted BEFORE a flag existed gains its default (priorityFeeOracle/jitoEnabled → false)', () => {
+    // WHY: a blob written by an older build has no `priorityFeeOracle` (nor `jitoEnabled`) key — migration must
+    // backfill the safe default (off), never crash on the missing field nor flip the feature on by surprise.
+    const cfg = parseConfig(JSON.stringify({ user: { sizing: { tradeRatioPct: 30 } } }));
+    expect(cfg.user.priorityFeeOracle).toBe(false);
+    expect(cfg.user.jitoEnabled).toBe(false);
+    expect(cfg.user.sizing.tradeRatioPct).toBe(30); // the provided field still wins
   });
 
   it('migrates a legacy FLAT blob ({leader, sizing, caps, twoSidedMode}) into the two-tier shape', () => {
