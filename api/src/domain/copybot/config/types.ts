@@ -10,6 +10,7 @@
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
 import type { PriorityFeeConfig } from '../priority-fee';
+import type { RugSlConfig } from '../rug-sl';
 import type { SizingConfig } from '../sizing';
 
 export const TWO_SIDED_MODES = ['off', 'shadow', 'on'] as const;
@@ -39,6 +40,8 @@ export interface Overridable {
   execution: ExecutionConfig;
   /** Priority-fee tier + hard SOL cap (see priority-fee.ts). */
   priorityFee: PriorityFeeConfig;
+  /** Rug-SL safety exit (crash protection; see rug-sl.ts). */
+  rugSl: RugSlConfig;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -56,6 +59,7 @@ export type LeaderOverride = {
   filters?: Partial<FilterConfig>;
   execution?: Partial<ExecutionConfig>;
   priorityFee?: Partial<PriorityFeeConfig>;
+  rugSl?: Partial<RugSlConfig>;
 };
 
 /** One followed leader. */
@@ -91,5 +95,6 @@ export type EffectiveOverride = {
   filters?: Partial<FilterConfig>;
   execution?: Partial<ExecutionConfig>;
   priorityFee?: Partial<PriorityFeeConfig>;
+  rugSl?: Partial<RugSlConfig>;
   userEnabled?: boolean;
 };

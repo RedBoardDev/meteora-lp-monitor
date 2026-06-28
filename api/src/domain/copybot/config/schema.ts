@@ -10,6 +10,7 @@ import { z } from 'zod';
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
 import { type PriorityFeeConfig, PRIORITY_FEE_TIERS } from '../priority-fee';
+import type { RugSlConfig } from '../rug-sl';
 import type { SizingConfig } from '../sizing';
 import { CONFIG_DEFAULTS, DEFAULT_LEADER_ADDRESS, USER_DEFAULTS } from './defaults';
 import { type CopybotConfig, type ExecutionConfig, type LeaderSettings, TWO_SIDED_MODES, type UserSettings } from './types';
@@ -60,8 +61,14 @@ const PriorityFeeSchema = z.object({
   maxCapSol: z.number().nonnegative(),
 }) satisfies z.ZodType<PriorityFeeConfig>;
 
+const RugSlSchema = z.object({
+  enabled: z.boolean(),
+  dropPercent: z.number().nonnegative(),
+  windowSeconds: z.number().positive(),
+}) satisfies z.ZodType<RugSlConfig>;
+
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -75,6 +82,7 @@ const LeaderSchema = z
         filters: FilterConfigSchema.partial().optional(),
         execution: ExecutionSchema.partial().optional(),
         priorityFee: PriorityFeeSchema.partial().optional(),
+        rugSl: RugSlSchema.partial().optional(),
       })
       .strict(),
   })
@@ -111,6 +119,7 @@ function mergeUser(partial: unknown): UserSettings {
     filters: { ...USER_DEFAULTS.filters, ...(isObj(p.filters) ? p.filters : {}) },
     execution: { ...USER_DEFAULTS.execution, ...(isObj(p.execution) ? p.execution : {}) },
     priorityFee: { ...USER_DEFAULTS.priorityFee, ...(isObj(p.priorityFee) ? p.priorityFee : {}) },
+    rugSl: { ...USER_DEFAULTS.rugSl, ...(isObj(p.rugSl) ? p.rugSl : {}) },
   } as UserSettings;
 }
 

@@ -30,6 +30,20 @@ describe('config · defaults + schema', () => {
     expect(u.twoSidedMode).toBe('off'); // token-leg policy = skip
     expect(u.filters).toEqual(expect.objectContaining({ minJupOrganicScore: null })); // filters off by default (for now)
     expect(u.priorityFee).toEqual({ tier: 'medium', maxCapSol: 0.005 }); // spec §5
+    expect(u.rugSl).toEqual({ enabled: true, dropPercent: 40, windowSeconds: 60 }); // spec §7
+  });
+});
+
+describe('config · rugSl', () => {
+  it('a leader sparsely overrides the drop threshold, the rest inherit', () => {
+    const cfg: CopybotConfig = {
+      user: CONFIG_DEFAULTS.user,
+      leaders: [{ address: LEADER, enabled: true, overrides: { rugSl: { dropPercent: 25 } } }],
+    };
+    const r = effectiveFor(cfg, LEADER).rugSl;
+    expect(r.dropPercent).toBe(25);
+    expect(r.enabled).toBe(true); // sibling preserved
+    expect(r.windowSeconds).toBe(60);
   });
 });
 

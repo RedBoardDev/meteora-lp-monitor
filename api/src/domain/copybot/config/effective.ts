@@ -8,6 +8,7 @@
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
 import type { PriorityFeeConfig } from '../priority-fee';
+import type { RugSlConfig } from '../rug-sl';
 import type { SizingConfig } from '../sizing';
 import type { CopybotConfig, EffectiveConfig, EffectiveOverride, ExecutionConfig } from './types';
 
@@ -34,6 +35,11 @@ function mergePriorityFee(base: PriorityFeeConfig, ov?: Partial<PriorityFeeConfi
   return ov ? { ...base, ...ov } : base;
 }
 
+/** Merge a sparse rug-SL override (per-leader, or env bridge) onto a base rug-SL config. */
+function mergeRugSl(base: RugSlConfig, ov?: Partial<RugSlConfig>): RugSlConfig {
+  return ov ? { ...base, ...ov } : base;
+}
+
 /** Resolve the config for ONE leader. Unknown address ⇒ user defaults with the leader treated as enabled. */
 export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConfig {
   const user = cfg.user;
@@ -51,6 +57,7 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     filters: mergeFilters(user.filters, ov.filters),
     execution: mergeExecution(user.execution, ov.execution),
     priorityFee: mergePriorityFee(user.priorityFee, ov.priorityFee),
+    rugSl: mergeRugSl(user.rugSl, ov.rugSl),
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
@@ -70,6 +77,7 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     filters: mergeFilters(eff.filters, ov.filters),
     execution: mergeExecution(eff.execution, ov.execution),
     priorityFee: mergePriorityFee(eff.priorityFee, ov.priorityFee),
+    rugSl: mergeRugSl(eff.rugSl, ov.rugSl),
     userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }
