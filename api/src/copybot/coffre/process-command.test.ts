@@ -1,9 +1,10 @@
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
-import { type Connection, Keypair, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { type Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
 import { eq, inArray } from 'drizzle-orm';
 import { pino } from 'pino';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { deriveCommandId } from '@/copybot/command-id';
+import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import type { Journal } from '@/domain/copybot/journal';
 import type { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 import type { RedisBus } from '@/infrastructure/bus/redis-bus';
@@ -131,6 +132,130 @@ describe('process1 — a returned signature is NOT execution (no dormant-positio
     const sr = closeReq();
     const verdict = await process1(sr, { ...ctxFor(conn, bus), signingEnabled: false });
     expect(verdict).toMatchObject({ ok: true, reason: 'dry-run' });
+    expect(bus.publish).not.toHaveBeenCalled();
+  });
+});
+
+// --- OPEN with a WSOL wrap: exercises the position-signer path + the #3 Wall-B SOL-spend cap, END-TO-END in process1.
+const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+const ownerWsolAta = (owner: PublicKey): PublicKey => PublicKey.findProgramAddressSync([owner.toBuffer(), TOKEN_PROGRAM.toBuffer(), WSOL.toBuffer()], ATA_PROGRAM)[0];
+
+/** A valid OPEN that WRAPS `wrapLamports` SOL into the copier's WSOL ATA (the real capital deployed). The ephemeral
+ *  position (derived from commandId, as the coffre will) is a required signer so Wall B's open check passes. */
+function openReq(wrapLamports: number, sizeSol = 0.1): Record<string, unknown> {
+  const eventKey = `test:${pool.toBase58()}:open:${copier.publicKey.toBase58()}:${usedCommandIds.length}:${process.hrtime.bigint()}`;
+  const commandId = deriveCommandId(eventKey);
+  usedCommandIds.push(commandId);
+  const ephemeral = derivePositionKeypair(commandId).publicKey;
+  const t = new Transaction();
+  t.feePayer = copier.publicKey;
+  t.recentBlockhash = Keypair.generate().publicKey.toBase58();
+  t.add(
+    new TransactionInstruction({
+      programId: DLMM,
+      keys: [
+        { pubkey: copier.publicKey, isSigner: true, isWritable: true },
+        { pubkey: ephemeral, isSigner: true, isWritable: true },
+        { pubkey: pool, isSigner: false, isWritable: true },
+      ],
+      data: Buffer.alloc(0),
+    }),
+    SystemProgram.transfer({ fromPubkey: copier.publicKey, toPubkey: ownerWsolAta(copier.publicKey), lamports: wrapLamports }),
+  );
+  return {
+    commandId,
+    eventKey,
+    kind: 'open',
+    pool: pool.toBase58(),
+    positionPubkey: ephemeral.toBase58(),
+    owner: copier.publicKey.toBase58(),
+    txBase64: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'),
+    sizeSol,
+    targetBinRange: { lower: -1, upper: 1 },
+    issuedAtSlot: 100,
+    deadlineSlot: 1_000_000,
+    issuedAtMs: Date.now(),
+  };
+}
+
+describe('process1 — OPEN: position-signer + the #3 Wall-B SOL-spend cap end-to-end', () => {
+  it('an open whose wrap is UNDER the cap (sized at maxTradeSol) lands when confirmed', async () => {
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const conn = fakeConn(() => ({ value: { confirmationStatus: 'confirmed' } }));
+    const sr = openReq(900_000_000, 0.9); // wrap 0.9 SOL ≤ cap (maxTradeSol 1.0 × 1.1 + 0.005)
+    const verdict = await process1(sr, ctxFor(conn, bus));
+    expect(verdict).toEqual({ ok: true, kind: 'open' });
+    expect(bus.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it('an open that UNDER-REPORTS sizeSol but WRAPS far more than the cap → rejected wallb:sol_spend_over_cap (no sign)', async () => {
+    // WHY: the #3 fix — the re-clamp only bounds the self-reported sizeSol (0.1, under maxTradeSol so it passes the
+    // size check); Wall B must catch that the tx actually wraps 5 SOL, far over the cap, and refuse to sign.
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const conn = fakeConn(() => ({ value: { confirmationStatus: 'confirmed' } }));
+    const sr = openReq(5_000_000_000, 0.1); // reports 0.1 SOL but wraps 5 SOL
+    const verdict = await process1(sr, ctxFor(conn, bus));
+    expect(verdict).toMatchObject({ ok: false, reason: 'wallb:sol_spend_over_cap', kind: 'open' });
+    expect(bus.publish).not.toHaveBeenCalled(); // never signed/landed
+    const row = await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string));
+    expect(row[0]?.state).toBe('failed');
+  });
+});
+
+// --- BUY (Jupiter SOL→token, funds a two-sided open): validates the #4 fix — a buy that doesn't confirm must NOT
+// publish ev:executed (else the dependent two-sided open builds tokenless and fails).
+const JUP = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');
+function buyReq(confirmable: boolean, outputMint: PublicKey): Record<string, unknown> {
+  const eventKey = `test:${pool.toBase58()}:buy:${copier.publicKey.toBase58()}:${usedCommandIds.length}:${process.hrtime.bigint()}`;
+  const commandId = deriveCommandId(eventKey);
+  usedCommandIds.push(commandId);
+  const t = new Transaction();
+  t.feePayer = copier.publicKey;
+  t.recentBlockhash = Keypair.generate().publicKey.toBase58();
+  t.add(
+    new TransactionInstruction({
+      programId: JUP,
+      keys: [
+        { pubkey: copier.publicKey, isSigner: true, isWritable: true },
+        { pubkey: PublicKey.findProgramAddressSync([copier.publicKey.toBuffer(), TOKEN_PROGRAM.toBuffer(), outputMint.toBuffer()], ATA_PROGRAM)[0], isSigner: false, isWritable: true },
+      ],
+      data: Buffer.alloc(0),
+    }),
+  );
+  return {
+    commandId,
+    eventKey,
+    kind: 'buy',
+    pool: pool.toBase58(),
+    positionPubkey: copier.publicKey.toBase58(),
+    owner: copier.publicKey.toBase58(),
+    txBase64: t.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'),
+    sizeSol: 0.1,
+    targetBinRange: { lower: 0, upper: 0 },
+    issuedAtSlot: 100,
+    deadlineSlot: 1_000_000,
+    issuedAtMs: Date.now(),
+    buy: { outputMint: outputMint.toBase58(), exactOutAmountRaw: '1000', maxInLamports: '100000000' },
+  };
+}
+
+describe('process1 — BUY confirm gate (#4: a non-confirmed buy never publishes ev:executed)', () => {
+  it('a buy that CONFIRMS → landed + ev:executed (the dependent open may proceed)', async () => {
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const conn = fakeConn(() => ({ value: { confirmationStatus: 'confirmed' } }));
+    const verdict = await process1(buyReq(true, Keypair.generate().publicKey), ctxFor(conn, bus));
+    expect(verdict).toEqual({ ok: true, kind: 'buy' });
+    expect(bus.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it('a buy that does NOT confirm (timeout) → failed, NO ev:executed (no tokenless two-sided open downstream)', async () => {
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const conn = fakeConn(() => ({ value: null })); // never confirms
+    const sr = buyReq(false, Keypair.generate().publicKey);
+    const verdict = await process1(sr, ctxFor(conn, bus));
+    expect(verdict.ok).toBe(false);
     expect(bus.publish).not.toHaveBeenCalled();
   });
 });
