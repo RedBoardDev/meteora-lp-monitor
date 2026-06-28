@@ -23,14 +23,19 @@ export function withCuLimit(t: Transaction | Transaction[], units: number): Tran
   return tx;
 }
 
+const MICRO_LAMPORTS_PER_LAMPORT = 1_000_000;
+
 /**
  * Set the priority fee (compute-unit price) on a tx, bounded by the leader's capped tier. Reads the tx's CU limit
  * (the worst case) so `price × cuLimit` never exceeds the cap. Replaces any existing price ix (idempotent).
+ * Returns the priority lamports this fee will cost at the worst case (price × cuLimit) — used to size the Jito tip
+ * within the shared cap.
  */
-export function applyPriorityFee(tx: Transaction, pf: PriorityFeeConfig): void {
+export function applyPriorityFee(tx: Transaction, pf: PriorityFeeConfig): number {
   const limitIx = tx.instructions.find((ix) => isCbIx(ix, CB_SET_UNIT_LIMIT));
   const cuLimit = limitIx ? limitIx.data.readUInt32LE(1) : DEFAULT_CU_LIMIT_FOR_PRICE;
   const micro = computeUnitPriceMicroLamports(pf.tier, cuLimit, pf.maxCapSol);
   tx.instructions = tx.instructions.filter((ix) => !isCbIx(ix, CB_SET_UNIT_PRICE));
   if (micro > 0) tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: micro }));
+  return Math.floor((micro * cuLimit) / MICRO_LAMPORTS_PER_LAMPORT);
 }

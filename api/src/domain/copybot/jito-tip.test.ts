@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CONSERVATIVE_JITO_TIP_LAMPORTS, JITO_TIP_ACCOUNTS, jitoTipLamports, pickJitoTipAccount } from './jito-tip';
+import { CONSERVATIVE_JITO_TIP_LAMPORTS, JITO_TIP_ACCOUNTS, jitoTipFor, jitoTipLamports, pickJitoTipAccount } from './jito-tip';
 
 describe('jito-tip · jitoTipLamports (within the shared cap)', () => {
   const CAP = 5_000_000; // 0.005 SOL cap
@@ -35,5 +35,24 @@ describe('jito-tip · pickJitoTipAccount', () => {
 
   it('rotates across accounts (different seeds hit different accounts)', () => {
     expect(pickJitoTipAccount(0).toBase58()).not.toBe(pickJitoTipAccount(1).toBase58());
+  });
+});
+
+describe('jito-tip · jitoTipFor (brain combiner)', () => {
+  const CAP = 5_000_000;
+
+  it('returns null when Jito is off (no tip ix added)', () => {
+    expect(jitoTipFor(false, CAP, 40_000, 0)).toBeNull();
+  });
+
+  it('returns the account + capped tip when on with headroom', () => {
+    const tip = jitoTipFor(true, CAP, 40_000, 3);
+    expect(tip).not.toBeNull();
+    expect(tip!.lamports).toBe(CONSERVATIVE_JITO_TIP_LAMPORTS);
+    expect(JITO_TIP_ACCOUNTS.map((a) => a.toBase58())).toContain(tip!.account.toBase58());
+  });
+
+  it('returns null when on but the priority fee already used the whole cap (no tip, no burn)', () => {
+    expect(jitoTipFor(true, CAP, CAP, 0)).toBeNull();
   });
 });

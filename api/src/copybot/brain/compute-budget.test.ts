@@ -51,4 +51,19 @@ describe('compute-budget · applyPriorityFee', () => {
     applyPriorityFee(tx, { tier: 'medium', maxCapSol: 0.005 });
     expect(priceOf(tx)).toBe(BigInt(computeUnitPriceMicroLamports('medium', 200_000, 0.005)));
   });
+
+  it('returns the priority lamports it will cost (price × cuLimit / 1e6) — the figure that sizes the Jito tip', () => {
+    // WHY: the brain feeds this return into jitoTipFor so priority + tip stay within the SAME cap; a wrong figure
+    // would let the tip overspend the cap (or starve it). Must equal the on-tx price × the limit it priced against.
+    const tx = txWithLimit(200_000);
+    const spent = applyPriorityFee(tx, { tier: 'medium', maxCapSol: 0.005 });
+    const micro = computeUnitPriceMicroLamports('medium', 200_000, 0.005);
+    expect(spent).toBe(Math.floor((micro * 200_000) / 1_000_000));
+  });
+
+  it('the returned spend never exceeds the cap lamports (so the tip headroom is real)', () => {
+    const cap = 0.00005;
+    const spent = applyPriorityFee(txWithLimit(1_400_000), { tier: 'high', maxCapSol: cap });
+    expect(spent).toBeLessThanOrEqual(Math.ceil(cap * 1_000_000_000));
+  });
 });

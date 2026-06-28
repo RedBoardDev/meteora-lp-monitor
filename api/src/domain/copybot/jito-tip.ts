@@ -38,3 +38,13 @@ export function pickJitoTipAccount(seed: number): PublicKey {
   const i = ((Math.trunc(seed) % JITO_TIP_ACCOUNTS.length) + JITO_TIP_ACCOUNTS.length) % JITO_TIP_ACCOUNTS.length;
   return JITO_TIP_ACCOUNTS[i] as PublicKey;
 }
+
+/**
+ * Resolve the Jito tip to add to a tx: the recipient account + lamports, or null when Jito is off OR no headroom
+ * remains under the cap. Pure — the brain turns this into a SystemProgram.transfer when non-null.
+ */
+export function jitoTipFor(enabled: boolean, capLamports: number, prioritySpentLamports: number, seed: number): { account: PublicKey; lamports: number } | null {
+  if (!enabled) return null;
+  const lamports = jitoTipLamports(capLamports, prioritySpentLamports);
+  return lamports > 0 ? { account: pickJitoTipAccount(seed), lamports } : null;
+}

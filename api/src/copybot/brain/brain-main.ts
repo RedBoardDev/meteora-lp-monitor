@@ -7,7 +7,7 @@
  *   yarn tsup --config tsup.copybot.config.ts → node --env-file=../.env dist/copybot/brain-main.cjs [--once] [--seconds=N]
  */
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
-import { Connection, type Keypair, PublicKey, type Transaction } from '@solana/web3.js';
+import { Connection, type Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, type Transaction } from '@solana/web3.js';
 import { pino } from 'pino';
 import { type CapsState, checkCaps } from '@/domain/copybot/caps';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
@@ -16,6 +16,7 @@ import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
 import { RugSlTracker } from '@/domain/copybot/rug-sl';
+import { jitoTipFor } from '@/domain/copybot/jito-tip';
 import { type EffectiveConfig, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
 
 import { type FilterContext, filtersActive, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
@@ -83,6 +84,7 @@ const cfg = {
   ownerPubkey: process.env.COPIER_OWNER ?? 'Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrvDh9zz',
   balanceSol: Number(process.env.COPIER_BALANCE_SOL ?? '10'),
   jupiterBaseUrl: process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL,
+  jitoEnabledEnv: process.env.COPYBOT_JITO !== undefined ? process.env.COPYBOT_JITO === 'true' : undefined, // env override of the DB jitoEnabled (anti-sandwich tip ix)
 };
 // Sizing/caps/two-sided/filters all come from the DB-backed config (config-store), resolved per leader via eff().
 // The env override (migration bridge) is SPARSE: a var, WHEN SET, takes precedence (preserves the on-chain bench);
@@ -178,10 +180,21 @@ async function main(): Promise<void> {
     });
   }
 
+  // Jito on = env override (bench) else the user-level DB flag; mirrors the coffre's landing decision so the tip
+  // is added exactly when the vault will bundle. jitoEnabled is user-level only (not per-leader-overridable).
+  const jitoOn = (): boolean => cfg.jitoEnabledEnv ?? runtimeConfig.user.jitoEnabled;
+  let jitoTipSeed = 0; // rotates the tip across Jito's accounts (per-tip) to avoid contention
+
   function serializeUnsigned(tx: Transaction): string {
     tx.feePayer = ownerPk;
     tx.recentBlockhash = blockhashCache.get(); // cached: the vault re-sets a fresh one before signing → no hot-path RTT
-    applyPriorityFee(tx, eff().priorityFee); // capped priority fee on every DLMM tx (Wall B allows ComputeBudget)
+    const pf = eff().priorityFee;
+    const prioritySpent = applyPriorityFee(tx, pf); // capped priority fee on every DLMM tx (Wall B allows ComputeBudget)
+    // Anti-sandwich Jito tip, INSIDE the shared priority-fee cap (priority + tip ≤ maxCapSol). Only has effect when
+    // the vault bundles; on the RPC fallback the tip burns (small, capped, only when Jito is on). Wall B allowlists
+    // a tip to a known Jito account up to its own hard cap. Default off ⇒ no tip ix at all.
+    const tip = jitoTipFor(jitoOn(), pf.maxCapSol * LAMPORTS_PER_SOL, prioritySpent, jitoTipSeed++);
+    if (tip) tx.instructions.push(SystemProgram.transfer({ fromPubkey: ownerPk, toPubkey: tip.account, lamports: tip.lamports }));
     return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
   }
 
