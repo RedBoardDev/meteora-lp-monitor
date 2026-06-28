@@ -16,7 +16,8 @@ const ev = (over: Partial<DetectedEvent>): DetectedEvent => ({
   ...over,
 });
 
-const route = (over: Partial<DetectedEvent>, tracked: boolean): EventAction => classifyEventAction(ev(over), tracked);
+const route = (over: Partial<DetectedEvent>, tracked: boolean, infiniteAdd = true): EventAction =>
+  classifyEventAction(ev(over), tracked, infiniteAdd);
 
 describe('classifyEventAction — event routing (robustness)', () => {
   it('first deposit on an UNTRACKED position → open', () => {
@@ -59,5 +60,27 @@ describe('classifyEventAction — event routing (robustness)', () => {
 
   it('a no-op event on a tracked position (no deposit/withdraw/claim, unknown instruction) → ignore', () => {
     expect(route({ instruction: 'Unknown' }, true)).toBe('ignore');
+  });
+});
+
+describe('classifyEventAction — infinite-add gate (default OFF: only the first deposit, removes always followed)', () => {
+  const add = { instruction: 'AddLiquidityByStrategy2', depositSol: 0.04 };
+
+  it('infiniteAdd OFF: a pure leader ADD on a tracked position → ignore (we do not grow with the leader)', () => {
+    expect(route(add, true, false)).toBe('ignore');
+  });
+
+  it('infiniteAdd ON: the same ADD → resync (grow with the leader)', () => {
+    expect(route(add, true, true)).toBe('resync');
+  });
+
+  it('★ even with infiniteAdd OFF, a REMOVE is still followed → resync (shrink); a CLOSE still closes (no-dormant safety)', () => {
+    // The gate must NEVER touch the exit path — missing a leader remove/close is the cardinal sin.
+    expect(route({ instruction: 'RemoveLiquidity', withdrawSol: 0.05 }, true, false)).toBe('resync');
+    expect(route({ instruction: 'ClosePosition', withdrawSol: 0.1 }, true, false)).toBe('close');
+  });
+
+  it('infiniteAdd OFF does not affect a first open on an untracked position', () => {
+    expect(route({ instruction: 'InitializePosition', depositSol: 0.1 }, false, false)).toBe('open');
   });
 });

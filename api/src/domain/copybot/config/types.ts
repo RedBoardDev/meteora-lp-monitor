@@ -42,6 +42,8 @@ export interface Overridable {
   priorityFee: PriorityFeeConfig;
   /** Rug-SL safety exit (crash protection; see rug-sl.ts). */
   rugSl: RugSlConfig;
+  /** Copy EVERY leader add-liquidity (grow with the leader), or only the first deposit. Removes are always followed. */
+  infiniteAdd: boolean;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -60,6 +62,7 @@ export type LeaderOverride = {
   execution?: Partial<ExecutionConfig>;
   priorityFee?: Partial<PriorityFeeConfig>;
   rugSl?: Partial<RugSlConfig>;
+  infiniteAdd?: boolean;
 };
 
 /** One followed leader. */
@@ -96,5 +99,6 @@ export type EffectiveOverride = {
   execution?: Partial<ExecutionConfig>;
   priorityFee?: Partial<PriorityFeeConfig>;
   rugSl?: Partial<RugSlConfig>;
+  infiniteAdd?: boolean;
   userEnabled?: boolean;
 };

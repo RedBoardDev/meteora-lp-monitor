@@ -58,6 +58,7 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     execution: mergeExecution(user.execution, ov.execution),
     priorityFee: mergePriorityFee(user.priorityFee, ov.priorityFee),
     rugSl: mergeRugSl(user.rugSl, ov.rugSl),
+    infiniteAdd: ov.infiniteAdd ?? user.infiniteAdd,
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
@@ -78,6 +79,7 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     execution: mergeExecution(eff.execution, ov.execution),
     priorityFee: mergePriorityFee(eff.priorityFee, ov.priorityFee),
     rugSl: mergeRugSl(eff.rugSl, ov.rugSl),
+    infiniteAdd: ov.infiniteAdd ?? eff.infiniteAdd,
     userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }

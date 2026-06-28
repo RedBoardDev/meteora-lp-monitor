@@ -68,7 +68,7 @@ const RugSlSchema = z.object({
 }) satisfies z.ZodType<RugSlConfig>;
 
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema, infiniteAdd: z.boolean() })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -83,6 +83,7 @@ const LeaderSchema = z
         execution: ExecutionSchema.partial().optional(),
         priorityFee: PriorityFeeSchema.partial().optional(),
         rugSl: RugSlSchema.partial().optional(),
+        infiniteAdd: z.boolean().optional(),
       })
       .strict(),
   })
@@ -120,6 +121,7 @@ function mergeUser(partial: unknown): UserSettings {
     execution: { ...USER_DEFAULTS.execution, ...(isObj(p.execution) ? p.execution : {}) },
     priorityFee: { ...USER_DEFAULTS.priorityFee, ...(isObj(p.priorityFee) ? p.priorityFee : {}) },
     rugSl: { ...USER_DEFAULTS.rugSl, ...(isObj(p.rugSl) ? p.rugSl : {}) },
+    infiniteAdd: typeof p.infiniteAdd === 'boolean' ? p.infiniteAdd : USER_DEFAULTS.infiniteAdd,
   } as UserSettings;
 }
 

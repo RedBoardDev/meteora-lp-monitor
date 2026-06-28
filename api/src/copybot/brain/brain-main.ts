@@ -721,7 +721,7 @@ async function main(): Promise<void> {
     const t0 = Date.now();
     const kind = classifyInstruction(e.instruction);
     const tracked = registry.hasOpen(e.position);
-    const action = classifyEventAction(e, tracked); // pure routing (unit-tested in dispatch.test.ts)
+    const action = classifyEventAction(e, tracked, eff().infiniteAdd); // pure routing (unit-tested in dispatch.test.ts)
     log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
     if (action !== 'ignore') {
       void journal.record({ stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, detail: { action, instruction: e.instruction } });

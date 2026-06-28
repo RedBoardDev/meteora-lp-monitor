@@ -31,6 +31,18 @@ describe('config · defaults + schema', () => {
     expect(u.filters).toEqual(expect.objectContaining({ minJupOrganicScore: null })); // filters off by default (for now)
     expect(u.priorityFee).toEqual({ tier: 'medium', maxCapSol: 0.005 }); // spec §5
     expect(u.rugSl).toEqual({ enabled: true, dropPercent: 40, windowSeconds: 60 }); // spec §7
+    expect(u.infiniteAdd).toBe(false); // spec §8: only the first deposit by default
+  });
+});
+
+describe('config · infiniteAdd', () => {
+  it('a leader can override infiniteAdd to true (follow the leader’s adds)', () => {
+    const cfg: CopybotConfig = {
+      user: CONFIG_DEFAULTS.user,
+      leaders: [{ address: LEADER, enabled: true, overrides: { infiniteAdd: true } }],
+    };
+    expect(effectiveFor(cfg, LEADER).infiniteAdd).toBe(true);
+    expect(effectiveFor(CONFIG_DEFAULTS, LEADER).infiniteAdd).toBe(false); // default unaffected
   });
 });
 

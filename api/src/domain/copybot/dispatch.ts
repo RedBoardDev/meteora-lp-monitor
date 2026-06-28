@@ -11,13 +11,15 @@ import type { DetectedEvent } from './events';
 /** What the brain should do with a detected event. `resync` = re-shape our copy to the leader's new size/shape. */
 export type EventAction = 'open' | 'resync' | 'close' | 'claim' | 'ignore';
 
-export function classifyEventAction(e: DetectedEvent, tracked: boolean): EventAction {
+export function classifyEventAction(e: DetectedEvent, tracked: boolean, infiniteAdd: boolean): EventAction {
   const kind = classifyInstruction(e.instruction);
   if (e.depositSol > 0 && !tracked) return 'open'; // first capital event on an untracked position → open
   if (!tracked) return 'ignore'; // event on a position we don't mirror → ignore (reconcile/orphan handles it)
-  if (e.depositSol > 0) return 'resync'; // deposit on a tracked position → re-sync to target
   if (kind === 'close') return 'close'; // full close — checked BEFORE withdraw (a close also withdraws)
-  if (e.withdrawSol > 0) return 'resync'; // partial withdrawal → re-sync to target
+  if (e.withdrawSol > 0) return 'resync'; // ANY withdrawal → re-sync (shrink): always followed (no-dormant safety)
+  // A pure leader ADD (deposit, no withdrawal): grow with the leader only when infinite-add is on; else ignore it
+  // (Valhalla "first deposit only"). Removes/closes above are unaffected, so the safety net is never gated.
+  if (e.depositSol > 0) return infiniteAdd ? 'resync' : 'ignore';
   if (kind === 'claim' || e.claimSol > 0) return 'claim'; // fee claim (never a close)
   return 'ignore';
 }
