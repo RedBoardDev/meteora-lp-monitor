@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decideRugSl, type PricePoint, type RugSlConfig } from './rug-sl';
+import { decideRugSl, type PricePoint, RugSlTracker, type RugSlConfig } from './rug-sl';
 
 const CFG: RugSlConfig = { enabled: true, dropPercent: 40, windowSeconds: 60 };
 const NOW = 1_000_000;
@@ -42,5 +42,45 @@ describe('rug-sl · decideRugSl', () => {
     const cfg = { ...CFG, dropPercent: 20 };
     expect(decideRugSl([at(30, 1.0), at(0, 0.75)], cfg, NOW)).toBe(true); // −25% ≥ 20%
     expect(decideRugSl([at(30, 1.0), at(0, 0.85)], cfg, NOW)).toBe(false); // −15% < 20%
+  });
+});
+
+describe('rug-sl · RugSlTracker', () => {
+  const RETAIN = 120_000; // 2 min
+
+  it('records samples and detects a crash via check (delegates to decideRugSl)', () => {
+    const t = new RugSlTracker(RETAIN);
+    t.record('posA', 1.0, NOW - 30_000);
+    t.record('posA', 0.5, NOW); // −50%
+    expect(t.check('posA', CFG, NOW)).toBe(true);
+  });
+
+  it('prunes samples older than retainMs so the window never grows unbounded', () => {
+    const t = new RugSlTracker(60_000); // retain 60s
+    t.record('posA', 1.0, NOW - 90_000); // older than retain → pruned on the next record
+    t.record('posA', 0.4, NOW); // only this sample remains → <2 in-window → no trigger
+    expect(t.check('posA', CFG, NOW)).toBe(false);
+  });
+
+  it('isolates windows per position (one crash never flags another)', () => {
+    const t = new RugSlTracker(RETAIN);
+    t.record('crashed', 1.0, NOW - 20_000);
+    t.record('crashed', 0.4, NOW);
+    t.record('healthy', 1.0, NOW - 20_000);
+    t.record('healthy', 1.02, NOW);
+    expect(t.check('crashed', CFG, NOW)).toBe(true);
+    expect(t.check('healthy', CFG, NOW)).toBe(false);
+  });
+
+  it('forget drops the window (a re-opened same pubkey starts fresh, no stale crash)', () => {
+    const t = new RugSlTracker(RETAIN);
+    t.record('posA', 1.0, NOW - 20_000);
+    t.record('posA', 0.4, NOW);
+    t.forget('posA');
+    expect(t.check('posA', CFG, NOW)).toBe(false); // empty window → no trigger
+  });
+
+  it('check on an unknown position is false (no window)', () => {
+    expect(new RugSlTracker(RETAIN).check('never-seen', CFG, NOW)).toBe(false);
   });
 });

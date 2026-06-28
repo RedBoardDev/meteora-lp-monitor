@@ -34,3 +34,30 @@ export function decideRugSl(window: PricePoint[], cfg: RugSlConfig, nowMs: numbe
   const dropFraction = (high - latest) / high;
   return dropFraction >= cfg.dropPercent / 100;
 }
+
+/**
+ * Per-position rolling price windows + crash check. Pure (in-memory, no I/O): the brain feeds it the DLMM
+ * active-bin price on a cadence (`record`), then asks `check` whether a position has rugged. Each window is pruned
+ * to `retainMs` so it never grows unbounded; `forget` frees a window when its position closes.
+ */
+export class RugSlTracker {
+  private readonly windows = new Map<string, PricePoint[]>();
+
+  constructor(private readonly retainMs: number) {}
+
+  /** Append a price sample for `key` (our position pubkey) and prune samples older than `retainMs`. */
+  record(key: string, price: number, nowMs: number): void {
+    const next = [...(this.windows.get(key) ?? []), { ts: nowMs, price }].filter((p) => nowMs - p.ts <= this.retainMs);
+    this.windows.set(key, next);
+  }
+
+  /** Whether `key` has crashed by ≥ `cfg.dropPercent` within `cfg.windowSeconds`. */
+  check(key: string, cfg: RugSlConfig, nowMs: number): boolean {
+    return decideRugSl(this.windows.get(key) ?? [], cfg, nowMs);
+  }
+
+  /** Drop a position's window (call on close so a re-opened SAME pubkey never reuses stale prices, and to free RAM). */
+  forget(key: string): void {
+    this.windows.delete(key);
+  }
+}
