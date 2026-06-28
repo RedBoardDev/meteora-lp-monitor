@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
+import { type PriorityFeeConfig, PRIORITY_FEE_TIERS } from '../priority-fee';
 import type { SizingConfig } from '../sizing';
 import { CONFIG_DEFAULTS, DEFAULT_LEADER_ADDRESS, USER_DEFAULTS } from './defaults';
 import { type CopybotConfig, type ExecutionConfig, type LeaderSettings, TWO_SIDED_MODES, type UserSettings } from './types';
@@ -54,8 +55,13 @@ const ExecutionSchema = z.object({
   reshapeBinDeadbandToken: z.number().nonnegative(),
 }) satisfies z.ZodType<ExecutionConfig>;
 
+const PriorityFeeSchema = z.object({
+  tier: z.enum(PRIORITY_FEE_TIERS),
+  maxCapSol: z.number().nonnegative(),
+}) satisfies z.ZodType<PriorityFeeConfig>;
+
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean(), execution: ExecutionSchema })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean(), execution: ExecutionSchema, priorityFee: PriorityFeeSchema })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -68,6 +74,7 @@ const LeaderSchema = z
         twoSidedMode: TwoSidedSchema.optional(),
         filters: FilterConfigSchema.partial().optional(),
         execution: ExecutionSchema.partial().optional(),
+        priorityFee: PriorityFeeSchema.partial().optional(),
       })
       .strict(),
   })
@@ -104,6 +111,7 @@ function mergeUser(partial: unknown): UserSettings {
     filters: { ...USER_DEFAULTS.filters, ...(isObj(p.filters) ? p.filters : {}) },
     filterShadow: typeof p.filterShadow === 'boolean' ? p.filterShadow : USER_DEFAULTS.filterShadow,
     execution: { ...USER_DEFAULTS.execution, ...(isObj(p.execution) ? p.execution : {}) },
+    priorityFee: { ...USER_DEFAULTS.priorityFee, ...(isObj(p.priorityFee) ? p.priorityFee : {}) },
   } as UserSettings;
 }
 

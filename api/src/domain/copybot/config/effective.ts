@@ -7,6 +7,7 @@
  */
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
+import type { PriorityFeeConfig } from '../priority-fee';
 import type { SizingConfig } from '../sizing';
 import type { CopybotConfig, EffectiveConfig, EffectiveOverride, ExecutionConfig } from './types';
 
@@ -28,6 +29,11 @@ function mergeExecution(base: ExecutionConfig, ov?: Partial<ExecutionConfig>): E
   return ov ? { ...base, ...ov } : base;
 }
 
+/** Merge a sparse priority-fee override (per-leader, or env bridge) onto a base priority-fee config. */
+function mergePriorityFee(base: PriorityFeeConfig, ov?: Partial<PriorityFeeConfig>): PriorityFeeConfig {
+  return ov ? { ...base, ...ov } : base;
+}
+
 /** Resolve the config for ONE leader. Unknown address ⇒ user defaults with the leader treated as enabled. */
 export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConfig {
   const user = cfg.user;
@@ -45,6 +51,7 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     filters: mergeFilters(user.filters, ov.filters),
     filterShadow: user.filterShadow, // account-wide (not per-leader)
     execution: mergeExecution(user.execution, ov.execution),
+    priorityFee: mergePriorityFee(user.priorityFee, ov.priorityFee),
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
@@ -64,6 +71,7 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     filters: mergeFilters(eff.filters, ov.filters),
     filterShadow: ov.filterShadow ?? eff.filterShadow,
     execution: mergeExecution(eff.execution, ov.execution),
+    priorityFee: mergePriorityFee(eff.priorityFee, ov.priorityFee),
     userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }

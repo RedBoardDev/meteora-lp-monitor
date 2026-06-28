@@ -9,6 +9,7 @@
  */
 import type { CapsConfig } from '../caps';
 import type { FilterConfig } from '../filters';
+import type { PriorityFeeConfig } from '../priority-fee';
 import type { SizingConfig } from '../sizing';
 
 export const TWO_SIDED_MODES = ['off', 'shadow', 'on'] as const;
@@ -36,6 +37,8 @@ export interface Overridable {
   filters: FilterConfig;
   /** Swap/reshape execution tunables. */
   execution: ExecutionConfig;
+  /** Priority-fee tier + hard SOL cap (see priority-fee.ts). */
+  priorityFee: PriorityFeeConfig;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -54,6 +57,7 @@ export type LeaderOverride = {
   twoSidedMode?: TwoSidedMode;
   filters?: Partial<FilterConfig>;
   execution?: Partial<ExecutionConfig>;
+  priorityFee?: Partial<PriorityFeeConfig>;
 };
 
 /** One followed leader. */
@@ -91,5 +95,6 @@ export type EffectiveOverride = {
   filters?: Partial<FilterConfig>;
   filterShadow?: boolean;
   execution?: Partial<ExecutionConfig>;
+  priorityFee?: Partial<PriorityFeeConfig>;
   userEnabled?: boolean;
 };

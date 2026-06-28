@@ -29,6 +29,19 @@ describe('config · defaults + schema', () => {
     expect(u.caps.maxOpenPositions).toBe(8);
     expect(u.twoSidedMode).toBe('off'); // token-leg policy = skip
     expect(u.filters).toEqual(expect.objectContaining({ minJupOrganicScore: null })); // filters off by default (for now)
+    expect(u.priorityFee).toEqual({ tier: 'medium', maxCapSol: 0.005 }); // spec §5
+  });
+});
+
+describe('config · priorityFee', () => {
+  it('a leader sparsely overrides the tier, the cap inherits', () => {
+    const cfg: CopybotConfig = {
+      user: CONFIG_DEFAULTS.user,
+      leaders: [{ address: LEADER, enabled: true, overrides: { priorityFee: { tier: 'high' } } }],
+    };
+    const pf = effectiveFor(cfg, LEADER).priorityFee;
+    expect(pf.tier).toBe('high');
+    expect(pf.maxCapSol).toBe(CONFIG_DEFAULTS.user.priorityFee.maxCapSol); // sibling preserved
   });
 });
 

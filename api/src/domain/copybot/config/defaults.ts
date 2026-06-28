@@ -23,6 +23,7 @@ export const USER_DEFAULTS: UserSettings = {
     reshapeBinDeadbandSol: 0.0002, // LOW: reshapes are event-driven (not arb), so a low threshold maximizes fidelity
     reshapeBinDeadbandToken: 100, // LOW per-bin token-leg threshold (two-sided reshape), same rationale as the SOL one
   },
+  priorityFee: { tier: 'medium', maxCapSol: 0.005 }, // capped CU price on every tx (spec §5)
 };
 
 export const CONFIG_DEFAULTS: CopybotConfig = {

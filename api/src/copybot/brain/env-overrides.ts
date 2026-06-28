@@ -8,10 +8,12 @@
  * Env keys: COPYBOT_{KILL_SWITCH,KILL_SWITCH_LEADER,MAX_OPEN_POSITIONS,MIN_POSITION_SOL,TWO_SIDED} +
  * COPYBOT_FILTER_{SHADOW,SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
  * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS} +
- * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN.
+ * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN +
+ * COPYBOT_PRIORITY_FEE_TIER, COPYBOT_PRIORITY_FEE_MAX_CAP_SOL.
  */
 import type { EffectiveOverride, ExecutionConfig, TwoSidedMode } from '@/domain/copybot/config';
 import type { FilterConfig } from '@/domain/copybot/filters';
+import type { PriorityFeeConfig, PriorityFeeTier } from '@/domain/copybot/priority-fee';
 
 const TRUE = 'true';
 
@@ -62,6 +64,17 @@ function envExecution(env: NodeJS.ProcessEnv): Partial<ExecutionConfig> | undefi
   return Object.keys(e).length > 0 ? e : undefined;
 }
 
+/** Build the SPARSE priority-fee override: only the fields whose env var is set. */
+function envPriorityFee(env: NodeJS.ProcessEnv): Partial<PriorityFeeConfig> | undefined {
+  const pf: Partial<PriorityFeeConfig> = {};
+  if (env.COPYBOT_PRIORITY_FEE_TIER !== undefined) pf.tier = env.COPYBOT_PRIORITY_FEE_TIER as PriorityFeeTier;
+  if (env.COPYBOT_PRIORITY_FEE_MAX_CAP_SOL !== undefined) {
+    const n = Number(env.COPYBOT_PRIORITY_FEE_MAX_CAP_SOL);
+    if (Number.isFinite(n)) pf.maxCapSol = n;
+  }
+  return Object.keys(pf).length > 0 ? pf : undefined;
+}
+
 /** The full sparse env override applied after `effectiveFor` (see `withEnvOverride`). */
 export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride {
   const toNum = (v: string | undefined): number | undefined => (v === undefined ? undefined : Number(v));
@@ -84,6 +97,7 @@ export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride 
     caps,
     twoSidedMode: env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined,
     execution: envExecution(env),
+    priorityFee: envPriorityFee(env),
     ...envFilters(env),
   };
 }
