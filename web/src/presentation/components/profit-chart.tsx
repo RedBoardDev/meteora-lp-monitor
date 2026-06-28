@@ -79,7 +79,8 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
   // coalescing both to 0 hid the real realized loss on the chart's last point (see liveNow below).
   const netWorth = usePortfolio((s) => s.portfolio?.totals.walletTotalSol ?? null);
   const period = useUi((s) => s.period);
-  const [source, setSource] = useState<Source>('networth');
+  // Default to the Positions (LPAgent-style realized-PnL) view — that's the headline most users want.
+  const [source, setSource] = useState<Source>('positions');
 
   // Three self-consistent views (toggle):
   //  • Net Worth = the wallet VALUE per UTC day (on-chain cash + capital deployed in open positions),
@@ -111,12 +112,17 @@ export function ProfitChart({ bucket }: { bucket: Bucket }) {
         return { t: Date.parse(`${p.date}T00:00:00Z`), realized: delta, cumulative: value };
       });
     }
-    const positions = await api.profitHistory(scope, bucket, sinceMs(period, Date.now()));
+    // Fetch ALL-TIME so the cumulative is ABSOLUTE (range-invariant): hovering a given day shows the SAME
+    // Cumulative whether the chart is on 1M or 1Y. We run the total over the whole history, then slice to
+    // the selected window for display. Buckets are aggregated (a few hundred points), not per-position.
+    const positions = await api.profitHistory(scope, bucket, sinceMs('all', Date.now()));
     let run = 0;
-    return positions.map((b) => {
+    const withCum = positions.map((b) => {
       run += b.realized;
       return { t: b.t, realized: b.realized, cumulative: run };
     });
+    const since = sinceMs(period, Date.now());
+    return withCum.filter((b) => b.t >= since);
   }, [scope, bucket, closedVersion, period, source]);
 
   // Headline:
@@ -412,11 +418,19 @@ function ProfitGraph({
                   />
                 </>
               ) : (
+                // LPAgent-style: the period's Profit + its share of net worth, then the ABSOLUTE cumulative
+                // (all-time) + its share. The %s are vs the CURRENT net worth (constant), and the cumulative
+                // is all-time — so all four are invariant to the 1M/1Y range selection.
                 <>
-                  {showBars && (
+                  <TipRow
+                    label="Profit"
+                    value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(active.realized)}
+                    tone={toneOf(active.realized)}
+                  />
+                  {nwPct(active.realized) && (
                     <TipRow
-                      label="This period"
-                      value={hideAmounts ? AMOUNT_MASK : fmtSolSigned(active.realized)}
+                      label="Profit vs Net Worth"
+                      value={hideAmounts ? AMOUNT_MASK : nwPct(active.realized)!}
                       tone={toneOf(active.realized)}
                     />
                   )}
@@ -427,7 +441,7 @@ function ProfitGraph({
                   />
                   {nwPct(cumHover) && (
                     <TipRow
-                      label="vs Net Worth"
+                      label="Cumulative vs Net Worth"
                       value={hideAmounts ? AMOUNT_MASK : nwPct(cumHover)!}
                       tone={toneOf(cumHover)}
                     />
