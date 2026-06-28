@@ -7,28 +7,19 @@
  *  signature. Does NOT import the DLMM SDK (firewall F3) → runs under tsx.
  *   node --import tsx --env-file=../.env src/copybot/coffre/coffre-main.ts
  */
-import { Connection, type Keypair, Transaction } from '@solana/web3.js';
+import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
 import { alert } from '@/copybot/alert';
 import { CopyJournalStore } from '@/copybot/journal-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
-import { deriveCommandId } from '@/copybot/command-id';
-import { claimExecution } from '@/copybot/coffre/idempotency';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
-import { utils } from '@coral-xyz/anchor';
-import { confirmLanded, land } from '@/copybot/coffre/landing';
-import { landViaJito } from '@/copybot/coffre/jito-landing';
-import { verifyTx } from '@/copybot/coffre/wall-b';
-import { derivePositionKeypair } from '@/copybot/ephemeral-position';
+import { type Ctx, process1 } from '@/copybot/coffre/process-command';
 import { ConfigStore } from '@/copybot/config-store';
-import { SignRequestSchema } from '@/domain/copybot/contracts';
-import type { Journal } from '@/domain/copybot/journal';
 import { ControlChannel } from '@/infrastructure/bus/control-channel';
 import { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { openDatabase } from '@/infrastructure/persistence/database';
-import { executions } from '@/infrastructure/persistence/schema';
 import { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 
 const STREAM = 'copybot:cmd:sign';
@@ -46,8 +37,9 @@ const cfg = {
   owner: process.env.COPIER_OWNER ?? 'Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrvDh9zz',
   maxTradeSolEnv: process.env.MAX_TRADE_SOL !== undefined ? Number(process.env.MAX_TRADE_SOL) : undefined, // env override; else the DB config's maxTradeSizeSol
   signingEnabled: process.env.SIGNING_ENABLED === 'true', // Inc.4 ; false = dry-run
-  retryMax: Number(process.env.SIGN_RETRY_MAX ?? '2'), // sign+land attempts before alerting (Valhalla-style)
+  retryMax: Number(process.env.SIGN_RETRY_MAX ?? '2'), // sign+land attempts when land THROWS (no sig produced); a returned-but-unconfirmed sig is NOT retried in place (double-apply risk)
   retryDelayMs: Number(process.env.SIGN_RETRY_DELAY_MS ?? '1500'),
+  confirmTimeoutMs: Number(process.env.SIGN_CONFIRM_TIMEOUT_MS ?? '45000'), // wait for on-chain confirmation before treating a landing as failed (a returned signature != execution)
   jitoBundleUrl: process.env.COPYBOT_JITO_BUNDLE_URL, // block-engine URL; absent ⇒ never bundle (plain RPC land)
   jitoEnabledEnv: process.env.COPYBOT_JITO !== undefined ? process.env.COPYBOT_JITO === 'true' : undefined, // env override of the DB jitoEnabled
 };
@@ -85,7 +77,8 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
+  const ctxBase = { conn, db, bus, copier, blockhashCache, journal, signingEnabled: cfg.signingEnabled, hmacKey: cfg.hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
+  const recoverCtx: Ctx = { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
   try {
     const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
     for (const msg of pending) {
@@ -125,7 +118,7 @@ async function main(): Promise<void> {
     try {
       const msgs = await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000);
       for (const msg of msgs) {
-        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() });
+        const verdict = await process1(msg.payload, { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() });
         log.info({ id: msg.id, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
         await bus.ack(STREAM, GROUP, msg.id); // ACK: idempotence guaranteed by the executions table
       }
@@ -139,107 +132,6 @@ async function main(): Promise<void> {
     if (drain) break;
   } while (!stopped);
   if (drain) await stop();
-}
-
-/** The critical section 5→13 (1-4 done by the bus). Returns a loggable verdict. Free of effects except DB + log. */
-interface Ctx {
-  conn: Connection;
-  db: ReturnType<typeof openDatabase>;
-  bus: RedisBus;
-  copier: Keypair;
-  blockhashCache: BlockhashCache;
-  journal: Journal;
-  maxTradeSol: number; // live re-clamp ceiling (DB config, env override) snapshotted per message
-  jitoBundleUrl?: string; // when set, land via a Jito bundle (anti-sandwich) with a fallback to plain RPC
-}
-
-async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
-  const { conn, db, bus, copier, blockhashCache, journal, maxTradeSol, jitoBundleUrl } = ctx;
-  const ourOwner = copier.publicKey.toBase58();
-  if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
-  const parsed = SignRequestSchema.safeParse(payload); // 5
-  if (!parsed.success) return { ok: false, reason: 'bad_schema' };
-  const sr = parsed.data;
-
-  const slot = await conn.getSlot(); // 6 staleness
-  if (slot > sr.deadlineSlot) return { ok: false, reason: 'stale', kind: sr.kind };
-
-  if (sr.commandId !== deriveCommandId(sr.eventKey)) return { ok: false, reason: 'commandId_mismatch', kind: sr.kind }; // 7
-
-  // 8 idempotency: claim BEFORE signing; only a previously 'failed' command may be re-claimed (retry).
-  const now = Date.now();
-  const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering);
-  if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
-
-  if (sr.sizeSol > maxTradeSol) {
-    void journal.record({ stage: 'sign', outcome: 'rejected', reason: 'over_max_trade', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, ourSizeSol: sr.sizeSol });
-    return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
-  }
-
-  // 10-11 Wall B: decode the tx (WITHOUT the SDK) and re-verify against the intent.
-  let tx: Transaction;
-  try {
-    tx = Transaction.from(Buffer.from(sr.txBase64, 'base64'));
-  } catch {
-    return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'undecodable_tx', kind: sr.kind });
-  }
-  if (sr.owner !== ourOwner) return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'owner_mismatch', kind: sr.kind });
-  // Wall B binds a swap to owner's ATA of its non-SOL token: sell = the token sold, buy = the token bought.
-  const wb = verifyTx(tx, { owner: sr.owner, pool: sr.pool, kind: sr.kind, positionPubkey: sr.positionPubkey, inputMint: sr.sell?.inputMint ?? sr.buy?.outputMint });
-  if (!wb.ok) {
-    void journal.record({ stage: 'sign', outcome: 'rejected', reason: `wallb:${wb.reason}`, kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId });
-    return finalize(db, sr.commandId, 'failed', { ok: false, reason: `wallb:${wb.reason}`, kind: sr.kind });
-  }
-
-  // 12-13 SIGN + LAND
-  const busMs = Date.now() - sr.issuedAtMs; // latency publish(brain) → here (bus + critical section)
-  if (!cfg.signingEnabled) {
-    log.info({ kind: sr.kind, pool: sr.pool, our: sr.positionPubkey, sizeSol: sr.sizeSol, busMs }, '✍️  (dry-run) I would sign+land');
-    return finalize(db, sr.commandId, 'skipped', { ok: true, reason: 'dry-run', kind: sr.kind });
-  }
-  // Retry config (fresh blockhash on each attempt), then ALERT "verify/close manually" (Valhalla-style).
-  let lastErr: Error | undefined;
-  for (let attempt = 0; attempt <= cfg.retryMax; attempt++) {
-    try {
-      const tSign = Date.now();
-      const fresh = Transaction.from(Buffer.from(sr.txBase64, 'base64')); // fresh tx per attempt
-      // First attempt: cached blockhash (no RTT). Retries: fetch fresh in case the cached one went stale.
-      const blockhash = attempt === 0 ? blockhashCache.get() : (await conn.getLatestBlockhash()).blockhash;
-      fresh.feePayer = copier.publicKey;
-      fresh.recentBlockhash = blockhash;
-      const signers: Keypair[] = sr.kind === 'open' ? [copier, derivePositionKeypair(sr.commandId)] : [copier];
-      fresh.sign(...signers);
-      const raw = fresh.serialize();
-      // Land via a Jito bundle when configured (anti-sandwich; falls back to plain RPC internally), else plain RPC.
-      const sig = jitoBundleUrl ? await landViaJito(conn, jitoBundleUrl, raw, utils.bytes.bs58.encode(fresh.signature as Buffer)) : await land(conn, raw);
-      // A 'buy' funds a DEPENDENT two-sided open (the very next stream message): wait for it to CONFIRM so the
-      // token is settled in the wallet before the open lands — else the open executes tokenless and fails.
-      if (sr.kind === 'buy') await confirmLanded(conn, sig, 30_000);
-      // ev:executed carries the pool/position/owner so the brain can trigger the residual sell on a close.
-      await bus.publish('copybot:ev:executed', 'ev:executed', cfg.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
-      void journal.record({ stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: sig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, detail: recovering ? { recovering: true } : undefined });
-      log.info({ kind: sr.kind, sig, attempt, busMs, signLandMs: Date.now() - tSign, totalMs: Date.now() - sr.issuedAtMs }, '🚀 signed + landed');
-      return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
-    } catch (e) {
-      lastErr = e as Error;
-      log.warn({ kind: sr.kind, attempt, error: lastErr.message }, 'sign/land failed — retry');
-      if (attempt < cfg.retryMax) await sleep(cfg.retryDelayMs);
-    }
-  }
-  // Definitive failure → emergency: especially for a CLOSE (risk of a dormant position), we alert with the link.
-  await alert(log, `${sr.kind.toUpperCase()} failed after ${cfg.retryMax + 1} attempts — VERIFY/CLOSE MANUALLY`, {
-    commandId: sr.commandId,
-    position: sr.positionPubkey,
-    link: `https://app.meteora.ag/dlmm/${sr.pool}`,
-    error: lastErr?.message,
-  });
-  void journal.record({ stage: 'sign', outcome: 'failed', reason: 'sign_land_failed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, detail: { error: lastErr?.message } });
-  return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'sign_land_failed', kind: sr.kind });
-}
-
-async function finalize<T extends { ok: boolean }>(db: ReturnType<typeof openDatabase>, commandId: string, state: string, verdict: T): Promise<T> {
-  await db.update(executions).set({ state, updatedAt: Date.now() }).where(eq(executions.commandId, commandId));
-  return verdict;
 }
 
 main().catch((e) => {
