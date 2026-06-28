@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   const journal = new CopyJournalStore(db, log, 'coffre'); // activity journal (fail-safe; never blocks signing)
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
-  const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.sizing.maxTradeSizeSol;
+  const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol; // user ceiling (per-leader can only lower it)
   const reloadConfig = async (): Promise<void> => {
     runtimeConfig = await configStore.load();
   };

@@ -15,7 +15,7 @@ import { decideEntry } from '@/domain/copybot/decision';
 import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
-import { type ConfigOverride, mergeConfig, type TwoSidedMode } from '@/domain/copybot/config';
+import { type EffectiveConfig, type EffectiveOverride, type TwoSidedMode, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
 import { type FilterContext, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
 import { TtlCache } from '@/domain/copybot/ttl-cache';
@@ -86,13 +86,13 @@ const cfg = {
 // WHEN SET, still take precedence over the DB config at boot + on every reload — this preserves the existing env
 // control (the on-chain bench toggles kill-switch / max-open / two-sided via env on restart); an UNSET var falls
 // through to the DB config so the web stays authoritative in production.
-function envConfigOverride(): ConfigOverride {
+function envEffectiveOverride(): EffectiveOverride {
   const num = (v: string | undefined): number | undefined => (v === undefined ? undefined : Number(v));
   const bool = (v: string | undefined): boolean | undefined => (v === undefined ? undefined : v === 'true');
-  const sizing: NonNullable<ConfigOverride['sizing']> = {};
+  const sizing: NonNullable<EffectiveOverride['sizing']> = {};
   const minPos = num(process.env.COPYBOT_MIN_POSITION_SOL);
   if (minPos !== undefined) sizing.minPositionSizeSol = minPos;
-  const caps: NonNullable<ConfigOverride['caps']> = {};
+  const caps: NonNullable<EffectiveOverride['caps']> = {};
   const ksg = bool(process.env.COPYBOT_KILL_SWITCH);
   if (ksg !== undefined) caps.killSwitchGlobal = ksg;
   const ksl = bool(process.env.COPYBOT_KILL_SWITCH_LEADER);
@@ -101,7 +101,7 @@ function envConfigOverride(): ConfigOverride {
   if (maxOpen !== undefined) caps.maxOpenPositions = maxOpen;
   return { sizing, caps, twoSidedMode: process.env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined };
 }
-const ENV_CONFIG_OVERRIDE = envConfigOverride();
+const ENV_EFFECTIVE_OVERRIDE = envEffectiveOverride();
 const { config: FILTER_CONFIG, shadow: FILTER_SHADOW } = parseFilterConfig(process.env); // entry filters (env; all OFF + shadow ON by default)
 const FILTERS_ACTIVE =
   neededSources(FILTER_CONFIG).size > 0 ||
@@ -151,10 +151,13 @@ async function main(): Promise<void> {
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
   const journal = new CopyJournalStore(db, log, 'brain'); // activity journal (fail-safe; never blocks the hot path)
   const configStore = new ConfigStore(db, log);
-  let runtimeConfig = mergeConfig(await configStore.seedIfAbsent(), ENV_CONFIG_OVERRIDE); // DB config (+ env override); polled + ping-reloaded live below
+  let runtimeConfig = await configStore.seedIfAbsent(); // the CopybotConfig blob; polled + ping-reloaded live below
   const reloadConfig = async (): Promise<void> => {
-    runtimeConfig = mergeConfig(await configStore.load(), ENV_CONFIG_OVERRIDE);
+    runtimeConfig = await configStore.load();
   };
+  // Resolve the EFFECTIVE config for our (single) leader, then apply the env/bench override (migration bridge).
+  // Pure + cheap → recomputed at each point of use so a live reload always takes effect on the next event.
+  const eff = (): EffectiveConfig => withEnvOverride(effectiveFor(runtimeConfig, cfg.leader), ENV_EFFECTIVE_OVERRIDE);
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
   const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
   let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
@@ -213,12 +216,13 @@ async function main(): Promise<void> {
 
   async function handleOpen(e: DetectedEvent): Promise<void> {
     log.info({ position: e.position, pool: e.pool, depositSol: e.depositSol }, '🔨 handleOpen start');
-    const decision = decideEntry(e, { ...runtimeConfig.sizing, skipNonSolPaired: true }, { availableBalanceSol: cfg.balanceSol });
+    const ec = eff();
+    const decision = decideEntry(e, { ...ec.sizing, skipNonSolPaired: true }, { availableBalanceSol: cfg.balanceSol });
     if (decision.outcome === 'skipped') {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol });
       return log.info({ reason: decision.reason }, 'open skipped');
     }
-    const cap = checkCaps(runtimeConfig.caps, capsState(), decision.sizeSol, Date.now());
+    const cap = checkCaps(ec.caps, capsState(), decision.sizeSol, Date.now());
     if (cap.action === 'block') {
       void journal.record({ stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol });
       return log.warn({ reason: cap.reason }, 'open blocked (cap)');
@@ -281,15 +285,15 @@ async function main(): Promise<void> {
 
     // TWO-SIDED (flag-gated): if the leader's position holds a TOKEN leg, replicate BOTH sides (buy the token,
     // deposit two-sided). 'shadow' logs the plan but still opens SOL-only; 'off' (default) = SOL-side-only.
-    if (runtimeConfig.twoSidedMode !== 'off') {
+    if (ec.twoSidedMode !== 'off') {
       const legs = shape.perBin.map((b) => ({ binId: b.binId, solRaw: meta.solSide === 'Y' ? b.y : b.x, tokenRaw: meta.solSide === 'Y' ? b.x : b.y }));
       const plan = planTwoSided(legs, shape.activeBinId, shape.activeBinId, DUST_TOKEN_RAW);
       if (plan.twoSided && plan.leaderSolRaw > 0n && e.nonSolMint) {
-        log.info({ mode: runtimeConfig.twoSidedMode, leaderTokenRaw: plan.leaderTokenRaw.toString(), bins: plan.weights.length }, '🪙 two-sided position detected');
+        log.info({ mode: ec.twoSidedMode, leaderTokenRaw: plan.leaderTokenRaw.toString(), bins: plan.weights.length }, '🪙 two-sided position detected');
         // SAFE: a two-sided leader is copied as BOTH legs or NOT AT ALL — NEVER a half (one-sided) position. 'on'
         // hands off to openTwoSided, which either replicates both legs or SKIPS cleanly if the token can't be
         // bought (no Jupiter route). Either way we return — we do NOT fall through to the one-sided SOL path.
-        if (runtimeConfig.twoSidedMode === 'on') return openTwoSided(e, e.nonSolMint, meta.solSide, plan);
+        if (ec.twoSidedMode === 'on') return openTwoSided(e, e.nonSolMint, meta.solSide, plan);
         // 'shadow' → fall through to the SOL-only path below (shadow mode = log the two-sided plan, open SOL-only).
       }
     }
@@ -326,8 +330,9 @@ async function main(): Promise<void> {
    *  so the coffre lands it before the open (funds the token). The SOL leg keeps the sized SOL; the token leg is
    *  scaled by the SAME factor (our SOL / leader SOL) to preserve the leader's composition. */
   async function openTwoSided(e: DetectedEvent, tokenMint: string, solSide: 'X' | 'Y', plan: TwoSidedPlan): Promise<void> {
+    const ec = eff();
     // Scale BOTH legs by copyRatio of the leader's respective legs (preserves composition), SOL leg capped.
-    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, runtimeConfig.sizing.tradeRatioPct ?? 100, BigInt(Math.round(runtimeConfig.sizing.maxTradeSizeSol * 1e9)));
+    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, ec.sizing.tradeRatioPct ?? 100, BigInt(Math.round(ec.sizing.maxTradeSizeSol * 1e9)));
     const sizeSol = Number(sizeLamports) / 1e9;
     const dist: WeightBin[] = plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }));
     const totalX = solSide === 'X' ? sizeLamports : tokenTarget;
@@ -431,7 +436,8 @@ async function main(): Promise<void> {
   async function handleResync(e: DetectedEvent): Promise<void> {
     const m = registry.get(e.position);
     if (!m) return;
-    const copyRatio = (runtimeConfig.sizing.tradeRatioPct ?? 0) / 100; // re-sync target = ratio × leader current size (0/null = fixed-size → no resync)
+    const ec = eff();
+    const copyRatio = (ec.sizing.tradeRatioPct ?? 0) / 100; // re-sync target = ratio × leader current size (0/null = fixed-size → no resync)
     const poolPk = new PublicKey(m.pool);
     const meta = await poolReader.loadPoolMeta(m.pool);
     if (!meta?.solSide) {
@@ -458,8 +464,8 @@ async function main(): Promise<void> {
     const leaderTokenBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: tokenOf(b) }));
     const ourTokenBins = ourShape.perBin.map((b) => ({ offset: b.binId - ourShape.lowerBinId, sol: tokenOf(b) }));
     // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
-    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, runtimeConfig.sizing.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
-    const twoSidedAdd = runtimeConfig.twoSidedMode === 'on' && tokenAddOps.length > 0;
+    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, ec.sizing.maxTradeSizeSol, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN);
+    const twoSidedAdd = ec.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
       void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
       return log.info({ position: e.position }, '⚖️ in sync — no adjustment');
@@ -529,7 +535,7 @@ async function main(): Promise<void> {
       await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: totalAddSol, targetBinRange: { lower: shaped.lowerBinId, upper: shaped.upperBinId }, issuedAtSlot, deadlineSlot });
     }
 
-    const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), runtimeConfig.sizing.maxTradeSizeSol);
+    const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), ec.sizing.maxTradeSizeSol);
     registry.adjustSize(e.position, newSize);
     await store.updateSize(e.position, newSize);
     log.info({ position: e.position, removes: calls.removes.length, adds: adds.length, newSize }, '🔧 reshape published (per-bin exact)');

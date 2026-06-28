@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CONFIG_DEFAULTS, type CopybotRuntimeConfig } from '@/domain/copybot/config';
+import { CONFIG_DEFAULTS, type CopybotConfig } from '@/domain/copybot/config';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { settings } from '@/infrastructure/persistence/schema';
 import { ConfigStore } from './config-store';
@@ -25,19 +25,21 @@ describe('ConfigStore (integration)', () => {
     const store = new ConfigStore(db, log);
     expect(await store.seedIfAbsent()).toEqual(CONFIG_DEFAULTS);
 
-    // mutate, then re-seed: the existing config must survive (seed is first-boot only).
-    const custom = { ...CONFIG_DEFAULTS, twoSidedMode: 'on' as const };
+    const custom: CopybotConfig = { ...CONFIG_DEFAULTS, user: { ...CONFIG_DEFAULTS.user, twoSidedMode: 'on' } };
     await store.save(custom);
     expect(await store.seedIfAbsent()).toEqual(custom);
   });
 
-  it('save → load round-trips the exact config', async () => {
+  it('save → load round-trips the exact two-tier config', async () => {
     const store = new ConfigStore(db, log);
-    const custom: CopybotRuntimeConfig = {
-      leader: 'AnotherLeaderPubkey222222222222222222222222',
-      sizing: { tradeRatioPct: 33, maxTradeSizeSol: 0.7, minPositionSizeSol: 0.08, solReserveSol: 0.04, onInsufficient: 'skip' },
-      caps: { ...CONFIG_DEFAULTS.caps, killSwitchGlobal: true, maxOpenPositions: 2 },
-      twoSidedMode: 'shadow',
+    const custom: CopybotConfig = {
+      user: {
+        enabled: true,
+        sizing: { tradeRatioPct: 33, maxTradeSizeSol: 0.7, minPositionSizeSol: 0.08, solReserveSol: 0.04, onInsufficient: 'skip' },
+        caps: { ...CONFIG_DEFAULTS.user.caps, killSwitchGlobal: true, maxOpenPositions: 2 },
+        twoSidedMode: 'shadow',
+      },
+      leaders: [{ address: 'AnotherLeaderPubkey222222222222222222222222', enabled: false, overrides: { sizing: { tradeRatioPct: 10 } } }],
     };
     await store.save(custom);
     expect(await store.load()).toEqual(custom);
@@ -50,7 +52,7 @@ describe('ConfigStore (integration)', () => {
 
   it('save throws on an invalid config (the web caller must never persist junk)', async () => {
     const store = new ConfigStore(db, log);
-    const bad = { ...CONFIG_DEFAULTS, sizing: { ...CONFIG_DEFAULTS.sizing, maxTradeSizeSol: -1 } } as unknown as CopybotRuntimeConfig;
+    const bad = { ...CONFIG_DEFAULTS, user: { ...CONFIG_DEFAULTS.user, sizing: { ...CONFIG_DEFAULTS.user.sizing, maxTradeSizeSol: -1 } } } as unknown as CopybotConfig;
     await expect(store.save(bad)).rejects.toThrow();
   });
 
