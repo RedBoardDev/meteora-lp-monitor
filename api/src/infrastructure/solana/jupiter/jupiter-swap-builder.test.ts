@@ -58,6 +58,20 @@ describe('getJupiterQuote', () => {
     expect(count()).toBe(2); // retried once
   });
 
+  it('RETRIES a network error (fetch throws) then succeeds — a connectivity blip is not a permanent failure', async () => {
+    // WHY: a thrown fetch (ECONNRESET/timeout) leaves no response; it must be treated as retryable, not crash the
+    // buy/sell leg. Covers the catch path where `res` stays undefined.
+    let calls = 0;
+    const fetch: HttpFetch = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('ECONNRESET');
+      return { ok: true, status: 200, json: async () => ({ inAmount: '10', outAmount: '9' }) };
+    };
+    const q = await getJupiterQuote(BASE, MINT, 10n, 50, fetch);
+    expect(q.outAmount).toBe('9');
+    expect(calls).toBe(2);
+  });
+
   it('throws when the response is missing outAmount (no route)', async () => {
     const { fetch } = fakeFetch({ body: { inAmount: '1' } });
     await expect(getJupiterQuote(BASE, MINT, 1n, 50, fetch)).rejects.toThrow();
