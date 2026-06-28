@@ -1,6 +1,7 @@
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
 import { describe, expect, it } from 'vitest';
+import { JITO_TIP_ACCOUNTS } from '@/domain/copybot/jito-tip';
 import { type WallBIntent, verifyTx } from './wall-b';
 
 const FAKE_BLOCKHASH = Keypair.generate().publicKey.toBase58();
@@ -105,6 +106,28 @@ describe('Wall B — verifyTx', () => {
       transfer,
     ]);
     expect(verifyTx(t, openIntent())).toEqual({ ok: true });
+  });
+
+  const openWithTransfer = (to: PublicKey, lamports: number): Transaction =>
+    buildTx(owner, [
+      ix(DLMM, [
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: position, isSigner: true, isWritable: true },
+        { pubkey: pool, isSigner: false, isWritable: true },
+      ]),
+      SystemProgram.transfer({ fromPubkey: owner, toPubkey: to, lamports }),
+    ]);
+
+  it('a capped tip to a known Jito tip account → tolerated (the one allowed non-owner SOL destination)', () => {
+    expect(verifyTx(openWithTransfer(JITO_TIP_ACCOUNTS[0]!, 50_000), openIntent())).toEqual({ ok: true });
+  });
+
+  it('an OVERSIZED tip to a Jito account → reject jito_tip_too_large (defense in depth vs an inflated tip)', () => {
+    expect(verifyTx(openWithTransfer(JITO_TIP_ACCOUNTS[0]!, 20_000_000), openIntent())).toMatchObject({ ok: false, reason: 'jito_tip_too_large' });
+  });
+
+  it('a transfer to a NON-Jito third party is still rejected (the allowlist is exactly the Jito accounts)', () => {
+    expect(verifyTx(openWithTransfer(pk(), 50_000), openIntent())).toMatchObject({ ok: false, reason: 'foreign_sol_destination' });
   });
 
   it('close: no position signer needed', () => {

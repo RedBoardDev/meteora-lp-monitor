@@ -11,6 +11,7 @@
  */
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import { PublicKey, type Transaction } from '@solana/web3.js';
+import { JITO_TIP_ACCOUNTS } from '@/domain/copybot/jito-tip';
 
 const SYSTEM = '11111111111111111111111111111111';
 const TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
@@ -22,6 +23,12 @@ const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
 /** The two canonical token programs an owner's ATA can be derived under (classic SPL + Token-2022). A residual
  *  leg is often a Token-2022 mint (pump.fun), so a sell must be allowed to touch its Token-2022 ATA too. */
 const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM];
+
+// A SOL transfer to a fixed, public Jito tip account is the ONLY permitted non-owner destination (anti-sandwich
+// tip). Capped hard here (defense in depth): even a buggy/compromised builder can't drain funds via an inflated
+// "tip" — it can only send a bounded amount to a known Jito account.
+const JITO_TIP_SET = new Set(JITO_TIP_ACCOUNTS.map((a) => a.toBase58()));
+const MAX_JITO_TIP_LAMPORTS = 10_000_000; // 0.01 SOL hard ceiling (far above the conservative ~0.00005 SOL tip)
 
 const ALLOWED_PROGRAMS = new Set([
   'ComputeBudget111111111111111111111111111111',
@@ -74,7 +81,13 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
       const from = ix.keys[0]?.pubkey.toBase58();
       const to = ix.keys[1]?.pubkey.toBase58();
       if (from === intent.owner && to !== intent.owner && to !== ownerAta(new PublicKey(intent.owner), WSOL, TOKEN_PROGRAM)) {
-        return { ok: false, reason: 'foreign_sol_destination' };
+        // The ONE allowed non-owner SOL destination: a capped tip to a known Jito tip account (anti-sandwich).
+        if (to !== undefined && JITO_TIP_SET.has(to)) {
+          const tipLamports = ix.data.length >= 12 ? ix.data.readBigUInt64LE(4) : BigInt(MAX_JITO_TIP_LAMPORTS) + 1n;
+          if (tipLamports > BigInt(MAX_JITO_TIP_LAMPORTS)) return { ok: false, reason: 'jito_tip_too_large' };
+        } else {
+          return { ok: false, reason: 'foreign_sol_destination' };
+        }
       }
     }
   }
