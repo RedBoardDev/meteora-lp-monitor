@@ -1,9 +1,38 @@
 import { describe, expect, it } from 'vitest';
-import { type BinSol, type ReshapeOp, lamportsToSol, planReshape, reshapeToCalls } from './position-adjust';
+import { type BinSol, type ReshapeOp, type WeightBinShape, fillContiguousWeights, lamportsToSol, planReshape, reshapeToCalls } from './position-adjust';
 
 describe('lamportsToSol', () => {
   it('converts lamports → SOL exactly', () => {
     expect(lamportsToSol(60_000_000n)).toBeCloseTo(0.06, 9);
+  });
+});
+
+describe('fillContiguousWeights — the SDK by-weight range must be contiguous (no "Discontinuous Bin ID")', () => {
+  const w = (binId: number, xBps: number, yBps = 0): WeightBinShape => ({ binId, xBps, yBps });
+
+  it('fills an interior gap with a 0/0 bin (the SOL-only reshape-add bug: bins 0 and 2, gap at 1)', () => {
+    expect(fillContiguousWeights([w(0, 5000), w(2, 5000)])).toEqual([w(0, 5000), w(1, 0), w(2, 5000)]);
+  });
+
+  it('fills MULTIPLE interior gaps and preserves the real weights', () => {
+    expect(fillContiguousWeights([w(-2, 3000), w(1, 7000)])).toEqual([w(-2, 3000), w(-1, 0), w(0, 0), w(1, 7000)]);
+  });
+
+  it('keeps the y-leg orientation when filling (token-side weights)', () => {
+    expect(fillContiguousWeights([w(0, 0, 4000), w(2, 0, 6000)])).toEqual([w(0, 0, 4000), w(1, 0, 0), w(2, 0, 6000)]);
+  });
+
+  it('an already-contiguous list is returned unchanged (ascending)', () => {
+    expect(fillContiguousWeights([w(5, 100), w(6, 200), w(7, 300)])).toEqual([w(5, 100), w(6, 200), w(7, 300)]);
+  });
+
+  it('sorts an unordered contiguous input ascending by binId', () => {
+    expect(fillContiguousWeights([w(7, 300), w(5, 100), w(6, 200)]).map((b) => b.binId)).toEqual([5, 6, 7]);
+  });
+
+  it('single bin → itself; empty → empty', () => {
+    expect(fillContiguousWeights([w(3, 10000)])).toEqual([w(3, 10000)]);
+    expect(fillContiguousWeights([])).toEqual([]);
   });
 });
 

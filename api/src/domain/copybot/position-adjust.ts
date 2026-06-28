@@ -74,3 +74,28 @@ export function reshapeToCalls(ops: ReshapeOp[], baseBin: number): ReshapeCalls 
   }
   return { removes, adds };
 }
+
+
+/** A by-weight bin entry (binId + per-leg bps) — structurally the builder's `WeightBin`, kept SDK-free here so the
+ *  contiguity helper stays pure and unit-testable. */
+export interface WeightBinShape {
+  binId: number;
+  xBps: number;
+  yBps: number;
+}
+
+/**
+ * Fill any INTERIOR binId gaps in a by-weight list with 0/0 entries so the listed bins are CONTIGUOUS. The DLMM
+ * by-weight builder (open/add) rejects a non-contiguous range with "Discontinuous Bin ID"; a selective/deadband add
+ * or a re-anchor that drops a tiny interior bin can leave such a gap. Returns the bins ascending over [min,max].
+ * Pure (empty in → empty out).
+ */
+export function fillContiguousWeights(bins: WeightBinShape[]): WeightBinShape[] {
+  if (bins.length === 0) return [];
+  const byBin = new Map(bins.map((d) => [d.binId, d]));
+  const lo = Math.min(...bins.map((d) => d.binId));
+  const hi = Math.max(...bins.map((d) => d.binId));
+  const out: WeightBinShape[] = [];
+  for (let b = lo; b <= hi; b++) out.push(byBin.get(b) ?? { binId: b, xBps: 0, yBps: 0 });
+  return out;
+}

@@ -24,7 +24,7 @@ import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-to
 import { TtlCache } from '@/domain/copybot/ttl-cache';
 import { type EventSource, LeaderDetector } from '@/domain/copybot/leader-detector';
 import { LeaderPositionTracker } from '@/domain/copybot/leader-position';
-import { lamportsToSol, reshapeToCalls } from '@/domain/copybot/position-adjust';
+import { fillContiguousWeights, lamportsToSol, reshapeToCalls } from '@/domain/copybot/position-adjust';
 import { reanchorShape } from '@/domain/copybot/reanchor';
 import { type TwoSidedPlan, planTwoSided, planTwoSidedReshape, sizeTwoSided } from '@/domain/copybot/two-sided';
 import { planReconcile } from '@/domain/copybot/reconciliation';
@@ -294,7 +294,9 @@ async function main(): Promise<void> {
 
     const perBinSol = shape.perBin.map((b) => ({ binId: b.binId, amount: meta.solSide === 'Y' ? b.y : b.x }));
     const reanchored = reanchorShape(shape.activeBinId, shape.activeBinId, perBinSol); // delta 0 = 100% exact bins
-    const dist: WeightBin[] = reanchored.weights.map((w) => ({ binId: w.binId, xBps: meta.solSide === 'X' ? w.bps : 0, yBps: meta.solSide === 'Y' ? w.bps : 0 }));
+    // CONTIGUOUS span for the SDK by-weight open: a re-anchor that drops a tiny interior bin to 0 bps would leave a
+    // binId gap → "Discontinuous Bin ID". Fill gaps with 0/0 (min/max unchanged, so targetBinRange stays correct).
+    const dist: WeightBin[] = fillContiguousWeights(reanchored.weights.map((w) => ({ binId: w.binId, xBps: meta.solSide === 'X' ? w.bps : 0, yBps: meta.solSide === 'Y' ? w.bps : 0 })));
 
     const eventKey = `${cfg.leader}:${e.pool}:open:${e.signature}`;
     const commandId = deriveCommandId(eventKey);
@@ -328,7 +330,7 @@ async function main(): Promise<void> {
     // Scale BOTH legs by copyRatio of the leader's respective legs (preserves composition), SOL leg capped.
     const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, ec.sizing.tradeRatioPct ?? 100, BigInt(Math.round(ec.sizing.maxTradeSizeSol * 1e9)));
     const sizeSol = Number(sizeLamports) / 1e9;
-    const dist: WeightBin[] = plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }));
+    const dist: WeightBin[] = fillContiguousWeights(plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }))); // contiguous span (SDK by-weight requirement)
     const totalX = solSide === 'X' ? sizeLamports : tokenTarget;
     const totalY = solSide === 'Y' ? sizeLamports : tokenTarget;
 
@@ -500,11 +502,9 @@ async function main(): Promise<void> {
         }
       // The SDK by-weight requires CONTIGUOUS binIds (a deadband-dropped per-bin add would leave a gap → it
       // errors "Discontinuous Bin ID"). Fill the [min,max] span with 0/0 entries so the listed bins are contiguous.
-      const present = [...byBin.values()];
-      const loBin = Math.min(...present.map((d) => d.binId));
-      const hiBin = Math.max(...present.map((d) => d.binId));
-      const dist: WeightBin[] = [];
-      for (let b = loBin; b <= hiBin; b++) dist.push(byBin.get(b) ?? { binId: b, xBps: 0, yBps: 0 });
+      const dist: WeightBin[] = fillContiguousWeights([...byBin.values()]);
+      const loBin = dist[0]!.binId;
+      const hiBin = dist.at(-1)!.binId;
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
       const addLamports = BigInt(Math.round(totalAddSol * 1e9));
       const totalTokenRaw = BigInt(tokenAdds.reduce((s, a) => s + a.raw, 0));
@@ -520,11 +520,13 @@ async function main(): Promise<void> {
     } else if (adds.length > 0) {
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
       const shaped = reanchorShape(0, 0, adds.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))); // delta 0: keep binIds, amounts → BPS
-      const dist: WeightBin[] = shaped.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 }));
+      // CONTIGUOUS span: a selective/deadband add (or a re-anchor that drops a tiny interior bin) leaves binId gaps;
+      // the SDK by-weight rejects those ("Discontinuous Bin ID"). Fill them with 0/0 — same as the two-sided path.
+      const dist: WeightBin[] = fillContiguousWeights(shaped.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 })));
       const addLamports = BigInt(Math.round(totalAddSol * 1e9));
       const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? addLamports : 0n, solSide === 'Y' ? addLamports : 0n, dist, pair);
       const eventKey = `${cfg.leader}:${m.pool}:reshape-add:${e.signature}`;
-      await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: totalAddSol, targetBinRange: { lower: shaped.lowerBinId, upper: shaped.upperBinId }, issuedAtSlot, deadlineSlot });
+      await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: totalAddSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
     }
 
     const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), ec.sizing.maxTradeSizeSol);
