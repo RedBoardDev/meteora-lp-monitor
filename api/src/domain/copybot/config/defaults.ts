@@ -1,8 +1,6 @@
 /**
- * Copy-bot · runtime config — DEFAULTS.
- *
- * Increment 1a is a PURE structural move: these reproduce TODAY's values exactly (no behavior change). The
- * spec-locked policy values (e.g. ratio 100%) are applied in a separate, bench-verified step.
+ * Copy-bot · runtime config — DEFAULTS (the spec-locked values; see docs/reference/copybot-settings.md).
+ * Defaults only seed a FRESH config + the parse fallback — an existing stored config is preserved.
  */
 import { CAPS_DEFAULTS } from '../caps';
 import { FILTERS_ALL_OFF } from '../filters';
@@ -13,7 +11,7 @@ export const DEFAULT_LEADER_ADDRESS = '8ryctvNwpJTuuap3wuNTfcyEx4DjSuXvhGXSDHNaU
 
 export const USER_DEFAULTS: UserSettings = {
   enabled: true,
-  sizing: { tradeRatioPct: 50, maxTradeSizeSol: 1.0, minPositionSizeSol: 0.05, solReserveSol: 0.05, onInsufficient: 'skip' },
+  sizing: { tradeRatioPct: 100, maxTradeSizeSol: 1.0, minPositionSizeSol: 0.05, solReserveSol: 0.05, onInsufficient: 'skip' }, // 100% = follow the leader, capped by maxTradeSize (spec §3)
   caps: { ...CAPS_DEFAULTS },
   twoSidedMode: 'off',
   filters: { ...FILTERS_ALL_OFF }, // all entry filters OFF by default

@@ -18,6 +18,18 @@ describe('config · defaults + schema', () => {
     expect(CONFIG_DEFAULTS.leaders).toHaveLength(1);
     expect(CONFIG_DEFAULTS.leaders[0]!.address).toBe(LEADER);
   });
+
+  it('the spec-locked defaults hold (a silent change to a policy default breaks this)', () => {
+    // WHY: these are the agreed product defaults (docs/reference/copybot-settings.md). This pins them so a refactor
+    // or a careless edit can't drift the fresh-bot policy unnoticed.
+    const u = CONFIG_DEFAULTS.user;
+    expect(u.sizing.tradeRatioPct).toBe(100); // follow the leader, capped (spec §3)
+    expect(u.sizing.maxTradeSizeSol).toBe(1.0);
+    expect(u.sizing.minPositionSizeSol).toBe(0.05);
+    expect(u.caps.maxOpenPositions).toBe(8);
+    expect(u.twoSidedMode).toBe('off'); // token-leg policy = skip
+    expect(u.filters).toEqual(expect.objectContaining({ minJupOrganicScore: null })); // filters off by default (for now)
+  });
 });
 
 describe('config · parseConfig (fail-safe + migration)', () => {
