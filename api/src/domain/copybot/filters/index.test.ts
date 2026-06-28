@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type FilterConfig, type FilterContext, FILTERS_ALL_OFF } from './filter';
-import { FILTER_BRICKS, neededSources, REGISTRY, runFilters } from './index';
+import { FILTER_BRICKS, filtersActive, neededSources, REGISTRY, runFilters } from './index';
 
 const ctx = (over: Partial<FilterContext> = {}): FilterContext => ({ openTokenMints: new Set(), ...over });
 const candidate = { nonSolMint: 'MINT', pool: 'POOL' };
@@ -102,5 +102,16 @@ describe('neededSources — only ENABLED bricks contribute, one shared source (n
   it('several Jupiter-backed filters on → exactly { jupiter-token } (ONE shared call, not N)', () => {
     const cfg = { ...FILTERS_ALL_OFF, minMarketCapUsd: 1_000_000, minJupOrganicScore: 50, minHolders: 100 };
     expect([...neededSources(cfg)]).toEqual(['jupiter-token']);
+  });
+});
+
+describe('filtersActive — drives the per-open observability log', () => {
+  it('all OFF → false (no filter gating the open)', () => {
+    expect(filtersActive(FILTERS_ALL_OFF)).toBe(false);
+  });
+
+  it('any single brick on → true (free local filter counts too)', () => {
+    expect(filtersActive({ ...FILTERS_ALL_OFF, singlePoolPerToken: true })).toBe(true);
+    expect(filtersActive({ ...FILTERS_ALL_OFF, minHolders: 100 })).toBe(true);
   });
 });

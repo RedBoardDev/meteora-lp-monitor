@@ -55,6 +55,15 @@ describe('resolveFilterContext — one fetch per needed source, cache-first, mis
     expect(data.organicScore).toBe(70);
   });
 
+  it('a provider that REJECTS → empty data, never throws (errors must not crash the open path)', async () => {
+    // WHY: a Jupiter blip must degrade to "filter data unavailable" (→ skip), never propagate an exception up the
+    // open hot path. settleWithin swallows the rejection and resolves null.
+    const boom = vi.fn(async () => { throw new Error('jupiter 500'); });
+    const data = await resolveFilterContext('MINT', sources('jupiter-token'), { jupiterToken: boom, snapshotCache: newCache() }, { nowMs: 0, timeoutMs: 1_000 });
+    expect(data).toEqual({});
+    expect(boom).toHaveBeenCalledOnce();
+  });
+
   it('a provider that hangs → null within budget (hard timeout, off the critical path)', async () => {
     vi.useFakeTimers();
     const hang = vi.fn(() => new Promise<TokenSnapshot>(() => {}));

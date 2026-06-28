@@ -63,4 +63,28 @@ describe('MirrorRegistry', () => {
     r.close('B');
     expect(r.openPositions().map((x) => x.leaderPosition)).toEqual(['A']);
   });
+
+  it('adjustSize updates the tracked SOL size on an open mirror', () => {
+    const r = new MirrorRegistry();
+    r.open(m({ sizeSol: 1 }));
+    r.adjustSize('L', 2.5);
+    expect(r.get('L')?.sizeSol).toBe(2.5);
+  });
+
+  it('adjustSize clamps to 0 — an over-remove must never leave a NEGATIVE tracked exposure', () => {
+    // WHY: sizeSol feeds the exposure/caps math; a negative value would understate exposure and let extra opens slip.
+    const r = new MirrorRegistry();
+    r.open(m({ sizeSol: 0.5 }));
+    r.adjustSize('L', -3);
+    expect(r.get('L')?.sizeSol).toBe(0);
+  });
+
+  it('adjustSize is a no-op on a closed or unknown mirror', () => {
+    const r = new MirrorRegistry();
+    r.open(m({ sizeSol: 1 }));
+    r.close('L');
+    r.adjustSize('L', 9); // closed → ignored
+    expect(r.get('L')?.sizeSol).toBe(1);
+    expect(() => r.adjustSize('nope', 5)).not.toThrow(); // unknown → silent no-op
+  });
 });

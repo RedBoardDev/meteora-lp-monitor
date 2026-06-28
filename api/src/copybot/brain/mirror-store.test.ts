@@ -33,6 +33,14 @@ describe('MirrorStore — no-dormant persistence (integration)', () => {
     expect(open.some((m) => m.leaderPosition === LP)).toBe(true); // no dormant position lost
   });
 
+  it('updateSize persists the new SOL size (the effective ratio survives a restart)', async () => {
+    // WHY: after a proportional add/remove the tracked size changes; if it were not persisted, a restart would
+    // reload the STALE open size and mis-size future mirror actions.
+    await store.updateSize(LP, 0.5);
+    const reloaded = (await new MirrorStore(openDatabase(URL)).loadOpen()).find((m) => m.leaderPosition === LP);
+    expect(reloaded?.sizeSol).toBe(0.5);
+  });
+
   it('markClosed → loadOpen no longer returns it', async () => {
     await store.markClosed(LP);
     const open = await store.loadOpen();
