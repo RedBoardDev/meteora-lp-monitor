@@ -15,8 +15,8 @@ import { decideEntry } from '@/domain/copybot/decision';
 import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
-import { type EffectiveConfig, type EffectiveOverride, type TwoSidedMode, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
-import { type FilterContext, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
+import { type EffectiveConfig, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
+import { type FilterContext, filtersActive, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
 import { TtlCache } from '@/domain/copybot/ttl-cache';
 import { type EventSource, LeaderDetector } from '@/domain/copybot/leader-detector';
@@ -47,7 +47,7 @@ import { type BrainStatusDetail, HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
-import { parseFilterConfig } from './filter-config';
+import { envEffectiveOverride } from './env-overrides';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
 
@@ -82,32 +82,10 @@ const cfg = {
   balanceSol: Number(process.env.COPIER_BALANCE_SOL ?? '10'),
   jupiterBaseUrl: process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL,
 };
-// Sizing/caps/two-sided now come from the DB-backed runtime config (config-store), reloaded live below. ENV vars,
-// WHEN SET, still take precedence over the DB config at boot + on every reload — this preserves the existing env
-// control (the on-chain bench toggles kill-switch / max-open / two-sided via env on restart); an UNSET var falls
-// through to the DB config so the web stays authoritative in production.
-function envEffectiveOverride(): EffectiveOverride {
-  const num = (v: string | undefined): number | undefined => (v === undefined ? undefined : Number(v));
-  const bool = (v: string | undefined): boolean | undefined => (v === undefined ? undefined : v === 'true');
-  const sizing: NonNullable<EffectiveOverride['sizing']> = {};
-  const minPos = num(process.env.COPYBOT_MIN_POSITION_SOL);
-  if (minPos !== undefined) sizing.minPositionSizeSol = minPos;
-  const caps: NonNullable<EffectiveOverride['caps']> = {};
-  const ksg = bool(process.env.COPYBOT_KILL_SWITCH);
-  if (ksg !== undefined) caps.killSwitchGlobal = ksg;
-  const ksl = bool(process.env.COPYBOT_KILL_SWITCH_LEADER);
-  if (ksl !== undefined) caps.killSwitchLeader = ksl;
-  const maxOpen = num(process.env.COPYBOT_MAX_OPEN_POSITIONS);
-  if (maxOpen !== undefined) caps.maxOpenPositions = maxOpen;
-  return { sizing, caps, twoSidedMode: process.env.COPYBOT_TWO_SIDED as TwoSidedMode | undefined };
-}
-const ENV_EFFECTIVE_OVERRIDE = envEffectiveOverride();
-const { config: FILTER_CONFIG, shadow: FILTER_SHADOW } = parseFilterConfig(process.env); // entry filters (env; all OFF + shadow ON by default)
-const FILTERS_ACTIVE =
-  neededSources(FILTER_CONFIG).size > 0 ||
-  FILTER_CONFIG.singlePoolPerToken ||
-  FILTER_CONFIG.ignoredTokens.length > 0 ||
-  FILTER_CONFIG.minPriceRangePercent != null; // any filter on → log the resolved context per open (observability)
+// Sizing/caps/two-sided/filters all come from the DB-backed config (config-store), resolved per leader via eff().
+// The env override (migration bridge) is SPARSE: a var, WHEN SET, takes precedence (preserves the on-chain bench);
+// an UNSET var falls through to the DB config so it stays authoritative in production.
+const ENV_EFFECTIVE_OVERRIDE = envEffectiveOverride(process.env);
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 const firstTx = (t: Transaction | Transaction[]): Transaction => (Array.isArray(t) ? (t[0] as Transaction) : t);
@@ -174,7 +152,7 @@ async function main(): Promise<void> {
     onError: (err, mint) => log.warn({ err, mint }, 'jupiter token snapshot failed (filter data unavailable)'),
   }).getSnapshot;
   const filterDeps = { jupiterToken, snapshotCache };
-  log.info({ shadow: FILTER_SHADOW, filters: FILTER_CONFIG }, '🧪 entry filters loaded');
+  log.info({ shadow: eff().filterShadow, filters: eff().filters }, '🧪 entry filters loaded');
 
   const capsState = (): CapsState => {
     const open = registry.openPositions();
@@ -235,7 +213,7 @@ async function main(): Promise<void> {
     // nothing when only local/leader-shape filters are enabled. ONE shared DLMM instance serves the read AND build.
     const pairP = createDlmmPair(conn, poolPk);
     const slotsP = slots();
-    const filterDataP = resolveFilterContext(e.nonSolMint, neededSources(FILTER_CONFIG), filterDeps, { nowMs: Date.now(), timeoutMs: FILTER_TIMEOUT_MS });
+    const filterDataP = resolveFilterContext(e.nonSolMint, neededSources(ec.filters), filterDeps, { nowMs: Date.now(), timeoutMs: FILTER_TIMEOUT_MS });
 
     const meta = await poolReader.loadPoolMeta(e.pool);
     if (!meta?.solSide) {
@@ -257,8 +235,8 @@ async function main(): Promise<void> {
       priceRangePercent: rangeCoveragePercent(shape.perBin.length, meta.binStep),
       ...(await filterDataP),
     };
-    const verdict = runFilters({ nonSolMint: e.nonSolMint, pool: e.pool }, filterCtx, FILTER_CONFIG);
-    if (FILTERS_ACTIVE) {
+    const verdict = runFilters({ nonSolMint: e.nonSolMint, pool: e.pool }, filterCtx, ec.filters);
+    if (filtersActive(ec.filters)) {
       log.info(
         {
           mint: e.nonSolMint,
@@ -276,7 +254,7 @@ async function main(): Promise<void> {
       );
     }
     if (verdict.action === 'skip') {
-      if (!FILTER_SHADOW) {
+      if (!ec.filterShadow) {
         void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
         return log.info({ reason: verdict.reason }, '🚧 open filtered → skip');
       }

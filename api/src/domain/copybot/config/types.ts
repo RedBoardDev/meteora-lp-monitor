@@ -8,6 +8,7 @@
  * this same shape — do not model `users[]` yet (YAGNI).
  */
 import type { CapsConfig } from '../caps';
+import type { FilterConfig } from '../filters';
 import type { SizingConfig } from '../sizing';
 
 export const TWO_SIDED_MODES = ['off', 'shadow', 'on'] as const;
@@ -17,6 +18,8 @@ export type TwoSidedMode = (typeof TWO_SIDED_MODES)[number];
 export interface Overridable {
   sizing: SizingConfig;
   twoSidedMode: TwoSidedMode;
+  /** Entry-filter thresholds/toggles (the filter brick registry consumes this). */
+  filters: FilterConfig;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -25,12 +28,15 @@ export interface UserSettings extends Overridable {
   enabled: boolean;
   /** Account-wide caps (across all leaders). */
   caps: CapsConfig;
+  /** Account-wide rollout flag: evaluate + log filter verdicts WITHOUT blocking the open. NOT per-leader. */
+  filterShadow: boolean;
 }
 
 /** A sparse per-leader override: only the fields this leader changes from the user defaults. */
 export type LeaderOverride = {
   sizing?: Partial<SizingConfig>;
   twoSidedMode?: TwoSidedMode;
+  filters?: Partial<FilterConfig>;
 };
 
 /** One followed leader. */
@@ -51,6 +57,8 @@ export interface CopybotConfig {
 export interface EffectiveConfig extends Overridable {
   /** Resolved caps for this leader (`killSwitchLeader` derived from the leader's `enabled`). */
   caps: CapsConfig;
+  /** Account-wide filter shadow flag (resolved through). */
+  filterShadow: boolean;
   /** The account master switch (copied through for the handler's convenience). */
   userEnabled: boolean;
   /** This leader's own switch. */
@@ -63,5 +71,7 @@ export type EffectiveOverride = {
   sizing?: Partial<SizingConfig>;
   caps?: Partial<CapsConfig>;
   twoSidedMode?: TwoSidedMode;
+  filters?: Partial<FilterConfig>;
+  filterShadow?: boolean;
   userEnabled?: boolean;
 };

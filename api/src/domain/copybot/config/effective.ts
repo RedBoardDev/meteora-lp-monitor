@@ -6,6 +6,7 @@
  * existing `checkCaps` enforces them unchanged. A leader may only TIGHTEN the size cap, never raise it.
  */
 import type { CapsConfig } from '../caps';
+import type { FilterConfig } from '../filters';
 import type { SizingConfig } from '../sizing';
 import type { CopybotConfig, EffectiveConfig, EffectiveOverride } from './types';
 
@@ -15,6 +16,11 @@ function mergeSizing(base: SizingConfig, ov?: Partial<SizingConfig>): SizingConf
   const merged: SizingConfig = { ...base, ...ov };
   if (ov.maxTradeSizeSol !== undefined) merged.maxTradeSizeSol = Math.min(base.maxTradeSizeSol, ov.maxTradeSizeSol);
   return merged;
+}
+
+/** Merge a sparse filter override (per-leader, or env bridge) onto a base filter config. */
+function mergeFilters(base: FilterConfig, ov?: Partial<FilterConfig>): FilterConfig {
+  return ov ? { ...base, ...ov } : base;
 }
 
 /** Resolve the config for ONE leader. Unknown address ⇒ user defaults with the leader treated as enabled. */
@@ -31,6 +37,8 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
   return {
     sizing: mergeSizing(user.sizing, ov.sizing),
     twoSidedMode: ov.twoSidedMode ?? user.twoSidedMode,
+    filters: mergeFilters(user.filters, ov.filters),
+    filterShadow: user.filterShadow, // account-wide (not per-leader)
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
@@ -47,6 +55,8 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     sizing: ov.sizing ? { ...eff.sizing, ...ov.sizing } : eff.sizing,
     caps: ov.caps ? { ...eff.caps, ...ov.caps } : eff.caps,
     twoSidedMode: ov.twoSidedMode ?? eff.twoSidedMode,
+    filters: mergeFilters(eff.filters, ov.filters),
+    filterShadow: ov.filterShadow ?? eff.filterShadow,
     userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }

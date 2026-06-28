@@ -65,3 +65,9 @@ export function neededSources(cfg: FilterConfig): Set<DataSource> {
   }
   return out;
 }
+
+
+/** Whether ANY entry filter is turned on in this config — drives the per-open observability log. Pure. */
+export function filtersActive(cfg: FilterConfig): boolean {
+  return REGISTRY.some((brick) => brick.enabled(cfg));
+}

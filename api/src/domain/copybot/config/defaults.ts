@@ -5,6 +5,7 @@
  * spec-locked policy values (e.g. ratio 100%) are applied in a separate, bench-verified step.
  */
 import { CAPS_DEFAULTS } from '../caps';
+import { FILTERS_ALL_OFF } from '../filters';
 import type { CopybotConfig, UserSettings } from './types';
 
 /** The single followed leader (was the `COPYBOT_LEADER` env default). */
@@ -15,6 +16,8 @@ export const USER_DEFAULTS: UserSettings = {
   sizing: { tradeRatioPct: 50, maxTradeSizeSol: 1.0, minPositionSizeSol: 0.05, solReserveSol: 0.05, onInsufficient: 'skip' },
   caps: { ...CAPS_DEFAULTS },
   twoSidedMode: 'off',
+  filters: { ...FILTERS_ALL_OFF }, // all entry filters OFF by default
+  filterShadow: true, // safe rollout: evaluate + log, never block (flip off to enforce)
 };
 
 export const CONFIG_DEFAULTS: CopybotConfig = {

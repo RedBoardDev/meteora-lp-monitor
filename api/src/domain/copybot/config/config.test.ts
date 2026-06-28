@@ -55,7 +55,7 @@ describe('config · parseConfig (fail-safe + migration)', () => {
 
   it('round-trips a full valid two-tier blob', () => {
     const custom: CopybotConfig = {
-      user: { enabled: true, sizing: CONFIG_DEFAULTS.user.sizing, caps: CONFIG_DEFAULTS.user.caps, twoSidedMode: 'shadow' },
+      user: { ...CONFIG_DEFAULTS.user, twoSidedMode: 'shadow' },
       leaders: [{ address: LEADER, enabled: false, overrides: { twoSidedMode: 'on' } }],
     };
     expect(parseConfig(JSON.stringify(custom))).toEqual(custom);

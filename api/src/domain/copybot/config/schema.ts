@@ -8,6 +8,7 @@
  */
 import { z } from 'zod';
 import type { CapsConfig } from '../caps';
+import type { FilterConfig } from '../filters';
 import type { SizingConfig } from '../sizing';
 import { CONFIG_DEFAULTS, DEFAULT_LEADER_ADDRESS, USER_DEFAULTS } from './defaults';
 import { type CopybotConfig, type LeaderSettings, TWO_SIDED_MODES, type UserSettings } from './types';
@@ -33,15 +34,29 @@ const CapsSchema = z.object({
 
 const TwoSidedSchema = z.enum(TWO_SIDED_MODES);
 
+const FilterConfigSchema = z.object({
+  ignoredTokens: z.array(z.string()),
+  singlePoolPerToken: z.boolean(),
+  minPriceRangePercent: z.number().nullable(),
+  minTokenAgeHours: z.number().nullable(),
+  minMarketCapUsd: z.number().nullable(),
+  min24hVolumeUsd: z.number().nullable(),
+  maxPriceChangePercent: z.number().nullable(),
+  minJupOrganicScore: z.number().nullable(),
+  minHolders: z.number().nullable(),
+}) satisfies z.ZodType<FilterConfig>;
+
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean() })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
   .object({
     address: z.string().min(1),
     enabled: z.boolean(),
-    overrides: z.object({ sizing: SizingSchema.partial().optional(), twoSidedMode: TwoSidedSchema.optional() }).strict(),
+    overrides: z
+      .object({ sizing: SizingSchema.partial().optional(), twoSidedMode: TwoSidedSchema.optional(), filters: FilterConfigSchema.partial().optional() })
+      .strict(),
   })
   .strict() satisfies z.ZodType<LeaderSettings>;
 
@@ -73,6 +88,8 @@ function mergeUser(partial: unknown): UserSettings {
     sizing: { ...USER_DEFAULTS.sizing, ...(isObj(p.sizing) ? p.sizing : {}) },
     caps: { ...USER_DEFAULTS.caps, ...(isObj(p.caps) ? p.caps : {}) },
     twoSidedMode: (p.twoSidedMode as UserSettings['twoSidedMode']) ?? USER_DEFAULTS.twoSidedMode,
+    filters: { ...USER_DEFAULTS.filters, ...(isObj(p.filters) ? p.filters : {}) },
+    filterShadow: typeof p.filterShadow === 'boolean' ? p.filterShadow : USER_DEFAULTS.filterShadow,
   } as UserSettings;
 }
 

@@ -34,7 +34,7 @@ describe('ConfigStore (integration)', () => {
     const store = new ConfigStore(db, log);
     const custom: CopybotConfig = {
       user: {
-        enabled: true,
+        ...CONFIG_DEFAULTS.user,
         sizing: { tradeRatioPct: 33, maxTradeSizeSol: 0.7, minPositionSizeSol: 0.08, solReserveSol: 0.04, onInsufficient: 'skip' },
         caps: { ...CONFIG_DEFAULTS.user.caps, killSwitchGlobal: true, maxOpenPositions: 2 },
         twoSidedMode: 'shadow',
