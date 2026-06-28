@@ -45,9 +45,14 @@ const SAFETY_REDISCOVER_MS = 600_000;
 // Spread a fleet-wide poll burst (WS reconnect / manual refresh) across this step per wallet so it
 // doesn't hit the shared Meteora budget all in one tick.
 const POLL_STAGGER_MS = 50;
-// On-chain source: refresh the positions projection at most this often on the snapshot cadence (open
-// positions' live value/range) — re-projecting every snapshot tick would re-read all legs needlessly.
-const SYNC_INTERVAL_MS = 60_000;
+// On-chain source: the OPEN-position refresh cadence. Drives BOTH (a) the periodic EXACT on-chain read
+// (onTick → doSnapshot) that grows a live position's unclaimed fees + rebalances its bin liquidity — the
+// 10s price-mark only RE-PRICES frozen amounts and can't do that — and (b) the open-only reproject that
+// PERSISTS the result so the HTTP-polling widget sees it (reads only the open subset's legs, never the
+// closed history). 15s tracks HXUi's fast (~minutes) scalps; size/PnL/range still refresh every 10s via
+// the free price-mark. Cost: one getMultipleAccounts (cached plan, no 10-credit gPA) per OPEN-position
+// wallet per tick — trivial for a few wallets; bound to a requested set at large scale.
+const SYNC_INTERVAL_MS = 15_000;
 // After a close the residual is usually market-sold within seconds; Helius indexes that swap in ~1-2s
 // (measured), so the realized pass fired at close-detection can run BEFORE the sell exists and overstate
 // PnL (residual still marked as held). Re-run it on a small front-loaded schedule after each close so the
