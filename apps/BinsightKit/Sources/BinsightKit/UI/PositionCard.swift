@@ -4,9 +4,14 @@ import SwiftUI
 /// PnL (SOL + %), size/age, fees, and the range bar.
 public struct PositionCard: View {
     let p: OpenPosition
+    /// Injected clock so the panel can keep the age fresh on a periodic tick (see `ageString`).
+    let now: Date
     @State private var hovering = false
 
-    public init(p: OpenPosition) { self.p = p }
+    public init(p: OpenPosition, now: Date = Date()) {
+        self.p = p
+        self.now = now
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -30,7 +35,7 @@ public struct PositionCard: View {
             }
             HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Size \(abs4(p.sizeSol)) SOL · \(ageString(p.openedAt))")
+                    Text("Size \(abs4(p.sizeSol)) SOL · \(ageString(p.openedAt, now: now))")
                         .font(.data(11)).foregroundStyle(.secondary)
                     FeesLabel(position: p)
                 }

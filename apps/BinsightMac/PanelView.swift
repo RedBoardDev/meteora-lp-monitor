@@ -1,8 +1,13 @@
 import BinsightKit
 import SwiftUI
 
+/// How often the open panel re-renders so relative ages stay current. Ages tick in minutes, so a 30 s
+/// cadence keeps them effectively fresh while the panel is open without re-rendering on every frame.
+private let ageRefreshSeconds: TimeInterval = 30
+
 struct PanelView: View {
     @Environment(PortfolioStore.self) private var store
+    @Environment(\.openURL) private var openURL
     @State private var showHealthDetail = false
 
     var body: some View {
@@ -48,6 +53,7 @@ struct PanelView: View {
                 Text("PORTFOLIO").font(.system(size: 11, weight: .semibold))
                     .tracking(0.6).foregroundStyle(.secondary)
                 Spacer()
+                openInBrowserButton
                 connectionDot
             }
             if let hint = connectionHint(store.connection, apiURL: Config.apiURL) {
@@ -130,24 +136,28 @@ struct PanelView: View {
 
     private var contentScroll: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                openList
-                Divider().padding(.horizontal, 10).padding(.top, 2)
-                closedBar
-                closedList
+            // Re-render the lists on a steady tick so relative ages ("3m", "2h") stay fresh while the
+            // panel is open — previously an age only updated when its row happened to re-render (hover).
+            TimelineView(.periodic(from: .now, by: ageRefreshSeconds)) { ctx in
+                VStack(alignment: .leading, spacing: 0) {
+                    openList(now: ctx.date)
+                    Divider().padding(.horizontal, 10).padding(.top, 2)
+                    closedBar
+                    closedList(now: ctx.date)
+                }
             }
         }
         .frame(height: 380)
     }
 
-    private var openList: some View {
+    private func openList(now: Date) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("OPEN POSITIONS", count: store.positions.count)
             if store.positions.isEmpty {
                 Text(store.wallets.isEmpty ? "Add a wallet in Settings to start" : "No open positions")
                     .font(.system(size: 12)).foregroundStyle(.secondary).padding(.vertical, 6)
             } else {
-                ForEach(store.positions) { p in PositionCard(p: p) }
+                ForEach(store.positions) { p in PositionCard(p: p, now: now) }
             }
         }
         .padding(10)
@@ -171,13 +181,13 @@ struct PanelView: View {
         .padding(.bottom, 4)
     }
 
-    private var closedList: some View {
+    private func closedList(now: Date) -> some View {
         VStack(spacing: 0) {
             if store.closed.isEmpty {
                 Text("No closed positions yet").font(.system(size: 12)).foregroundStyle(.secondary)
                     .padding(.vertical, 8)
             } else {
-                ForEach(store.closed) { c in ClosedRow(c: c) }
+                ForEach(store.closed) { c in ClosedRow(c: c, now: now) }
             }
         }
         .padding(.horizontal, 12)
@@ -210,6 +220,25 @@ struct PanelView: View {
     }
 
     // MARK: Shared bits
+
+    // Discreet quick-link: open the public web app on whatever the panel is currently viewing.
+    private var openInBrowserButton: some View {
+        Button {
+            if let url = webDeepLink { openURL(url) }
+        } label: {
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable().frame(width: 14, height: 14).opacity(0.75)
+        }
+        .buttonStyle(.plain)
+        .help("Open in Binsight")
+        .pointingHandCursor()
+    }
+
+    // Mirror the panel's scope: overview → site root, a selected wallet → ?address=<wallet>.
+    private var webDeepLink: URL? {
+        let base = Config.webURL
+        return URL(string: store.scope == "all" ? base : "\(base)/?address=\(store.scope)")
+    }
 
     private var connectionDot: some View {
         let degraded = store.health.map { !$0.wsConnected || !$0.meteoraOk } ?? false
@@ -256,6 +285,7 @@ struct PanelView: View {
 /// share) stay hidden until the row is hovered — appearing beside the stats — to keep the list clean.
 private struct ClosedRow: View {
     let c: ClosedPosition
+    let now: Date
     @State private var hovering = false
 
     var body: some View {
@@ -264,12 +294,18 @@ private struct ClosedRow: View {
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
             Spacer()
-            // Always laid out (reserves width + height so the row never resizes); just faded in on hover.
-            PositionLinks(
-                wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
-                shareAddress: c.positionAddress)
-                .opacity(hovering ? 1 : 0)
-                .allowsHitTesting(hovering)
+            // Hover reveals the quick-links; at rest the same slot shows a discreet size + strategy
+            // summary. Both are always laid out (ZStack) so the row never resizes between states.
+            ZStack(alignment: .trailing) {
+                PositionLinks(
+                    wallet: c.wallet, positionAddress: c.positionAddress, mint: c.tokenXMint,
+                    shareAddress: c.positionAddress)
+                    .opacity(hovering ? 1 : 0)
+                    .allowsHitTesting(hovering)
+                restingSummary
+                    .opacity(hovering ? 0 : 1)
+                    .allowsHitTesting(false)
+            }
             Text(signed(c.pnlSol))
                 .font(.data(12, weight: .semibold))
                 .foregroundStyle(pnlColor(c.pnlPctSol))
@@ -280,7 +316,7 @@ private struct ClosedRow: View {
             .font(.data(11))
             .foregroundStyle(.secondary)
             .fixedSize()
-            Text(ageString(c.closedAt))
+            Text(ageString(c.closedAt, now: now))
                 .font(.data(11))
                 .foregroundStyle(.tertiary)
                 .fixedSize()
@@ -288,6 +324,25 @@ private struct ClosedRow: View {
         .padding(.vertical, 3)
         .contentShape(Rectangle())
         .onHover { h in withAnimation(Theme.springPress) { hovering = h } }
+    }
+
+    // Size (deposited SOL, 2 dp) + strategy family — shown only while the row is at rest.
+    private var restingSummary: some View {
+        HStack(spacing: 4) {
+            Text("\(abs2(c.depositSol)) SOL")
+            if let s = c.strategy { Text("· \(strategyShort(s))") }
+        }
+        .font(.data(11))
+        .foregroundStyle(.tertiary)
+        .fixedSize()
+    }
+
+    private func strategyShort(_ s: StrategyFamily) -> String {
+        switch s {
+        case .spot: "Spot"
+        case .bidAsk: "Bid-Ask"
+        case .curve: "Curve"
+        }
     }
 }
 

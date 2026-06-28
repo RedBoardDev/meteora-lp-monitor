@@ -23,6 +23,22 @@ public enum Config {
         set { defaults.set(newValue, forKey: "apiURL") }
     }
 
+    /// Production web origin — the live public site the panel's "open in browser" quick-link targets.
+    public static let prodWebURL = "https://binsight.thomasott.fr"
+
+    /// The web app origin for deep-links, mirroring the configured API origin.
+    public static var webURL: String { webURL(fromAPI: apiURL) }
+
+    /// Pure derivation (testable): the web origin is the API origin minus the `api.` host prefix
+    /// (api.binsight.thomasott.fr → binsight.thomasott.fr). Non-`api.` hosts (e.g. a localhost dev API)
+    /// fall back to the production web origin, since the quick-link always points at the live app.
+    static func webURL(fromAPI apiURL: String) -> String {
+        if let u = URL(string: apiURL), let scheme = u.scheme, let host = u.host, host.hasPrefix("api.") {
+            return "\(scheme)://\(host.dropFirst(4))"
+        }
+        return prodWebURL
+    }
+
     /// Master switch: when off, the app shows no native notifications (default on).
     public static var notificationsEnabled: Bool {
         get { defaults.object(forKey: "notificationsEnabled") as? Bool ?? true }
