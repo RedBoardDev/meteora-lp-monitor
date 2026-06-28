@@ -64,6 +64,27 @@ describe('CopyJournalStore — persistence (integration)', () => {
   });
 });
 
+describe('CopyJournalStore — clean stdout event line', () => {
+  it('emits a clean info line for a normal event (the operator-facing feed)', async () => {
+    const info = vi.fn();
+    const log = { warn: vi.fn(), info, error: vi.fn() } as unknown as Logger;
+    const store = new CopyJournalStore(db, log, 'brain');
+    await store.record({ stage: 'open', outcome: 'published', kind: 'open', ourSizeSol: 0.3, eventKey: MARKER });
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]![0]).toContain('OPEN published');
+  });
+
+  it('emits at ERROR level for a rejected vault command, with the reason visible', async () => {
+    // WHY: a vault rejection must be surfaced loudly on stdout with its cause, not buried at info.
+    const error = vi.fn();
+    const log = { warn: vi.fn(), info: vi.fn(), error } as unknown as Logger;
+    const store = new CopyJournalStore(db, log, 'coffre');
+    await store.record({ stage: 'sign', outcome: 'rejected', reason: 'wallb:foreign_sol_destination', eventKey: MARKER });
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]![0]).toContain('wallb:foreign_sol_destination');
+  });
+});
+
 describe('CopyJournalStore — fail-safe (the cardinal guarantee)', () => {
   it('NEVER throws when the DB write fails — a journal hiccup must not break the hot path / cause a missed copy', async () => {
     // A db whose awaited insert rejects (DB down). The bot must keep running regardless.

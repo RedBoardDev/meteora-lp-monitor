@@ -7,7 +7,7 @@
  * and swallow. Call sites fire-and-forget (do not await) so zero latency is added to the ≤3s copy budget.
  */
 import type { Logger } from 'pino';
-import { type Journal, type JournalEntry, type JournalProcess, severityFor, validationWarning } from '@/domain/copybot/journal';
+import { formatJournalLine, type Journal, type JournalEntry, type JournalProcess, severityFor, validationWarning } from '@/domain/copybot/journal';
 import type { openDatabase } from '@/infrastructure/persistence/database';
 import { copyJournal } from '@/infrastructure/persistence/schema';
 
@@ -24,6 +24,8 @@ export class CopyJournalStore implements Journal {
     // Surface a missing-reason programming error loudly, but still record the event (never drop activity).
     const warning = validationWarning(entry);
     if (warning) this.log.warn({ entry }, `journal: ${warning}`);
+
+    this.emit(entry); // clean operator-facing line on stdout (the structured fields go to the DB row below)
 
     try {
       await this.db.insert(copyJournal).values({
@@ -50,5 +52,15 @@ export class CopyJournalStore implements Journal {
       // Loud but non-fatal: the bot keeps running even if its journal is momentarily unavailable.
       this.log.warn({ err: (e as Error).message, stage: entry.stage, outcome: entry.outcome }, 'journal write failed (non-fatal)');
     }
+  }
+
+
+  /** Emit the clean one-line event log at the entry's severity (the readable mirror of the DB journal). */
+  private emit(entry: JournalEntry): void {
+    const line = formatJournalLine(entry);
+    const severity = entry.severity ?? severityFor(entry.outcome);
+    if (severity === 'error') this.log.error(line);
+    else if (severity === 'warn') this.log.warn(line);
+    else this.log.info(line);
   }
 }

@@ -5,6 +5,7 @@ import {
   JOURNAL_STAGES,
   type JournalEntry,
   type JournalOutcome,
+  formatJournalLine,
   requiresReason,
   severityFor,
   stageForKind,
@@ -68,6 +69,33 @@ describe('journal · stageForKind', () => {
     expect(stageForKind('open')).toBe('open');
     expect(stageForKind('close')).toBe('close');
     expect(stageForKind('sell')).toBe('sell');
+  });
+});
+
+describe('journal · formatJournalLine (clean operator log)', () => {
+  it('a skipped open shows the stage, outcome AND the reason (the user must see WHY an open did not happen)', () => {
+    const line = formatJournalLine({ stage: 'open', outcome: 'skipped', reason: 'entry_filter', pool: '5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6' });
+    expect(line).toContain('OPEN');
+    expect(line).toContain('skipped');
+    expect(line).toContain('(entry_filter)'); // the WHY is always present
+    expect(line).toContain('pool=5rCf…HAS6'); // pubkey abbreviated
+  });
+
+  it('a landed sign shows the kind, signature and latency', () => {
+    const line = formatJournalLine({ stage: 'sign', outcome: 'landed', kind: 'close', signature: 'abcdefghijklmnopqrstuvwxyz', latencyMs: 1842 });
+    expect(line).toContain('SIGN landed');
+    expect(line).toContain('close');
+    expect(line).toContain('sig=abcd…wxyz');
+    expect(line).toContain('1842ms');
+  });
+
+  it('a noop renders a minimal clean line (no trailing separators)', () => {
+    expect(formatJournalLine({ stage: 'reshape', outcome: 'noop' })).toBe('· RESHAPE noop');
+  });
+
+  it('does not duplicate the kind when it equals the stage', () => {
+    const line = formatJournalLine({ stage: 'open', outcome: 'published', kind: 'open', ourSizeSol: 0.3 });
+    expect(line).toBe('📤 OPEN published · 0.3 SOL'); // kind 'open' omitted (== stage), size shown
   });
 });
 

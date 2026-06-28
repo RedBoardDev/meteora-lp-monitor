@@ -136,3 +136,39 @@ export function stageForKind(kind: JournalKind): JournalStage {
       return 'sell';
   }
 }
+
+
+/** Per-outcome icon for the human-readable log line (Valhalla-style). */
+const OUTCOME_ICON: Record<JournalOutcome, string> = {
+  detected: '👁️',
+  published: '📤',
+  landed: '🚀',
+  confirmed: '✅',
+  skipped: '⤳',
+  blocked: '🛑',
+  failed: '❌',
+  rejected: '⛔',
+  noop: '·',
+};
+
+/** Abbreviate a long pubkey/signature for a readable log line (first 4 + last 4). Pure. */
+function short(s: string): string {
+  return s.length > 12 ? `${s.slice(0, 4)}…${s.slice(-4)}` : s;
+}
+
+/**
+ * Render a journal entry as ONE clean human-readable log line (the operator-facing event feed). Deterministic +
+ * pure; the structured fields live in the DB row, this is the readable stdout mirror — e.g.
+ *   `⤳ OPEN skipped (entry_filter) · pool=5rCf…AS6`   ·   `🚀 SIGN landed · close · sig=ab…yz · 1842ms`
+ */
+export function formatJournalLine(e: JournalEntry): string {
+  const fields: string[] = [];
+  if (e.kind && e.kind !== e.stage) fields.push(e.kind);
+  if (e.ourSizeSol !== undefined) fields.push(`${e.ourSizeSol} SOL`);
+  if (e.pool) fields.push(`pool=${short(e.pool)}`);
+  if (e.signature) fields.push(`sig=${short(e.signature)}`);
+  if (e.latencyMs !== undefined) fields.push(`${e.latencyMs}ms`);
+  const reason = e.reason ? ` (${e.reason})` : '';
+  const suffix = fields.length ? ` · ${fields.join(' · ')}` : '';
+  return `${OUTCOME_ICON[e.outcome]} ${e.stage.toUpperCase()} ${e.outcome}${reason}${suffix}`;
+}
