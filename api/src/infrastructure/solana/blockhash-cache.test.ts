@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BlockhashCache } from './blockhash-cache';
 
 describe('BlockhashCache', () => {
@@ -27,5 +27,23 @@ describe('BlockhashCache', () => {
     fail = true;
     await c.refresh(); // fails → keeps 'good'
     expect(c.get()).toBe('good');
+  });
+
+  it('start() primes (get ready) then refreshes on the timer; stop() halts it', async () => {
+    vi.useFakeTimers();
+    try {
+      let n = 0;
+      const fetchFn = vi.fn(async () => `bh${++n}`);
+      const c = new BlockhashCache(fetchFn, 2_000);
+      await c.start(); // primes immediately → get() ready
+      expect(c.get()).toBe('bh1');
+      await vi.advanceTimersByTimeAsync(2_000); // one background refresh
+      expect(c.get()).toBe('bh2');
+      c.stop();
+      await vi.advanceTimersByTimeAsync(6_000); // no more refreshes after stop
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

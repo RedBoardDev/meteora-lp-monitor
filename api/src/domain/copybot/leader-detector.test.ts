@@ -227,6 +227,56 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
     expect(det.cursorSignature).toBe('a'); // recovered, no hole
   });
 
+  it('the bounded `seen` set evicts oldest-first and biases to a re-emit, NEVER a miss', async () => {
+    // WHY: `seen` is capped (memory bound) — when it overflows it drops the OLDEST signature. The dropped sig is
+    // always behind the cursor, so the worst case is the poll re-emitting it (a duplicate, deduped downstream),
+    // never a miss. A regression that evicted a still-in-window sig the poll couldn't recover would break no-miss.
+    const { deps, emitted } = makeDeps(['a', 'b', 'c'], new Set(['a', 'b', 'c']));
+    const det = new LeaderDetector(deps, 2); // seenMax = 2 → the 3rd WS sig evicts 'a'
+
+    await det.onWsSignature('a'); // seen = {a}
+    await det.onWsSignature('b'); // seen = {a, b}
+    await det.onWsSignature('c'); // seen = {b, c} — 'a' evicted (but it WAS already emitted)
+    await det.poll(); // re-lists a,b,c → only 'a' is fresh again (b,c still seen) → re-emitted (duplicate, OK)
+
+    const sigs = emitted.map((e) => e.signature);
+    expect(sigs).toEqual(['a', 'b', 'c', 'a']); // 3 via WS, then 'a' once more via the poll (evicted → re-fresh)
+    expect(sigs.filter((s) => s === 'b')).toHaveLength(1); // still-seen sigs are NOT re-emitted
+    expect(sigs.filter((s) => s === 'c')).toHaveLength(1);
+  });
+
+  it('NO-MISS under eviction pressure: a `seen` smaller than the live window still loses NOTHING', async () => {
+    // The dedup window is intentionally smaller than the burst → forces evictions every round. Invariant: every
+    // event is still emitted at least once (no-miss); duplicates from eviction are acceptable (deduped downstream).
+    const available: string[] = [];
+    const emitted: string[] = [];
+    const deps: DetectorDeps = {
+      async listSignaturesSince(until) {
+        const start = until === undefined ? 0 : available.indexOf(until) + 1;
+        return available.slice(start).reverse().map((signature) => ({ signature }));
+      },
+      async classify(sigs) {
+        return new Map(sigs.map((s) => [s, fakeEvent(s)]));
+      },
+      onEvent(e) {
+        emitted.push(e.signature);
+      },
+    };
+    const det = new LeaderDetector(deps, 3); // tiny dedup window vs 3-per-round bursts
+
+    const allSigs: string[] = [];
+    for (let round = 0; round < 5; round += 1) {
+      const sigs = [`r${round}s0`, `r${round}s1`, `r${round}s2`];
+      allSigs.push(...sigs);
+      available.push(...sigs);
+      await det.onWsSignature(sigs[0] as string); // partial WS each round
+      await det.poll(); // backstop sweep advances the cursor
+    }
+
+    for (const s of allSigs) expect(emitted).toContain(s); // NONE missed, even with constant eviction
+    expect(det.cursorSignature).toBe(allSigs[allSigs.length - 1]); // cursor reached the newest
+  });
+
   it('the WS never advances the cursor (only the poll does) — guarantees the contiguous sweep', async () => {
     const { deps } = makeDeps(['a', 'b', 'c'], new Set(['a', 'b', 'c']));
     const det = new LeaderDetector(deps);

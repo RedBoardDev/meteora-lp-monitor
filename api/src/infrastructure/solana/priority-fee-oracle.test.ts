@@ -61,4 +61,21 @@ describe('priority-fee-oracle · PriorityFeeOracle', () => {
     expect(oracle.get('medium')).toBeNull();
     expect(oracle.get('high')).toBe(LEVELS.high); // siblings unaffected
   });
+
+  it('start() primes then refreshes on the timer; stop() halts further refreshes', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchFn = vi.fn(okFetch());
+      const oracle = new PriorityFeeOracle(HTTP, ACCT, 1_000, fetchFn);
+      await oracle.start(); // primes immediately (1 fetch)
+      expect(oracle.get('medium')).toBe(LEVELS.medium);
+      await vi.advanceTimersByTimeAsync(1_000); // one background tick
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+      oracle.stop();
+      await vi.advanceTimersByTimeAsync(3_000); // no more ticks after stop
+      expect(fetchFn).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

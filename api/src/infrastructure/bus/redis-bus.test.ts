@@ -39,6 +39,24 @@ describe('RedisBus — Redis Streams + HMAC (integration)', () => {
     const id = msgs[0]?.id;
     if (id) await bus.ack(STREAM, GROUP, id);
   });
+
+  it('consumePending recovers a delivered-but-unACKed cmd:sign (crash recovery — NEVER strands an in-flight close)', async () => {
+    // WHY: a vault that read a cmd:sign then crashed before ACK must re-process it on boot, or a close could be lost.
+    // consumePending re-reads THIS consumer's PEL (XREADGROUP id '0'); the executions table makes the replay safe.
+    const payload = { commandId: 'pend1', kind: 'close', sizeSol: 1 };
+    const consumer = 'consumer-crash';
+    await bus.publish(STREAM, 'cmd:sign', KEY, payload);
+    const first = await bus.consume(STREAM, GROUP, consumer, 'cmd:sign', KEY, 10, 2000);
+    expect(first).toHaveLength(1); // delivered to this consumer, but we deliberately DON'T ack (the "crash")
+
+    const pending = await bus.consumePending(STREAM, GROUP, consumer, 'cmd:sign', KEY);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.payload).toEqual(payload); // recovered AND HMAC-authenticated, not lost
+    const id = pending[0]?.id;
+    if (id) await bus.ack(STREAM, GROUP, id); // now ack → cleared from the PEL
+    const afterAck = await bus.consumePending(STREAM, GROUP, consumer, 'cmd:sign', KEY);
+    expect(afterAck).toHaveLength(0); // once ACKed, no longer pending (not re-processed forever)
+  });
 });
 
 // Group-creation + DLQ semantics, tested deterministically against a fake ioredis (no container needed): idempotent

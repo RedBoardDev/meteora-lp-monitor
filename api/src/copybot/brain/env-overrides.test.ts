@@ -52,4 +52,16 @@ describe('envEffectiveOverride — SPARSE env bridge (DB stays authoritative)', 
     expect(envEffectiveOverride({ COPYBOT_RUG_SL: 'false' }).rugSl).toEqual({ enabled: false });
     expect(envEffectiveOverride({ COPYBOT_RUG_SL: 'true' }).rugSl).toEqual({ enabled: true });
   });
+
+  it('priority-fee override is sparse: tier and a finite cap appear only when set', () => {
+    expect(envEffectiveOverride({}).priorityFee).toBeUndefined();
+    expect(envEffectiveOverride({ COPYBOT_PRIORITY_FEE_TIER: 'high' }).priorityFee).toEqual({ tier: 'high' });
+    expect(envEffectiveOverride({ COPYBOT_PRIORITY_FEE_MAX_CAP_SOL: '0.01' }).priorityFee).toEqual({ maxCapSol: 0.01 });
+    expect(envEffectiveOverride({ COPYBOT_PRIORITY_FEE_TIER: 'low', COPYBOT_PRIORITY_FEE_MAX_CAP_SOL: '0.002' }).priorityFee).toEqual({ tier: 'low', maxCapSol: 0.002 });
+  });
+
+  it('a non-finite priority-fee cap is dropped (the DB cap stands, never NaN)', () => {
+    // WHY: the cap is the hard cost bound — a typo must never poison it with NaN (which would defeat the clamp).
+    expect(envEffectiveOverride({ COPYBOT_PRIORITY_FEE_MAX_CAP_SOL: 'oops' }).priorityFee).toBeUndefined();
+  });
 });
