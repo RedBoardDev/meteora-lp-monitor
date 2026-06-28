@@ -20,7 +20,8 @@
     "bot:brain": "node --env-file=../.env dist/copybot/src/copybot/brain/brain-main.cjs",
     "bot:coffre": "node --import tsx --env-file=../.env src/copybot/coffre/coffre-main.ts",
     "bot:leader": "node --env-file=../.env dist/copybot/scripts/leader-control.cjs",
-    "bot:diag-verify": "node --env-file=../.env dist/copybot/scripts/diag-verify-copy.cjs"
+    "bot:diag-verify": "node --env-file=../.env dist/copybot/scripts/diag-verify-copy.cjs",
+    "bot:config": "node --import tsx --env-file=../.env scripts/copybot-config.ts"
   },
   "dependencies": {
     "@binsight/shared": "workspace:*",

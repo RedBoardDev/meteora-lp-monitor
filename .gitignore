@@ -60,6 +60,7 @@ TODO.md
 api/scripts/*
 !api/scripts/leader-control.ts
 !api/scripts/bench-reader.ts
+!api/scripts/copybot-config.ts
 
 # copy-bot test wallet keypairs — NEVER committed (real keys, gitignored)
 .wallets/
