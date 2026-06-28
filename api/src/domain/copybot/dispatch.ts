@@ -11,7 +11,13 @@ import type { DetectedEvent } from './events';
 /** What the brain should do with a detected event. `resync` = re-shape our copy to the leader's new size/shape. */
 export type EventAction = 'open' | 'resync' | 'close' | 'claim' | 'ignore';
 
-export function classifyEventAction(e: DetectedEvent, tracked: boolean, infiniteAdd: boolean): EventAction {
+/** The config that affects ROUTING (not sizing). `infiniteAdd`: grow on a leader add. `claimFloorSol`: skip dust claims. */
+export interface RoutingConfig {
+  infiniteAdd: boolean;
+  claimFloorSol: number;
+}
+
+export function classifyEventAction(e: DetectedEvent, tracked: boolean, cfg: RoutingConfig): EventAction {
   const kind = classifyInstruction(e.instruction);
   if (e.depositSol > 0 && !tracked) return 'open'; // first capital event on an untracked position → open
   if (!tracked) return 'ignore'; // event on a position we don't mirror → ignore (reconcile/orphan handles it)
@@ -19,7 +25,7 @@ export function classifyEventAction(e: DetectedEvent, tracked: boolean, infinite
   if (e.withdrawSol > 0) return 'resync'; // ANY withdrawal → re-sync (shrink): always followed (no-dormant safety)
   // A pure leader ADD (deposit, no withdrawal): grow with the leader only when infinite-add is on; else ignore it
   // (Valhalla "first deposit only"). Removes/closes above are unaffected, so the safety net is never gated.
-  if (e.depositSol > 0) return infiniteAdd ? 'resync' : 'ignore';
-  if (kind === 'claim' || e.claimSol > 0) return 'claim'; // fee claim (never a close)
+  if (e.depositSol > 0) return cfg.infiniteAdd ? 'resync' : 'ignore';
+  if (kind === 'claim' || e.claimSol > 0) return e.claimSol >= cfg.claimFloorSol ? 'claim' : 'ignore'; // skip a dust claim
   return 'ignore';
 }

@@ -97,6 +97,7 @@ export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride 
     priorityFee: envPriorityFee(env),
     rugSl: env.COPYBOT_RUG_SL !== undefined ? { enabled: env.COPYBOT_RUG_SL === TRUE } : undefined,
     infiniteAdd: env.COPYBOT_INFINITE_ADD !== undefined ? env.COPYBOT_INFINITE_ADD === TRUE : undefined,
+    claimFloorSol: env.COPYBOT_CLAIM_FLOOR_SOL !== undefined && Number.isFinite(Number(env.COPYBOT_CLAIM_FLOOR_SOL)) ? Number(env.COPYBOT_CLAIM_FLOOR_SOL) : undefined,
     ...envFilters(env),
   };
 }

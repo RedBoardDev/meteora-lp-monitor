@@ -25,6 +25,7 @@ export const USER_DEFAULTS: UserSettings = {
   priorityFee: { tier: 'medium', maxCapSol: 0.005 }, // capped CU price on every tx (spec §5)
   rugSl: { enabled: true, dropPercent: 40, windowSeconds: 60 }, // crash safety exit on by default (spec §7)
   infiniteAdd: false, // copy only the first deposit by default; removes are always followed (spec §8, Valhalla)
+  claimFloorSol: 0.01, // mirror a leader fee-claim only if ≥ ~0.01 SOL (≈ Valhalla's $2 floor; skip dust claims)
 };
 
 export const CONFIG_DEFAULTS: CopybotConfig = {

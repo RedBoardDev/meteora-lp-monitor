@@ -44,6 +44,8 @@ export interface Overridable {
   rugSl: RugSlConfig;
   /** Copy EVERY leader add-liquidity (grow with the leader), or only the first deposit. Removes are always followed. */
   infiniteAdd: boolean;
+  /** Mirror a leader fee-claim only if it claimed ≥ this many SOL (skip dust claims; 0 = mirror all). */
+  claimFloorSol: number;
 }
 
 /** Account-global settings (defaults for every leader). */
@@ -63,6 +65,7 @@ export type LeaderOverride = {
   priorityFee?: Partial<PriorityFeeConfig>;
   rugSl?: Partial<RugSlConfig>;
   infiniteAdd?: boolean;
+  claimFloorSol?: number;
 };
 
 /** One followed leader. */
@@ -100,5 +103,6 @@ export type EffectiveOverride = {
   priorityFee?: Partial<PriorityFeeConfig>;
   rugSl?: Partial<RugSlConfig>;
   infiniteAdd?: boolean;
+  claimFloorSol?: number;
   userEnabled?: boolean;
 };

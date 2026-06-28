@@ -68,7 +68,7 @@ const RugSlSchema = z.object({
 }) satisfies z.ZodType<RugSlConfig>;
 
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema, infiniteAdd: z.boolean() })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema, infiniteAdd: z.boolean(), claimFloorSol: z.number().nonnegative() })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -84,6 +84,7 @@ const LeaderSchema = z
         priorityFee: PriorityFeeSchema.partial().optional(),
         rugSl: RugSlSchema.partial().optional(),
         infiniteAdd: z.boolean().optional(),
+        claimFloorSol: z.number().nonnegative().optional(),
       })
       .strict(),
   })
@@ -122,6 +123,7 @@ function mergeUser(partial: unknown): UserSettings {
     priorityFee: { ...USER_DEFAULTS.priorityFee, ...(isObj(p.priorityFee) ? p.priorityFee : {}) },
     rugSl: { ...USER_DEFAULTS.rugSl, ...(isObj(p.rugSl) ? p.rugSl : {}) },
     infiniteAdd: typeof p.infiniteAdd === 'boolean' ? p.infiniteAdd : USER_DEFAULTS.infiniteAdd,
+    claimFloorSol: typeof p.claimFloorSol === 'number' ? p.claimFloorSol : USER_DEFAULTS.claimFloorSol,
   } as UserSettings;
 }
 

@@ -32,6 +32,7 @@ describe('config · defaults + schema', () => {
     expect(u.priorityFee).toEqual({ tier: 'medium', maxCapSol: 0.005 }); // spec §5
     expect(u.rugSl).toEqual({ enabled: true, dropPercent: 40, windowSeconds: 60 }); // spec §7
     expect(u.infiniteAdd).toBe(false); // spec §8: only the first deposit by default
+    expect(u.claimFloorSol).toBe(0.01); // skip dust fee-claims (≈ Valhalla $2)
   });
 });
 

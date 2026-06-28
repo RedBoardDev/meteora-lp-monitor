@@ -16,8 +16,8 @@ const ev = (over: Partial<DetectedEvent>): DetectedEvent => ({
   ...over,
 });
 
-const route = (over: Partial<DetectedEvent>, tracked: boolean, infiniteAdd = true): EventAction =>
-  classifyEventAction(ev(over), tracked, infiniteAdd);
+const route = (over: Partial<DetectedEvent>, tracked: boolean, infiniteAdd = true, claimFloorSol = 0): EventAction =>
+  classifyEventAction(ev(over), tracked, { infiniteAdd, claimFloorSol });
 
 describe('classifyEventAction — event routing (robustness)', () => {
   it('first deposit on an UNTRACKED position → open', () => {
@@ -82,5 +82,21 @@ describe('classifyEventAction — infinite-add gate (default OFF: only the first
 
   it('infiniteAdd OFF does not affect a first open on an untracked position', () => {
     expect(route({ instruction: 'InitializePosition', depositSol: 0.1 }, false, false)).toBe('open');
+  });
+});
+
+describe('classifyEventAction — claim-floor gate (skip dust fee-claims)', () => {
+  const claim = (sol: number) => ({ instruction: 'ClaimFee', claimSol: sol });
+
+  it('a leader claim ≥ floor → claim', () => {
+    expect(route(claim(0.05), true, true, 0.01)).toBe('claim');
+  });
+
+  it('a leader claim below floor → ignore (no dust-claim mirroring / tx spam)', () => {
+    expect(route(claim(0.005), true, true, 0.01)).toBe('ignore');
+  });
+
+  it('floor 0 mirrors every claim (including a 0-SOL claim-by-instruction)', () => {
+    expect(route(claim(0), true, true, 0)).toBe('claim');
   });
 });
