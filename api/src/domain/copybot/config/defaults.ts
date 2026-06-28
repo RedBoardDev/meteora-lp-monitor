@@ -27,6 +27,7 @@ export const USER_DEFAULTS: UserSettings = {
   infiniteAdd: false, // copy only the first deposit by default; removes are always followed (spec §8, Valhalla)
   claimFloorSol: 0.01, // mirror a leader fee-claim only if ≥ ~0.01 SOL (≈ Valhalla's $2 floor; skip dust claims)
   jitoEnabled: false, // Jito bundle landing is opt-in (needs a block-engine URL); default = plain RPC send
+  priorityFeeOracle: false, // live fee estimate is opt-in; default = static tier (no extra RPC, behavior unchanged)
 };
 
 export const CONFIG_DEFAULTS: CopybotConfig = {

@@ -56,6 +56,8 @@ export interface UserSettings extends Overridable {
   caps: CapsConfig;
   /** Land txs as Jito bundles (anti-sandwich) when a block-engine URL is configured. Account-wide (not per-leader). */
   jitoEnabled: boolean;
+  /** Back the priority-fee tier with a live network estimate (raises the fee in congestion; cap still bounds it). Account-wide. */
+  priorityFeeOracle: boolean;
 }
 
 /** A sparse per-leader override: only the fields this leader changes from the user defaults. */

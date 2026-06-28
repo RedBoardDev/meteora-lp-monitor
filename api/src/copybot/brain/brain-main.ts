@@ -40,6 +40,7 @@ import { readActiveTokenPrice } from '@/infrastructure/solana/dlmm/active-bin-pr
 import { OnchainPoolMetaReader } from '@/infrastructure/solana/dlmm/pool-meta';
 import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
 import { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
+import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
@@ -85,6 +86,7 @@ const cfg = {
   balanceSol: Number(process.env.COPIER_BALANCE_SOL ?? '10'),
   jupiterBaseUrl: process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL,
   jitoEnabledEnv: process.env.COPYBOT_JITO !== undefined ? process.env.COPYBOT_JITO === 'true' : undefined, // env override of the DB jitoEnabled (anti-sandwich tip ix)
+  priorityFeeOracleEnv: process.env.COPYBOT_PRIORITY_FEE_ORACLE !== undefined ? process.env.COPYBOT_PRIORITY_FEE_ORACLE === 'true' : undefined, // env override of the DB priorityFeeOracle
 };
 // Sizing/caps/two-sided/filters all come from the DB-backed config (config-store), resolved per leader via eff().
 // The env override (migration bridge) is SPARSE: a var, WHEN SET, takes precedence (preserves the on-chain bench);
@@ -145,6 +147,10 @@ async function main(): Promise<void> {
   };
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
+  // Live priority-fee oracle (opt-in): scoped to DLMM-program activity, background-refreshed so serializeUnsigned
+  // reads it instantly. Off ⇒ never started, never queried → the static tier stands (zero extra RPC).
+  const priorityFeeOracle = new PriorityFeeOracle(cfg.httpUrl, DLMM_PROGRAM_ID);
+  const oracleOn = (): boolean => cfg.priorityFeeOracleEnv ?? runtimeConfig.user.priorityFeeOracle;
   const snapshotCache = new TtlCache<TokenSnapshot>(SNAPSHOT_TTL_MS);
   const jupiterToken = new JupiterTokenGateway({
     apiKey: process.env.JUPITER_TOKEN_API_KEY,
@@ -189,7 +195,8 @@ async function main(): Promise<void> {
     tx.feePayer = ownerPk;
     tx.recentBlockhash = blockhashCache.get(); // cached: the vault re-sets a fresh one before signing → no hot-path RTT
     const pf = eff().priorityFee;
-    const prioritySpent = applyPriorityFee(tx, pf); // capped priority fee on every DLMM tx (Wall B allows ComputeBudget)
+    const live = oracleOn() ? priorityFeeOracle.get(pf.tier) : null; // live floor in congestion; null ⇒ static tier
+    const prioritySpent = applyPriorityFee(tx, pf, live); // capped priority fee on every DLMM tx (Wall B allows ComputeBudget)
     // Anti-sandwich Jito tip, INSIDE the shared priority-fee cap (priority + tip ≤ maxCapSol). Only has effect when
     // the vault bundles; on the RPC fallback the tip burns (small, capped, only when Jito is on). Wall B allowlists
     // a tip to a known Jito account up to its own hard cap. Default off ⇒ no tip ix at all.
@@ -763,6 +770,10 @@ async function main(): Promise<void> {
 
   const detector = new LeaderDetector(makeDetectionDeps({ conn, pk: leaderPk, poolReader, tokenMeta, onEvent }));
   await blockhashCache.start(); // prime + background-refresh so serializeUnsigned never pays a getLatestBlockhash RTT
+  if (oracleOn()) {
+    await priorityFeeOracle.start(); // prime + background-refresh the live fee estimate (opt-in)
+    log.info('📈 priority-fee oracle on (live estimate raises the tier in congestion; cap still bounds it)');
+  }
 
   // --once: validates the pipeline by forcing ONE open on a live leader position (deterministic), then exits.
   if (once) {

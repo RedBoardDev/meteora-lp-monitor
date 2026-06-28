@@ -68,7 +68,7 @@ const RugSlSchema = z.object({
 }) satisfies z.ZodType<RugSlConfig>;
 
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema, infiniteAdd: z.boolean(), claimFloorSol: z.number().nonnegative(), jitoEnabled: z.boolean() })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema, rugSl: RugSlSchema, infiniteAdd: z.boolean(), claimFloorSol: z.number().nonnegative(), jitoEnabled: z.boolean(), priorityFeeOracle: z.boolean() })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -125,6 +125,7 @@ function mergeUser(partial: unknown): UserSettings {
     infiniteAdd: typeof p.infiniteAdd === 'boolean' ? p.infiniteAdd : USER_DEFAULTS.infiniteAdd,
     claimFloorSol: typeof p.claimFloorSol === 'number' ? p.claimFloorSol : USER_DEFAULTS.claimFloorSol,
     jitoEnabled: typeof p.jitoEnabled === 'boolean' ? p.jitoEnabled : USER_DEFAULTS.jitoEnabled,
+    priorityFeeOracle: typeof p.priorityFeeOracle === 'boolean' ? p.priorityFeeOracle : USER_DEFAULTS.priorityFeeOracle,
   } as UserSettings;
 }
 
