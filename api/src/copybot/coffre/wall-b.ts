@@ -49,6 +49,10 @@ export interface WallBIntent {
   /** for a Jupiter swap ('sell' or 'buy'): the swap's NON-SOL token mint (sell = input sold, buy = output bought)
    *  — the swap is bound to owner's ATA of it. */
   inputMint?: string;
+  /** hard ceiling (lamports) on the SOL the tx may WRAP into the position/swap (sum of owner→WSOL-ATA transfers).
+   *  Bounds the ACTUAL deployed SOL independently of the self-reported sizeSol — defense in depth against a
+   *  buggy/compromised brain under-reporting size while the tx moves more. Undefined ⇒ not enforced. */
+  maxLamports?: number;
 }
 
 export type WallBVerdict = { ok: true } | { ok: false; reason: string };
@@ -70,6 +74,8 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
     return { ok: false, reason: 'missing_position_signer' };
   }
 
+  const ownerWsolAta = ownerAta(new PublicKey(intent.owner), WSOL, TOKEN_PROGRAM); // the SOL the tx wraps for deployment/swap
+  let wrapLamports = 0n; // sum of owner→WSOL-ATA System-Transfers = the ACTUAL SOL this tx deploys
   const accountKeys = new Set<string>();
   for (const ix of tx.instructions) {
     const prog = ix.programId.toBase58();
@@ -80,11 +86,12 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
     if (prog === SYSTEM && ix.data.length >= 4 && ix.data.readUInt32LE(0) === 2) {
       const from = ix.keys[0]?.pubkey.toBase58();
       const to = ix.keys[1]?.pubkey.toBase58();
-      if (from === intent.owner && to !== intent.owner && to !== ownerAta(new PublicKey(intent.owner), WSOL, TOKEN_PROGRAM)) {
+      const lamports = ix.data.length >= 12 ? ix.data.readBigUInt64LE(4) : 0n;
+      if (from === intent.owner && to === ownerWsolAta) wrapLamports += lamports; // capital wrapped for the deposit/swap
+      if (from === intent.owner && to !== intent.owner && to !== ownerWsolAta) {
         // The ONE allowed non-owner SOL destination: a capped tip to a known Jito tip account (anti-sandwich).
         if (to !== undefined && JITO_TIP_SET.has(to)) {
-          const tipLamports = ix.data.length >= 12 ? ix.data.readBigUInt64LE(4) : BigInt(MAX_JITO_TIP_LAMPORTS) + 1n;
-          if (tipLamports > BigInt(MAX_JITO_TIP_LAMPORTS)) return { ok: false, reason: 'jito_tip_too_large' };
+          if (lamports > BigInt(MAX_JITO_TIP_LAMPORTS)) return { ok: false, reason: 'jito_tip_too_large' };
         } else {
           return { ok: false, reason: 'foreign_sol_destination' };
         }
@@ -92,10 +99,14 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
     }
   }
 
+  // SOL-spend cap (defense in depth): the ACTUAL wrapped SOL must stay under the caller's ceiling, regardless of the
+  // self-reported sizeSol. Closes/removes/claims/sells wrap nothing (0 ≤ cap). The ceiling is generous (covers rent +
+  // slippage) so it only catches a GROSS over-spend, never false-rejects a legitimate deposit/buy.
+  if (intent.maxLamports !== undefined && wrapLamports > BigInt(intent.maxLamports)) return { ok: false, reason: 'sol_spend_over_cap' };
+
   // A 'sell' (token→SOL) or 'buy' (SOL→token) is a Jupiter swap: no DLMM pool is referenced. Bind it to owner's
   // ATA of the swap's non-SOL token (sell = the residual sold, buy = the token bought for a two-sided copy) —
-  // proves the swap touches the intended token's account, not some other holding. (The SOL spend cap on a buy is
-  // re-clamped against the local config by the coffre; Wall B already blocks any non-owner SOL destination above.)
+  // proves the swap touches the intended token's account, not some other holding.
   if (intent.kind === 'sell' || intent.kind === 'buy') {
     if (!intent.inputMint) return { ok: false, reason: 'swap_missing_token_mint' };
     const owner = new PublicKey(intent.owner);

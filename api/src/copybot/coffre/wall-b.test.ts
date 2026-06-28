@@ -290,3 +290,51 @@ describe('Wall B — verifyTx (add / remove: proportional adjustments, no positi
     expect(verifyTx(t, openIntent({ kind: 'add' }))).toMatchObject({ ok: false, reason: 'pool_not_referenced' });
   });
 });
+
+const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+// An open that WRAPS `lamports` SOL into the owner's WSOL ATA (the real capital deployed), like the SDK does.
+const openWrapping = (lamports: number): Transaction =>
+  buildTx(owner, [
+    ix(DLMM, [
+      { pubkey: owner, isSigner: true, isWritable: true },
+      { pubkey: position, isSigner: true, isWritable: true },
+      { pubkey: pool, isSigner: false, isWritable: true },
+    ]),
+    SystemProgram.transfer({ fromPubkey: owner, toPubkey: ownerAta(WSOL), lamports }),
+  ]);
+
+describe('Wall B — SOL-spend cap (the ACTUAL wrapped SOL is bounded, not just the self-reported sizeSol)', () => {
+  const CAP = 1_000_000_000; // 1 SOL ceiling for these tests
+
+  it('a wrap at/under the cap → ok', () => {
+    expect(verifyTx(openWrapping(CAP), openIntent({ maxLamports: CAP }))).toEqual({ ok: true });
+    expect(verifyTx(openWrapping(CAP - 1), openIntent({ maxLamports: CAP }))).toEqual({ ok: true });
+  });
+
+  it('a wrap OVER the cap → reject sol_spend_over_cap (a compromised brain cannot deploy more than the config allows)', () => {
+    // WHY: the re-clamp on sr.sizeSol bounds a SELF-REPORTED number; Wall B must bound the tx's REAL SOL movement.
+    expect(verifyTx(openWrapping(CAP + 1), openIntent({ maxLamports: CAP }))).toMatchObject({ ok: false, reason: 'sol_spend_over_cap' });
+  });
+
+  it('SUMS multiple owner→WSOL-ATA transfers (split-wrap evasion is caught)', () => {
+    const t = buildTx(owner, [
+      ix(DLMM, [
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: position, isSigner: true, isWritable: true },
+        { pubkey: pool, isSigner: false, isWritable: true },
+      ]),
+      SystemProgram.transfer({ fromPubkey: owner, toPubkey: ownerAta(WSOL), lamports: CAP }),
+      SystemProgram.transfer({ fromPubkey: owner, toPubkey: ownerAta(WSOL), lamports: 2 }),
+    ]);
+    expect(verifyTx(t, openIntent({ maxLamports: CAP }))).toMatchObject({ ok: false, reason: 'sol_spend_over_cap' });
+  });
+
+  it('a close (wraps nothing) is unaffected by the cap → ok', () => {
+    const t = buildTx(owner, [ix(DLMM, [{ pubkey: owner, isSigner: true, isWritable: true }, { pubkey: pool, isSigner: false, isWritable: true }])]);
+    expect(verifyTx(t, openIntent({ kind: 'close', maxLamports: CAP }))).toEqual({ ok: true });
+  });
+
+  it('no maxLamports set → the cap is NOT enforced (backward compatible)', () => {
+    expect(verifyTx(openWrapping(CAP * 100), openIntent())).toEqual({ ok: true });
+  });
+});

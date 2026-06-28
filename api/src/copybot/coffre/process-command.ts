@@ -28,6 +28,14 @@ import type { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 type Db = ReturnType<typeof openDatabase>;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+const LAMPORTS_PER_SOL = 1_000_000_000;
+// Wall B SOL-spend ceiling = maxTradeSol × factor + margin. GENEROUS by design (covers a buy's slippage + the WSOL
+// ATA rent ~0.00204 SOL) so it NEVER false-rejects a legitimate deposit/buy — it only catches a GROSS over-spend
+// (a compromised brain moving far more SOL than the config allows, regardless of the self-reported sizeSol).
+const WALL_B_OVERSPEND_FACTOR = 1.1;
+const WALL_B_RENT_MARGIN_LAMPORTS = 5_000_000; // 0.005 SOL: WSOL-ATA rent + buffer
+const wallBMaxLamports = (maxTradeSol: number): number => Math.ceil(maxTradeSol * LAMPORTS_PER_SOL * WALL_B_OVERSPEND_FACTOR) + WALL_B_RENT_MARGIN_LAMPORTS;
+
 /** Everything the critical section needs — all injected so the function has no hidden module state (testable). */
 export interface Ctx {
   conn: Connection;
@@ -85,7 +93,7 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
   }
   if (sr.owner !== ourOwner) return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'owner_mismatch', kind: sr.kind });
   // Wall B binds a swap to owner's ATA of its non-SOL token: sell = the token sold, buy = the token bought.
-  const wb = verifyTx(tx, { owner: sr.owner, pool: sr.pool, kind: sr.kind, positionPubkey: sr.positionPubkey, inputMint: sr.sell?.inputMint ?? sr.buy?.outputMint });
+  const wb = verifyTx(tx, { owner: sr.owner, pool: sr.pool, kind: sr.kind, positionPubkey: sr.positionPubkey, inputMint: sr.sell?.inputMint ?? sr.buy?.outputMint, maxLamports: wallBMaxLamports(maxTradeSol) });
   if (!wb.ok) {
     void journal.record({ stage: 'sign', outcome: 'rejected', reason: `wallb:${wb.reason}`, kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId });
     return finalize(db, sr.commandId, 'failed', { ok: false, reason: `wallb:${wb.reason}`, kind: sr.kind });
