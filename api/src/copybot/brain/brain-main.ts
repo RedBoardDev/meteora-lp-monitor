@@ -7,7 +7,7 @@
  *   yarn tsup --config tsup.copybot.config.ts → node --env-file=../.env dist/copybot/brain-main.cjs [--once] [--seconds=N]
  */
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
-import { ComputeBudgetProgram, Connection, type Keypair, PublicKey, type Transaction } from '@solana/web3.js';
+import { Connection, type Keypair, PublicKey, type Transaction } from '@solana/web3.js';
 import { pino } from 'pino';
 import { type CapsState, checkCaps } from '@/domain/copybot/caps';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
@@ -16,7 +16,7 @@ import { classifyEventAction } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
 import { type EffectiveConfig, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
-import { type PriorityFeeConfig, computeUnitPriceMicroLamports } from '@/domain/copybot/priority-fee';
+
 import { type FilterContext, filtersActive, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
 import { TtlCache } from '@/domain/copybot/ttl-cache';
@@ -49,6 +49,7 @@ import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import { envEffectiveOverride } from './env-overrides';
+import { applyPriorityFee, withCuLimit } from './compute-budget';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
 
@@ -97,30 +98,6 @@ const TWO_SIDED_CU_LIMIT = 1_400_000; // max CU cap (free — only used CU is me
 // here keyed by the buy's commandId, and build+publish the open only when the buy's ev:executed arrives (token +
 // ATA now present → clean build). (A two-sided reshape ADD does NOT need this — its position's ATA already exists.)
 const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin[]; totalX: bigint; totalY: bigint; sizeSol: number }>();
-const COMPUTE_BUDGET_PROGRAM = 'ComputeBudget111111111111111111111111111111';
-const CB_SET_UNIT_LIMIT = 2; // ComputeBudget instruction discriminator (SetComputeUnitLimit)
-const CB_SET_UNIT_PRICE = 3; // ComputeBudget instruction discriminator (SetComputeUnitPrice)
-const DEFAULT_CU_LIMIT_FOR_PRICE = 200_000; // fallback CU limit for capping the priority price when a tx carries no explicit limit ix
-
-const isCbIx = (ix: { programId: { toBase58(): string }; data: Buffer }, disc: number): boolean =>
-  ix.programId.toBase58() === COMPUTE_BUDGET_PROGRAM && ix.data[0] === disc;
-
-function withCuLimit(t: Transaction | Transaction[], units: number): Transaction {
-  const tx = firstTx(t);
-  tx.instructions = tx.instructions.filter((ix) => !isCbIx(ix, CB_SET_UNIT_LIMIT));
-  tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units }));
-  return tx;
-}
-
-/** Set the priority fee (compute-unit price) on a tx, bounded by the leader's capped tier. Reads the tx's CU limit
- *  (the worst-case) so `price × cuLimit` never exceeds the cap. Replaces any existing price ix (idempotent). */
-function applyPriorityFee(tx: Transaction, pf: PriorityFeeConfig): void {
-  const limitIx = tx.instructions.find((ix) => isCbIx(ix, CB_SET_UNIT_LIMIT));
-  const cuLimit = limitIx ? limitIx.data.readUInt32LE(1) : DEFAULT_CU_LIMIT_FOR_PRICE;
-  const micro = computeUnitPriceMicroLamports(pf.tier, cuLimit, pf.maxCapSol);
-  tx.instructions = tx.instructions.filter((ix) => !isCbIx(ix, CB_SET_UNIT_PRICE));
-  if (micro > 0) tx.instructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: micro }));
-}
 
 async function main(): Promise<void> {
   if (!cfg.httpUrl) {
