@@ -78,14 +78,24 @@ async function main(): Promise<void> {
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
   const ctxBase = { conn, db, bus, copier, blockhashCache, journal, signingEnabled: cfg.signingEnabled, hmacKey: cfg.hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
-  const recoverCtx: Ctx = { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
-  try {
-    const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
-    for (const msg of pending) {
-      const verdict = await process1(msg.payload, recoverCtx, true); // recovering → a stranded 'claimed' is re-claimable
-      log.info({ id: msg.id, recovered: true, ...verdict }, '♻️  recovered pending');
-      await bus.ack(STREAM, GROUP, msg.id);
+  // Process a batch, ACKing each message ONLY after process1 returned a verdict. If process1 THROWS (transient I/O
+  // such as a getSlot RPC blip, BEFORE the idempotency claim), the message is left UNACKED in the PEL — the next
+  // pending-drain retries it (a throwing message must never be silently dropped nor strand the rest of the batch).
+  const processBatch = async (msgs: Awaited<ReturnType<typeof bus.consume>>, recovering = false): Promise<void> => {
+    for (const msg of msgs) {
+      try {
+        const ctx: Ctx = { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
+        const verdict = await process1(msg.payload, ctx, recovering);
+        log.info({ id: msg.id, recovering, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
+        await bus.ack(STREAM, GROUP, msg.id); // idempotence guaranteed by the executions table
+      } catch (e) {
+        await alert(log, 'process1 threw — message left pending for retry (not dropped)', { id: msg.id, error: (e as Error).message });
+      }
     }
+  };
+  try {
+    // Crash recovery (recovering=true → a stranded 'claimed' from a CRASHED prior instance is re-claimable).
+    await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100), true);
   } catch (e) {
     await alert(log, 'vault pending-recovery errored on boot', { error: (e as Error).message });
   }
@@ -116,12 +126,10 @@ async function main(): Promise<void> {
   let backoff = 1000;
   do {
     try {
-      const msgs = await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000);
-      for (const msg of msgs) {
-        const verdict = await process1(msg.payload, { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() });
-        log.info({ id: msg.id, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
-        await bus.ack(STREAM, GROUP, msg.id); // ACK: idempotence guaranteed by the executions table
-      }
+      // Re-drain the PEL FIRST: any message a prior iteration left pending (a process1 throw) is retried here
+      // without waiting for a restart (consumePending at boot alone would strand it until then).
+      await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100));
+      await processBatch(await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000));
       backoff = 1000; // success → reset
     } catch (e) {
       // never crash: alert + exponential backoff + continue (Redis/RPC may recover).
