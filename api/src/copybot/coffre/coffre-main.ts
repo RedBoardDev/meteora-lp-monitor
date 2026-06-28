@@ -17,7 +17,9 @@ import { HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
 import { claimExecution } from '@/copybot/coffre/idempotency';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
+import { utils } from '@coral-xyz/anchor';
 import { confirmLanded, land } from '@/copybot/coffre/landing';
+import { landViaJito } from '@/copybot/coffre/jito-landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import { ConfigStore } from '@/copybot/config-store';
@@ -46,6 +48,8 @@ const cfg = {
   signingEnabled: process.env.SIGNING_ENABLED === 'true', // Inc.4 ; false = dry-run
   retryMax: Number(process.env.SIGN_RETRY_MAX ?? '2'), // sign+land attempts before alerting (Valhalla-style)
   retryDelayMs: Number(process.env.SIGN_RETRY_DELAY_MS ?? '1500'),
+  jitoBundleUrl: process.env.COPYBOT_JITO_BUNDLE_URL, // block-engine URL; absent ⇒ never bundle (plain RPC land)
+  jitoEnabledEnv: process.env.COPYBOT_JITO !== undefined ? process.env.COPYBOT_JITO === 'true' : undefined, // env override of the DB jitoEnabled
 };
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
@@ -63,7 +67,9 @@ async function main(): Promise<void> {
   const journal = new CopyJournalStore(db, log, 'coffre'); // activity journal (fail-safe; never blocks signing)
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
-  const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol; // user ceiling (per-leader can only lower it)
+  const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol;
+  // Jito bundle landing is active only when jitoEnabled (env override else DB config) AND a block-engine URL is set.
+  const jitoBundleUrl = (): string | undefined => ((cfg.jitoEnabledEnv ?? runtimeConfig.user.jitoEnabled) ? cfg.jitoBundleUrl : undefined); // user ceiling (per-leader can only lower it)
   const reloadConfig = async (): Promise<void> => {
     runtimeConfig = await configStore.load();
   };
@@ -79,7 +85,7 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol() };
+  const recoverCtx: Ctx = { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
   try {
     const pending = await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100);
     for (const msg of pending) {
@@ -119,7 +125,7 @@ async function main(): Promise<void> {
     try {
       const msgs = await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000);
       for (const msg of msgs) {
-        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol() });
+        const verdict = await process1(msg.payload, { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() });
         log.info({ id: msg.id, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
         await bus.ack(STREAM, GROUP, msg.id); // ACK: idempotence guaranteed by the executions table
       }
@@ -144,10 +150,11 @@ interface Ctx {
   blockhashCache: BlockhashCache;
   journal: Journal;
   maxTradeSol: number; // live re-clamp ceiling (DB config, env override) snapshotted per message
+  jitoBundleUrl?: string; // when set, land via a Jito bundle (anti-sandwich) with a fallback to plain RPC
 }
 
 async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
-  const { conn, db, bus, copier, blockhashCache, journal, maxTradeSol } = ctx;
+  const { conn, db, bus, copier, blockhashCache, journal, maxTradeSol, jitoBundleUrl } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
   const parsed = SignRequestSchema.safeParse(payload); // 5
@@ -202,7 +209,9 @@ async function process1(payload: unknown | null, ctx: Ctx, recovering = false): 
       fresh.recentBlockhash = blockhash;
       const signers: Keypair[] = sr.kind === 'open' ? [copier, derivePositionKeypair(sr.commandId)] : [copier];
       fresh.sign(...signers);
-      const sig = await land(conn, fresh.serialize());
+      const raw = fresh.serialize();
+      // Land via a Jito bundle when configured (anti-sandwich; falls back to plain RPC internally), else plain RPC.
+      const sig = jitoBundleUrl ? await landViaJito(conn, jitoBundleUrl, raw, utils.bytes.bs58.encode(fresh.signature as Buffer)) : await land(conn, raw);
       // A 'buy' funds a DEPENDENT two-sided open (the very next stream message): wait for it to CONFIRM so the
       // token is settled in the wallet before the open lands — else the open executes tokenless and fails.
       if (sr.kind === 'buy') await confirmLanded(conn, sig, 30_000);

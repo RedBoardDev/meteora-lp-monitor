@@ -54,6 +54,8 @@ export interface UserSettings extends Overridable {
   enabled: boolean;
   /** Account-wide caps (across all leaders). */
   caps: CapsConfig;
+  /** Land txs as Jito bundles (anti-sandwich) when a block-engine URL is configured. Account-wide (not per-leader). */
+  jitoEnabled: boolean;
 }
 
 /** A sparse per-leader override: only the fields this leader changes from the user defaults. */
