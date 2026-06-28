@@ -70,6 +70,11 @@ const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL 
 const EV_EXECUTED_STREAM = 'copybot:ev:executed';
 const RUG_SL_POLL_MS = 15_000; // rug-SL price-poll cadence: ~4 samples per a 60s window — fast enough to catch a crash, one lbPair read per open pool (economical)
 const RUG_SL_RETAIN_MS = 180_000; // keep ≥ any sane windowSeconds so the detector always has its full lookback
+// A leader OPEN's WS event can arrive BEFORE the position account is readable on our RPC node (read-after-write lag).
+// Retry the shape read briefly so a transient read-miss never DROPS a leader open (the sig is already deduped, so the
+// poll won't re-cover it → no other backstop). The normal case reads on the 1st try → zero added latency.
+const OPEN_SHAPE_READ_RETRIES = 6;
+const OPEN_SHAPE_READ_DELAY_MS = 1_000;
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
@@ -247,9 +252,14 @@ async function main(): Promise<void> {
     }
 
     const pair = await pairP;
-    const shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
+    // Retry the read: a freshly-opened leader position settles in ~1-2s; a transient null here must NOT drop the open.
+    let shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
+    for (let r = 0; r < OPEN_SHAPE_READ_RETRIES && !shape; r++) {
+      await sleep(OPEN_SHAPE_READ_DELAY_MS);
+      shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
+    }
     if (!shape) {
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { afterRetries: OPEN_SHAPE_READ_RETRIES } });
       return;
     }
 
