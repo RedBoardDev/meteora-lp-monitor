@@ -17,9 +17,13 @@ export interface RoutingConfig {
   claimFloorSol: number;
 }
 
-export function classifyEventAction(e: DetectedEvent, tracked: boolean, cfg: RoutingConfig): EventAction {
+export function classifyEventAction(e: DetectedEvent, tracked: boolean, cfg: RoutingConfig, rugExited = false): EventAction {
   const kind = classifyInstruction(e.instruction);
-  if (e.depositSol > 0 && !tracked) return 'open'; // first capital event on an untracked position → open
+  // A position we rug-SL-exited stays OPEN on the leader's side (rug-SL is our independent exit). Suppress
+  // re-opening it on the leader's next add — we deliberately left; a genuinely new copy only starts on a NEW
+  // leader position pubkey (a different key, not in the rug-exited set). Without this, the leader's next
+  // AddLiquidity (depositSol>0 on the same, now-untracked, position) would route to 'open' and re-enter the rug.
+  if (e.depositSol > 0 && !tracked) return rugExited ? 'ignore' : 'open'; // first capital event on an untracked position → open
   if (!tracked) return 'ignore'; // event on a position we don't mirror → ignore (reconcile/orphan handles it)
   if (kind === 'close') return 'close'; // full close — checked BEFORE withdraw (a close also withdraws)
   if (e.withdrawSol > 0) return 'resync'; // ANY withdrawal → re-sync (shrink): always followed (no-dormant safety)

@@ -100,3 +100,24 @@ describe('classifyEventAction — claim-floor gate (skip dust fee-claims)', () =
     expect(route(claim(0), true, true, 0)).toBe('claim');
   });
 });
+
+describe('classifyEventAction — rug-SL exit must NOT auto-reopen (the leader position stays open on-chain)', () => {
+  const add = { instruction: 'AddLiquidityByStrategy2', depositSol: 0.1 };
+  const cfg = { infiniteAdd: false, claimFloorSol: 0 };
+
+  it('a leader ADD on an UNTRACKED-but-rug-exited position → ignore (we deliberately left; never re-buy the rug)', () => {
+    // WHY: rug-SL closes OUR mirror but the leader position lives on; without this guard its next add (depositSol>0,
+    // now untracked) would route to 'open' and re-enter the position we just crash-exited.
+    expect(classifyEventAction(ev(add), false, cfg, true)).toBe('ignore');
+  });
+
+  it('the SAME add on an untracked position that was NOT rug-exited still opens (normal first copy)', () => {
+    expect(classifyEventAction(ev(add), false, cfg, false)).toBe('open');
+  });
+
+  it('rug-exited does not interfere with a TRACKED position routing (close/resync unaffected)', () => {
+    // The flag only gates the untracked-open path; a still-tracked mirror routes normally regardless.
+    expect(classifyEventAction(ev({ instruction: 'ClosePosition', withdrawSol: 0.1 }), true, cfg, true)).toBe('close');
+    expect(classifyEventAction(ev({ instruction: 'RemoveLiquidity', withdrawSol: 0.05 }), true, cfg, true)).toBe('resync');
+  });
+});

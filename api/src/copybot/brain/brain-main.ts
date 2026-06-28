@@ -56,6 +56,7 @@ import { envEffectiveOverride } from './env-overrides';
 import { applyPriorityFee, withCuLimit } from './compute-budget';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
+import { RugExitStore } from '@/copybot/rug-exit-store';
 
 const STREAM = 'copybot:cmd:sign';
 const HOP = 'cmd:sign';
@@ -137,6 +138,8 @@ async function main(): Promise<void> {
   // Pure + cheap → recomputed at each point of use so a live reload always takes effect on the next event.
   const eff = (): EffectiveConfig => withEnvOverride(effectiveFor(runtimeConfig, cfg.leader), ENV_EFFECTIVE_OVERRIDE);
   const rugSlTracker = new RugSlTracker(RUG_SL_RETAIN_MS); // per-position price windows for the rug-SL crash check
+  const rugExitStore = new RugExitStore(db, log); // durable set of LEADER positions we rug-exited (suppress re-open)
+  const rugExited = await rugExitStore.load(); // seed across restart so a leader add can't re-enter a rug-exited position
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
   const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
   let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
@@ -641,6 +644,8 @@ async function main(): Promise<void> {
         await publishSafetyClose(m, 'rugsl', 'rug_sl');
         registry.close(m.leaderPosition); // in-memory; DB markClosed by the reconcile once the close lands
         rugSlTracker.forget(m.ourPosition);
+        rugExited.add(m.leaderPosition); // suppress re-opening this leader position on its next add (we rug-exited it)
+        void rugExitStore.save(rugExited); // persist so the suppression survives a brain restart
       }
     }
   }
@@ -744,7 +749,7 @@ async function main(): Promise<void> {
     const kind = classifyInstruction(e.instruction);
     const tracked = registry.hasOpen(e.position);
     const ecRoute = eff();
-    const action = classifyEventAction(e, tracked, { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol }); // pure routing (unit-tested)
+    const action = classifyEventAction(e, tracked, { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol }, rugExited.has(e.position)); // pure routing (unit-tested); rug-exited ⇒ no re-open
     log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
     if (action !== 'ignore') {
       void journal.record({ stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, detail: { action, instruction: e.instruction } });
