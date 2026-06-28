@@ -130,6 +130,14 @@ describe('Wall B — verifyTx', () => {
     expect(verifyTx(openWithTransfer(pk(), 50_000), openIntent())).toMatchObject({ ok: false, reason: 'foreign_sol_destination' });
   });
 
+  it('tip cap boundary: exactly the max is tolerated, one lamport over is rejected (no off-by-one)', () => {
+    // WHY: the cap is a hard security bound — an off-by-one (>= vs >) would either reject every legit max tip or
+    // let an over-cap tip through. Pin both sides of the threshold.
+    const MAX = 10_000_000; // mirrors wall-b's MAX_JITO_TIP_LAMPORTS
+    expect(verifyTx(openWithTransfer(JITO_TIP_ACCOUNTS[0]!, MAX), openIntent())).toEqual({ ok: true });
+    expect(verifyTx(openWithTransfer(JITO_TIP_ACCOUNTS[0]!, MAX + 1), openIntent())).toMatchObject({ ok: false, reason: 'jito_tip_too_large' });
+  });
+
   it('close: no position signer needed', () => {
     const t = buildTx(owner, [
       ix(DLMM, [
