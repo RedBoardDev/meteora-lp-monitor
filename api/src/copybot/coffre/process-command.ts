@@ -120,6 +120,9 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
       const raw = fresh.serialize();
       // Land via a Jito bundle when configured (anti-sandwich; falls back to plain RPC internally), else plain RPC.
       const sig = jitoBundleUrl ? await landViaJito(conn, jitoBundleUrl, raw, utils.bytes.bs58.encode(fresh.signature as Buffer)) : await land(conn, raw);
+      // Tx ON THE WIRE — this is the CONTROLLABLE latency endpoint (event → submitted), the price-relevant moment.
+      // Logged BEFORE the confirmation wait so latency tracking reflects submission speed, not chain-confirm time.
+      log.info({ kind: sr.kind, sig, busMs, submitMs: Date.now() - tSign }, '🚀 submitted');
       // CONFIRM before declaring success: land()/landViaJito() return a SIGNATURE before the chain applies the tx
       // (sendRawTransaction skipPreflight / sendBundle). A close that drops or errors on-chain must NOT be recorded
       // 'landed' (only 'failed' is re-claimable, and a premature ev:executed makes the brain markClosed) — else it
