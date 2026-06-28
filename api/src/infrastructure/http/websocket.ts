@@ -109,6 +109,7 @@ export function registerWebSocket(
     // of the SameSite cookie that gates the ws-ticket). Native clients send no Origin → allowed.
     const origin = req.headers.origin;
     if (typeof origin === 'string' && !allowedOrigins.includes(origin)) {
+      app.log.warn({ origin, allowedOrigins }, 'live WS reject: forbidden origin'); // TEMP diag
       socket.close(1008, 'forbidden origin');
       return;
     }
@@ -117,6 +118,7 @@ export function registerWebSocket(
     const token = liveToken(req.headers.authorization, (req.query as { token?: string }).token);
     const payload = token ? verifyJwt(secret, token) : null;
     if (!payload) {
+      app.log.warn({ hasToken: !!token, hasAuth: !!req.headers.authorization }, 'live WS reject: no/invalid token'); // TEMP diag
       socket.close(1008, 'unauthorized');
       return;
     }
@@ -125,9 +127,11 @@ export function registerWebSocket(
     // /live bypasses the Bearer hook, so enforce the SAME revocation checks here (token version + jti
     // allowlist), not just the JWT signature — else a logged-out / reset / revoked token streams to exp.
     if (!me || me.tokenVersion !== payload.ver || !(await accounts.isSessionValid(payload.jti))) {
+      app.log.warn({ userId, found: !!me, verMatch: me?.tokenVersion === payload.ver }, 'live WS reject: revoked/stale session'); // TEMP diag
       socket.close(1008, 'unauthorized');
       return;
     }
+    app.log.info({ userId, origin }, 'live WS: client connected'); // TEMP diag
     const client: WsClient = {
       socket,
       userId,
