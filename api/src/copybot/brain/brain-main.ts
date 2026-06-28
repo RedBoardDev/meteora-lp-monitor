@@ -167,7 +167,7 @@ async function main(): Promise<void> {
     onError: (err, mint) => log.warn({ err, mint }, 'jupiter token snapshot failed (filter data unavailable)'),
   }).getSnapshot;
   const filterDeps = { jupiterToken, snapshotCache };
-  log.info({ shadow: eff().filterShadow, filters: eff().filters }, '🧪 entry filters loaded');
+  log.info({ filters: eff().filters }, '🧪 entry filters loaded');
 
   const capsState = (): CapsState => {
     const open = registry.openPositions();
@@ -270,11 +270,9 @@ async function main(): Promise<void> {
       );
     }
     if (verdict.action === 'skip') {
-      if (!ec.filterShadow) {
-        void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
-        return;
-      }
-      log.info({ reason: verdict.reason }, '👻 filter shadow: WOULD skip (not enforced)');
+      // An enabled filter ENFORCES (no shadow mode): the open is skipped and journaled with the failing filter's reason.
+      void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
+      return;
     }
 
     // TWO-SIDED (flag-gated): if the leader's position holds a TOKEN leg, replicate BOTH sides (buy the token,

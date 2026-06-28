@@ -49,7 +49,6 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     sizing: mergeSizing(user.sizing, ov.sizing),
     twoSidedMode: ov.twoSidedMode ?? user.twoSidedMode,
     filters: mergeFilters(user.filters, ov.filters),
-    filterShadow: user.filterShadow, // account-wide (not per-leader)
     execution: mergeExecution(user.execution, ov.execution),
     priorityFee: mergePriorityFee(user.priorityFee, ov.priorityFee),
     caps,
@@ -69,7 +68,6 @@ export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): Ef
     caps: ov.caps ? { ...eff.caps, ...ov.caps } : eff.caps,
     twoSidedMode: ov.twoSidedMode ?? eff.twoSidedMode,
     filters: mergeFilters(eff.filters, ov.filters),
-    filterShadow: ov.filterShadow ?? eff.filterShadow,
     execution: mergeExecution(eff.execution, ov.execution),
     priorityFee: mergePriorityFee(eff.priorityFee, ov.priorityFee),
     userEnabled: ov.userEnabled ?? eff.userEnabled,

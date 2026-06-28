@@ -14,8 +14,7 @@ export const USER_DEFAULTS: UserSettings = {
   sizing: { tradeRatioPct: 100, maxTradeSizeSol: 1.0, minPositionSizeSol: 0.05, solReserveSol: 0.05, onInsufficient: 'skip' }, // 100% = follow the leader, capped by maxTradeSize (spec §3)
   caps: { ...CAPS_DEFAULTS },
   twoSidedMode: 'off',
-  filters: { ...FILTERS_ALL_OFF }, // all entry filters OFF by default
-  filterShadow: true, // safe rollout: evaluate + log, never block (flip off to enforce)
+  filters: { ...FILTERS_ALL_OFF }, // all entry filters OFF by default; an enabled filter ENFORCES (no shadow mode)
   execution: {
     slippageBps: 100, // 1% — permissive enough to land
     dustTokenRaw: 0, // sell any residual by default

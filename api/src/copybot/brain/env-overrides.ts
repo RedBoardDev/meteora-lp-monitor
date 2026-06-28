@@ -6,7 +6,7 @@
  * to the DB value. Delete this whole module once the bench writes the config directly.
  *
  * Env keys: COPYBOT_{KILL_SWITCH,KILL_SWITCH_LEADER,MAX_OPEN_POSITIONS,MIN_POSITION_SOL,TWO_SIDED} +
- * COPYBOT_FILTER_{SHADOW,SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
+ * COPYBOT_FILTER_{SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
  * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS} +
  * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN +
  * COPYBOT_PRIORITY_FEE_TIER, COPYBOT_PRIORITY_FEE_MAX_CAP_SOL.
@@ -25,7 +25,7 @@ function num(value: string | undefined): number | null {
 }
 
 /** Build the SPARSE filter override: only the filters whose env var is present (else the DB value stands). */
-function envFilters(env: NodeJS.ProcessEnv): { filters?: Partial<FilterConfig>; filterShadow?: boolean } {
+function envFilters(env: NodeJS.ProcessEnv): { filters?: Partial<FilterConfig> } {
   const f: Partial<FilterConfig> = {};
   if (env.COPYBOT_FILTER_IGNORED_TOKENS !== undefined) {
     f.ignoredTokens = env.COPYBOT_FILTER_IGNORED_TOKENS.split(',').map((s) => s.trim()).filter(Boolean);
@@ -42,10 +42,7 @@ function envFilters(env: NodeJS.ProcessEnv): { filters?: Partial<FilterConfig>; 
   ];
   for (const [key, raw] of numKeys) if (raw !== undefined) (f as Record<string, number | null>)[key] = num(raw);
 
-  const out: { filters?: Partial<FilterConfig>; filterShadow?: boolean } = {};
-  if (Object.keys(f).length > 0) out.filters = f;
-  if (env.COPYBOT_FILTER_SHADOW !== undefined) out.filterShadow = env.COPYBOT_FILTER_SHADOW === TRUE;
-  return out;
+  return Object.keys(f).length > 0 ? { filters: f } : {};
 }
 
 /** Build the SPARSE execution override: only the tunables whose env var is a finite number (else the DB value stands). */

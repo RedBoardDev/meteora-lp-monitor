@@ -61,7 +61,7 @@ const PriorityFeeSchema = z.object({
 }) satisfies z.ZodType<PriorityFeeConfig>;
 
 const UserSchema = z
-  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, filterShadow: z.boolean(), execution: ExecutionSchema, priorityFee: PriorityFeeSchema })
+  .object({ enabled: z.boolean(), sizing: SizingSchema, caps: CapsSchema, twoSidedMode: TwoSidedSchema, filters: FilterConfigSchema, execution: ExecutionSchema, priorityFee: PriorityFeeSchema })
   .strict() satisfies z.ZodType<UserSettings>;
 
 const LeaderSchema = z
@@ -109,7 +109,6 @@ function mergeUser(partial: unknown): UserSettings {
     caps: { ...USER_DEFAULTS.caps, ...(isObj(p.caps) ? p.caps : {}) },
     twoSidedMode: (p.twoSidedMode as UserSettings['twoSidedMode']) ?? USER_DEFAULTS.twoSidedMode,
     filters: { ...USER_DEFAULTS.filters, ...(isObj(p.filters) ? p.filters : {}) },
-    filterShadow: typeof p.filterShadow === 'boolean' ? p.filterShadow : USER_DEFAULTS.filterShadow,
     execution: { ...USER_DEFAULTS.execution, ...(isObj(p.execution) ? p.execution : {}) },
     priorityFee: { ...USER_DEFAULTS.priorityFee, ...(isObj(p.priorityFee) ? p.priorityFee : {}) },
   } as UserSettings;

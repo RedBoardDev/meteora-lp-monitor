@@ -47,8 +47,6 @@ export interface UserSettings extends Overridable {
   enabled: boolean;
   /** Account-wide caps (across all leaders). */
   caps: CapsConfig;
-  /** Account-wide rollout flag: evaluate + log filter verdicts WITHOUT blocking the open. NOT per-leader. */
-  filterShadow: boolean;
 }
 
 /** A sparse per-leader override: only the fields this leader changes from the user defaults. */
@@ -78,8 +76,6 @@ export interface CopybotConfig {
 export interface EffectiveConfig extends Overridable {
   /** Resolved caps for this leader (`killSwitchLeader` derived from the leader's `enabled`). */
   caps: CapsConfig;
-  /** Account-wide filter shadow flag (resolved through). */
-  filterShadow: boolean;
   /** The account master switch (copied through for the handler's convenience). */
   userEnabled: boolean;
   /** This leader's own switch. */
@@ -93,7 +89,6 @@ export type EffectiveOverride = {
   caps?: Partial<CapsConfig>;
   twoSidedMode?: TwoSidedMode;
   filters?: Partial<FilterConfig>;
-  filterShadow?: boolean;
   execution?: Partial<ExecutionConfig>;
   priorityFee?: Partial<PriorityFeeConfig>;
   userEnabled?: boolean;
