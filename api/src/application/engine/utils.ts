@@ -70,3 +70,30 @@ export function shouldRefreshRealized(args: {
   // run yet. Past the last offset, none qualify → we stop.
   return offsetsMs.some((o) => o > ageLastRun && o <= ageNow);
 }
+
+/**
+ * Decide whether to re-take an EXACT on-chain snapshot for a wallet's OPEN positions right now.
+ *
+ * WHY this exists: the 10s price-mark only RE-PRICES the cached snapshot's frozen token + fee amounts at
+ * the live Jupiter price (zero RPC). It cannot grow unclaimed fees or re-balance bin liquidity — those
+ * need a fresh on-chain read. In `onchainSource` mode an exact read (`doSnapshot`) otherwise fires only on
+ * an event (WS position-set change, viewer-connect, detail view), so a quiet open position's unclaimed
+ * fees stay pinned at their last-read value (≈0 right after open) — wrong for the UI, and the HTTP-polling
+ * widget never even gets the viewer-connect read. This drives a slow periodic exact read so unclaimed fees
+ * + true size converge; idle wallets (no open positions) still issue zero recurring RPC.
+ *
+ * Uses the SAME clock + threshold as `doSnapshot`'s internal open-refresh gate (`lastSyncAt`/`intervalMs`)
+ * so that when this fires, that gate also passes and the freshly-read open set is actually persisted.
+ */
+export function shouldRefreshOpenSnapshot(args: {
+  hasOpen: boolean;
+  reconciled: boolean;
+  snapshotting: boolean;
+  lastSyncAt: number;
+  now: number;
+  intervalMs: number;
+}): boolean {
+  const { hasOpen, reconciled, snapshotting, lastSyncAt, now, intervalMs } = args;
+  if (!hasOpen || !reconciled || snapshotting) return false;
+  return now - lastSyncAt >= intervalMs;
+}

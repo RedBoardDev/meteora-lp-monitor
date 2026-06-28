@@ -28,7 +28,7 @@ import { Reconciler } from './reconciler';
 import { PositionRefresher } from './refresher';
 import { makeRuntime, type WalletRuntime } from './runtime';
 import type { StrategyService } from './strategy-service';
-import { clamp, shouldRefreshRealized } from './utils';
+import { clamp, shouldRefreshOpenSnapshot, shouldRefreshRealized } from './utils';
 
 const INITIAL_LAG_MS = 1500;
 const RETRY_DELAYS_MS = [2000, 2500];
@@ -293,6 +293,24 @@ export class Engine {
       // No unconditional on-chain delta-ingest here anymore: the deleted BACKSTOP_INGEST_MS fleet timer is
       // replaced by the TransactionStream's live activity + its watermark gap detector (Step 5a), so an
       // idle wallet costs ~0 RPC instead of a poll every 5 min.
+      // onchainSource: drive a SLOW periodic EXACT snapshot for any wallet with OPEN positions. The 10s
+      // price-mark only re-prices the cached snapshot's frozen amounts (zero RPC) — it can't grow unclaimed
+      // fees or re-balance bin liquidity, which need a fresh on-chain read. Without this, a quiet open
+      // position's unclaimed fees stay pinned at their open-time value (≈0) for BOTH WS and HTTP (widget)
+      // clients. A cached plan keeps this to getMultipleAccounts (no 10-credit gPA); idle wallets (no open
+      // positions) re-snapshot nothing. (At large scale, bound to a recently-requested set to keep it cheap.)
+      if (
+        this.onchainSource &&
+        shouldRefreshOpenSnapshot({
+          hasOpen,
+          reconciled: rt.reconciled,
+          snapshotting: rt.snapshotting,
+          lastSyncAt: rt.lastSyncAt,
+          now: Date.now(),
+          intervalMs: SYNC_INTERVAL_MS,
+        })
+      )
+        void this.doSnapshot(rt);
       if (hasOpen) rps += rt.pools.length / (interval / 1000);
     }
 
