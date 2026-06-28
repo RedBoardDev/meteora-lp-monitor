@@ -97,7 +97,7 @@ describe('shouldRefreshRealized — front-loaded post-close realized-PnL refresh
 });
 
 describe('shouldRefreshOpenSnapshot — slow periodic EXACT read so unclaimed fees stay current', () => {
-  const INTERVAL = 15_000; // mirrors SYNC_INTERVAL_MS (engine/index.ts) — the open-position refresh cadence
+  const INTERVAL = 10_000; // mirrors SYNC_INTERVAL_MS (engine/index.ts) — the open-position refresh cadence
   const ok = {
     hasOpen: true,
     reconciled: true,

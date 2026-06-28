@@ -49,10 +49,11 @@ const POLL_STAGGER_MS = 50;
 // (onTick → doSnapshot) that grows a live position's unclaimed fees + rebalances its bin liquidity — the
 // 10s price-mark only RE-PRICES frozen amounts and can't do that — and (b) the open-only reproject that
 // PERSISTS the result so the HTTP-polling widget sees it (reads only the open subset's legs, never the
-// closed history). 15s tracks HXUi's fast (~minutes) scalps; size/PnL/range still refresh every 10s via
-// the free price-mark. Cost: one getMultipleAccounts (cached plan, no 10-credit gPA) per OPEN-position
-// wallet per tick — trivial for a few wallets; bound to a requested set at large scale.
-const SYNC_INTERVAL_MS = 15_000;
+// closed history). 10s aligns the exact fee/size read with the 10s price-mark so every field of an open
+// position refreshes on the same beat. Cost: one getMultipleAccounts (cached plan, no 10-credit gPA) per
+// OPEN-position wallet per tick — trivial here (the bot's dominant cost is the Enhanced realized-PnL
+// ingest, ~95%, not these reads); bound to a viewed/requested set at large scale.
+const SYNC_INTERVAL_MS = 10_000;
 // After a close the residual is usually market-sold within seconds; Helius indexes that swap in ~1-2s
 // (measured), so the realized pass fired at close-detection can run BEFORE the sell exists and overstate
 // PnL (residual still marked as held). Re-run it on a small front-loaded schedule after each close so the
