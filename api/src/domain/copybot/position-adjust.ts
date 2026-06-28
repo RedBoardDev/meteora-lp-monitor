@@ -11,8 +11,9 @@ const LAMPORTS_PER_SOL = 1_000_000_000;
 
 export const lamportsToSol = (lamports: bigint): number => Number(lamports) / LAMPORTS_PER_SOL;
 
-/** A bin's SOL-leg amount, keyed by `offset` = bin position relative to the ACTIVE bin (shared leader↔ours
- *  alignment: leader bin `leaderActive+offset` maps to OUR bin `ourActive+offset`). */
+/** A bin's SOL-leg amount, keyed by `offset` = bin position relative to the position's LOWER bin (shared leader↔ours
+ *  alignment: leader bin `leaderLower+offset` maps to OUR bin `ourLower+offset`, matching the open re-anchor that
+ *  aligns leader.lower ↔ our.lower). `reshapeToCalls` reconstructs `binId = baseBin + offset` with baseBin = our lower. */
 export interface BinSol {
   offset: number;
   sol: number;

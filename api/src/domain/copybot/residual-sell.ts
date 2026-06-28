@@ -46,7 +46,9 @@ export function planWalletSweep(balances: OwnerTokenBalance[], wsolMint: string,
  * Pure, bigint-exact (floor division).
  */
 export function minOutWithSlippage(quotedOutLamports: bigint, slippageBps: number): bigint {
-  if (slippageBps < 0) throw new Error('slippageBps must be >= 0');
+  // Reject BOTH ends: < 0 is nonsensical, and >= 100% (10000 bps) would zero or invert the floor — i.e. accept any
+  // output, including a near-total drain. That defeats this module's whole purpose, so it's a config error → fail loud.
+  if (slippageBps < 0 || slippageBps >= Number(BPS_DENOMINATOR)) throw new Error('slippageBps must be in [0, 10000)');
   const keptBps = BPS_DENOMINATOR - BigInt(slippageBps);
   return (quotedOutLamports * keptBps) / BPS_DENOMINATOR;
 }

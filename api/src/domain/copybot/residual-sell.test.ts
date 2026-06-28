@@ -39,6 +39,14 @@ describe('minOutWithSlippage — slippage floor (never sell into a terrible rout
   it('negative slippage is rejected (programming error, fail loud)', () => {
     expect(() => minOutWithSlippage(1n, -1)).toThrow();
   });
+
+  it('slippage >= 100% is rejected — a 0/negative floor would accept a near-total drain (fail loud, not silent)', () => {
+    // WHY: at 10000 bps the floor is 0 (accepts ANY output); above it the floor goes negative (always passes). A
+    // fat-finger config >= 100% must crash, not silently disable the protection this module exists for.
+    expect(() => minOutWithSlippage(1_000_000n, 10_000)).toThrow();
+    expect(() => minOutWithSlippage(1_000_000n, 10_001)).toThrow();
+    expect(minOutWithSlippage(1_000_000n, 9_999)).toBeGreaterThan(0n); // 99.99% slippage still keeps a positive floor
+  });
 });
 
 describe('planWalletSweep — no-miss safety net: every non-SOL token above dust gets swept', () => {
