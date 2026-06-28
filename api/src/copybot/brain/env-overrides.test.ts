@@ -15,7 +15,13 @@ describe('envEffectiveOverride — SPARSE env bridge (DB stays authoritative)', 
     const ov = envEffectiveOverride({ COPYBOT_KILL_SWITCH: 'true', COPYBOT_MAX_OPEN_POSITIONS: '3', COPYBOT_TWO_SIDED: 'on' });
     expect(ov.caps).toEqual({ killSwitchGlobal: true, maxOpenPositions: 3 });
     expect(ov.twoSidedMode).toBe('on');
-    expect(ov.sizing).toEqual({}); // COPYBOT_MIN_POSITION_SOL unset → not present
+    expect(ov.sizing).toEqual({}); // COPYBOT_MIN_POSITION_SOL / COPYBOT_TRADE_RATIO_PCT unset → not present
+  });
+
+  it('COPYBOT_TRADE_RATIO_PCT overrides the copy ratio (the bench drives 1:1 vs half); a non-finite value is dropped', () => {
+    // WHY: the two-tier config moved the ratio to the DB (default 100); the bench needs an env lever to run at 0.5.
+    expect(envEffectiveOverride({ COPYBOT_TRADE_RATIO_PCT: '50' }).sizing).toEqual({ tradeRatioPct: 50 });
+    expect(envEffectiveOverride({ COPYBOT_TRADE_RATIO_PCT: 'oops' }).sizing).toEqual({}); // NaN dropped, DB ratio stands
   });
 
   it('filters are sparse: only env-set filters appear, the rest fall through to the DB', () => {

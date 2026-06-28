@@ -171,6 +171,9 @@ async function main(): Promise<void> {
     const full: SignRequest = { ...sr, issuedAtMs: Date.now() }; // timestamp at publish time (latency)
     SignRequestSchema.parse(full); // local guardrail: we only publish a valid contract
     const id = await bus.publish(STREAM, HOP, cfg.hmacKey, full);
+    // Machine-readable publish marker: the EXACT copy pubkey + kind we just published (the journal's formatted line
+    // carries neither as a field). Ops visibility + lets a consumer track the published copy without RPC enumeration.
+    log.info({ kind: full.kind, our: full.positionPubkey, pool: full.pool, streamId: id }, '📤 published');
     // Activity journal: EVERY published intent is recorded once here (single backstop) → the store emits the clean
     // log line. Context-specific publishes (a failsafe/orphan re-close, a reshape-funding buy) pass a hint to
     // override stage/severity/leaderPosition.

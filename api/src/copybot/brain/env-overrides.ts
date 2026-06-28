@@ -5,7 +5,7 @@
  * "DB-authoritative": every field is SPARSE — included ONLY when its env var is set, so an unset var falls through
  * to the DB value. Delete this whole module once the bench writes the config directly.
  *
- * Env keys: COPYBOT_{KILL_SWITCH,KILL_SWITCH_LEADER,MAX_OPEN_POSITIONS,MIN_POSITION_SOL,TWO_SIDED} +
+ * Env keys: COPYBOT_{KILL_SWITCH,KILL_SWITCH_LEADER,MAX_OPEN_POSITIONS,MIN_POSITION_SOL,TRADE_RATIO_PCT,TWO_SIDED} +
  * COPYBOT_FILTER_{SINGLE_POOL_PER_TOKEN,IGNORED_TOKENS,MIN_PRICE_RANGE_PCT,MIN_TOKEN_AGE_HOURS,
  * MIN_MARKET_CAP_USD,MIN_24H_VOLUME_USD,MAX_PRICE_CHANGE_PCT,MIN_ORGANIC_SCORE,MIN_HOLDERS} +
  * SELL_SLIPPAGE_BPS, DUST_TOKEN_RAW, MIN_SELL_OUT_LAMPORTS, RESHAPE_BIN_DEADBAND_SOL, RESHAPE_BIN_DEADBAND_TOKEN +
@@ -80,6 +80,8 @@ export function envEffectiveOverride(env: NodeJS.ProcessEnv): EffectiveOverride 
   const sizing: NonNullable<EffectiveOverride['sizing']> = {};
   const minPos = toNum(env.COPYBOT_MIN_POSITION_SOL);
   if (minPos !== undefined) sizing.minPositionSizeSol = minPos;
+  const ratioPct = toNum(env.COPYBOT_TRADE_RATIO_PCT); // copy-ratio % (100 = follow 1:1; the bench drives it, e.g. 50)
+  if (ratioPct !== undefined && Number.isFinite(ratioPct)) sizing.tradeRatioPct = ratioPct;
 
   const caps: NonNullable<EffectiveOverride['caps']> = {};
   const ksg = toBool(env.COPYBOT_KILL_SWITCH);
