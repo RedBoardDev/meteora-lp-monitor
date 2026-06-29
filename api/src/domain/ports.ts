@@ -21,8 +21,15 @@ import type {
   ResidualSell,
   SnapshotPlan,
   StoredLeg,
+  SwapFlowRow,
   WalletFlowRow,
 } from '@/domain/dlmm';
+// Type-only (erased at compile) so the reason union behind the TransactionStreamPort handler is
+// single-sourced from the Step-5a machinery rather than duplicated here. Re-exported so the engine can
+// import it alongside its other contracts from `@/domain/ports`.
+import type { StreamActivityReason } from '@/infrastructure/solana/transaction-stream';
+
+export type { StreamActivityReason };
 
 /** A pool the wallet has positions in. */
 export interface PoolRef {
@@ -63,13 +70,36 @@ export interface PositionsGateway {
   fetchClosedPositions(wallet: string, pool: PoolRef): Promise<ClosedPosition[]>;
 }
 
-/** Subscribes to on-chain DLMM activity for a wallet (Solana WS logsSubscribe). */
+/** Subscribes to on-chain DLMM activity for a wallet (Solana WS logsSubscribe). LEGACY 'meteora' source. */
 export interface RpcSubscriber {
   /** (re)subscribe a wallet; onActivity fires when a DLMM tx touches it. */
   watch(wallet: string, onActivity: (signature: string, instruction: string) => void): void;
   unwatch(wallet: string): void;
   isConnected(): boolean;
   /** fires on every (re)connect so the engine can trigger an immediate poll. */
+  onReconnect(cb: () => void): void;
+  onConnectionChange(cb: (connected: boolean) => void): void;
+  start(): void;
+  stop(): void;
+}
+
+/** Anything that reports live WS connectivity. The StateEmitter only needs this slice of the active WS
+ *  backbone (the legacy RpcSubscriber OR the on-chain TransactionStream), so it doesn't care which one. */
+export interface ConnectionStatus {
+  isConnected(): boolean;
+}
+
+/** The WS backbone the engine drives in ON-CHAIN mode (Helius `transactionSubscribe`). Same lifecycle
+ *  surface as {@link RpcSubscriber}, but the per-wallet handler is `(wallet, reason)` — the engine merely
+ *  TRIGGERS the cursor-based delta ingest + close-detection (it doesn't parse the WS payload here). The
+ *  infra `TransactionStream` (Step 5a, with its built-in cursor/dedup/replay/gap-detector) satisfies this;
+ *  kept as a port so the engine depends on the contract, never the concrete class. */
+export interface TransactionStreamPort extends ConnectionStatus {
+  /** (re)subscribe a wallet; `onActivity` fires on each DLMM tx that touches it (reason 'ws') or when the
+   *  no-miss gap detector wants it recovered (reason 'gap-backfill'). */
+  watch(wallet: string, onActivity: (wallet: string, reason: StreamActivityReason) => void): void;
+  unwatch(wallet: string): void;
+  /** fires on every (re)connect so the engine can run its own fleet catch-up (resyncAllOnchain). */
   onReconnect(cb: () => void): void;
   onConnectionChange(cb: (connected: boolean) => void): void;
   start(): void;
@@ -290,6 +320,17 @@ export interface WalletFlowRepository {
   allCursorsComplete(wallets: string[]): Promise<boolean>;
 }
 
+/** Persists the decoded swap legs that feed the realized-PnL FIFO walk (immutable legs + ingest cursor),
+ *  so a restart/close reads them from the DB instead of re-paging the Enhanced SWAP history. */
+export interface SwapFlowRepository {
+  /** Idempotently store decoded swap legs (PK wallet,signature,mint) — re-ingesting a tx is a no-op. */
+  upsertMany(rows: SwapFlowRow[]): Promise<void>;
+  /** All persisted swap legs for a wallet, oldest→newest — the order the FIFO walk consumes them. */
+  byWallet(wallet: string): Promise<SwapFlowRow[]>;
+  getCursor(wallet: string): Promise<FlowCursor | null>;
+  setCursor(wallet: string, cursor: FlowCursor): Promise<void>;
+}
+
 /** 100%-on-chain DLMM wallet snapshot + per-position bins/history reader (Solana RPC). */
 /** A presence signal the notification manager reads (is any client actively viewing right now?). */
 export interface PresenceReader {
@@ -340,6 +381,23 @@ export interface EnhancedTxGateway {
       untilSig?: string | null;
       startBefore?: string | null;
       onPage: (flows: WalletFlowRow[]) => Promise<void>;
+    },
+  ): Promise<{
+    added: number;
+    complete: boolean;
+    /** top-up only: the run reached the previously-ingested top signature (no gap left behind). */
+    hitKnownTop: boolean;
+    newestSig: string | null;
+    oldestSig: string | null;
+  }>;
+  /** Same incremental paging as {@link pageFlows} but over `?type=SWAP`, decoding each tx into clean
+   *  buy/sell legs (SwapFlowRow) for the realized-PnL FIFO walk. Same hitKnownTop/cursor semantics. */
+  pageSwaps(
+    wallet: string,
+    opts: {
+      untilSig?: string | null;
+      startBefore?: string | null;
+      onPage: (rows: SwapFlowRow[]) => Promise<void>;
     },
   ): Promise<{
     added: number;

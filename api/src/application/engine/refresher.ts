@@ -2,6 +2,7 @@ import type { OpenPosition } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PoolRef, PositionRepository, PositionsGateway, PriceGateway } from '@/domain/ports';
 import { isOutOfRange } from '@/domain/position';
+import { withCodePath } from '@/infrastructure/solana/code-path';
 import type { StateEmitter } from './emitter';
 import type { WalletRuntime } from './runtime';
 import type { StrategyService } from './strategy-service';
@@ -22,7 +23,16 @@ export class PositionRefresher {
     private readonly strategy: StrategyService,
   ) {}
 
+  /** Snapshot path: read + value a wallet's open positions on-chain. Tagged so its RPC spend is attributed. */
   async refresh(rt: WalletRuntime, trigger: string, cb: RefreshCallbacks): Promise<boolean> {
+    return withCodePath('snapshot', () => this.refreshInner(rt, trigger, cb));
+  }
+
+  private async refreshInner(
+    rt: WalletRuntime,
+    trigger: string,
+    cb: RefreshCallbacks,
+  ): Promise<boolean> {
     if (rt.refreshing) return false;
     rt.refreshing = true;
     rt.lastPollAt = Date.now();

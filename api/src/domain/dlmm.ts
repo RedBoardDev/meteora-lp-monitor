@@ -163,6 +163,21 @@ export interface WalletFlowRow {
   isTrading: boolean;
 }
 
+/** Which way a persisted swap leg went: SOL→token ('buy') or token→SOL ('sell'). */
+export type SwapSide = 'buy' | 'sell';
+
+/** A persisted FIFO input for realized-PnL: one clean token↔SOL leg of a tx, keyed by (wallet, signature,
+ *  mint). Immutable; the FIFO walk reads these from the DB + deltas instead of re-paging the Enhanced API. */
+export interface SwapFlowRow {
+  wallet: string;
+  signature: string;
+  ts: number; // unix seconds
+  mint: string;
+  tokenAmount: number; // human token units (decimal-adjusted)
+  solAmount: number; // SOL paid (buy) / received (sell)
+  side: SwapSide;
+}
+
 /** A wallet's realized token→SOL sell (clean single-token swap), decimal-adjusted amount + SOL out. */
 export interface ResidualSell {
   /** unix seconds */

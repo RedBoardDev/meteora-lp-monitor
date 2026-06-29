@@ -1,16 +1,12 @@
-import type { Connection } from '@solana/web3.js';
-import { describe, expect, it } from 'vitest';
+import { type Connection, PublicKey } from '@solana/web3.js';
+import { describe, expect, it, vi } from 'vitest';
+import type { RawRpc } from './gpa-v2';
 import { OnchainDlmmGateway } from './onchain-gateway';
 
 const OWNER = 'So11111111111111111111111111111111111111112';
 
-/** Records RPC calls; returns empty/null accounts (enough to exercise the discovery-gating path). */
+/** getMultipleAccounts stubs (empty/null infos) — enough to exercise the discovery-gating path. */
 class FakeConn {
-  gpaCalls = 0;
-  async getProgramAccounts(): Promise<unknown[]> {
-    this.gpaCalls++;
-    return [];
-  }
   async getMultipleAccountsInfoAndContext(keys: unknown[]) {
     return { context: { slot: 100 }, value: keys.map(() => null) };
   }
@@ -19,29 +15,45 @@ class FakeConn {
   }
 }
 
+/** A getProgramAccountsV2 raw-RPC spy: records the method names it's asked for, returns ONE empty page. */
+function fakeRawRpc(): RawRpc & { calls: { method: string; params: unknown[] }[] } {
+  const calls: { method: string; params: unknown[] }[] = [];
+  const fn = vi.fn(async (method: string, params: unknown[]) => {
+    calls.push({ method, params });
+    // V2 envelope: no accounts, last page (paginationKey null).
+    return { result: { accounts: [], paginationKey: null } };
+  }) as unknown as RawRpc & { calls: typeof calls };
+  fn.calls = calls;
+  return fn;
+}
+
 describe('OnchainDlmmGateway — Layer A discovery gating', () => {
-  it('skips getProgramAccounts when a cached plan is reused, with an identical snapshot', async () => {
+  it('discovers via getProgramAccountsV2, and skips it when a cached plan is reused', async () => {
     const conn = new FakeConn();
-    const g = new OnchainDlmmGateway(conn as unknown as Connection);
+    const raw = fakeRawRpc();
+    const g = new OnchainDlmmGateway(conn as unknown as Connection, raw);
 
     const fresh = await g.snapshotWallet(OWNER);
-    expect(conn.gpaCalls).toBe(1); // discovery (gPA) ran on the fresh path
+    expect(raw.calls).toHaveLength(1); // discovery ran on the fresh path…
+    expect(raw.calls[0]!.method).toBe('getProgramAccountsV2'); // …as the 1-credit V2 method (asserted)
     expect(fresh.complete).toBe(true); // no positions → nothing could be under-counted
 
     const reused = await g.snapshotWallet(OWNER, fresh.plan);
-    expect(conn.gpaCalls).toBe(1); // discovery SKIPPED — the 10-credit gPA is gated away
+    expect(raw.calls).toHaveLength(1); // discovery SKIPPED — no extra V2 call on the cached-plan path
 
     expect(reused.positions).toEqual(fresh.positions);
     expect(reused.nativeLamports).toBe(fresh.nativeLamports);
     expect(reused.idleTokens).toEqual(fresh.idleTokens);
   });
 
-  it('re-discovers every time when no plan is passed', async () => {
+  it('re-discovers (one getProgramAccountsV2) every time when no plan is passed', async () => {
     const conn = new FakeConn();
-    const g = new OnchainDlmmGateway(conn as unknown as Connection);
+    const raw = fakeRawRpc();
+    const g = new OnchainDlmmGateway(conn as unknown as Connection, raw);
     await g.snapshotWallet(OWNER);
     await g.snapshotWallet(OWNER);
-    expect(conn.gpaCalls).toBe(2);
+    expect(raw.calls).toHaveLength(2);
+    expect(raw.calls.every((c) => c.method === 'getProgramAccountsV2')).toBe(true);
   });
 });
 
@@ -66,5 +78,28 @@ describe('OnchainDlmmGateway — decimals cache', () => {
     // Now the real value is cached: a third read serves from memory, no extra RPC.
     expect(await g.decimalsOf(OWNER)).toBe(6);
     expect(calls).toBe(2);
+  });
+
+  it('decimalsOfMany batches the fetch — ≤100 mints per getMultipleAccounts, NOT one RPC per mint', async () => {
+    // WHY (regression): the realized-PnL pass needs every traded mint's decimals; fetching them one-by-one
+    // cost ~1 getMultipleAccounts × ~1600 mints on a cold wallet — the residual spend the live validation
+    // caught. Batched by 100, a cold pass is ceil(mints/100) calls and a warm one is 0.
+    const data = new Uint8Array(82);
+    data[44] = 6; // SPL Mint decimals @ offset 44
+    let calls = 0;
+    const conn = {
+      async getMultipleAccountsInfo(keys: unknown[]) {
+        calls++;
+        return (keys as unknown[]).map(() => ({ data }));
+      },
+    } as unknown as Connection;
+    const g = new OnchainDlmmGateway(conn);
+    const mints = Array.from({ length: 250 }, () => PublicKey.unique().toBase58());
+
+    const out = await g.decimalsOfMany(mints);
+
+    expect(calls).toBe(3); // 250 mints / 100 per chunk = 3 calls, NOT 250
+    expect(out.size).toBe(250);
+    expect(out.get(mints[0]!)).toBe(6);
   });
 });

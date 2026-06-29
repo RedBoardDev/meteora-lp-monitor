@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CreditMeter } from './credit-meter';
 import { rpcMethodOf, SolanaRpcRateLimiter, Spacer } from './rpc-rate-limiter';
 
 describe('Spacer', () => {
@@ -60,5 +61,43 @@ describe('SolanaRpcRateLimiter', () => {
     expect(lim.reserveSlot('getProgramAccounts')).toBe(1200); // gPA pushed to 1200
     // A regular call must fire AFTER the last real fire (1200), not collide at 1200.
     expect(lim.reserveSlot('getBalance')).toBe(1300);
+  });
+
+  it('meters getProgramAccountsV2 at 1 credit (10× cheaper than the legacy getProgramAccounts)', () => {
+    // WHY: discover() issues getProgramAccountsV2 as a RAW JSON-RPC call through this same limiter, so the
+    // CreditMeter must see the exact method name and bill it at 1 credit — that's the whole point of the
+    // V2 swap (legacy getProgramAccounts is 10). reserveSlot is the choke the middleware funnels through.
+    const meter = new CreditMeter(() => 0);
+    const lim = new SolanaRpcRateLimiter(
+      { rps: 10, gpaRps: 5, dasRps: 2, sendRps: 1 },
+      () => 0,
+      meter,
+    );
+
+    lim.reserveSlot('getProgramAccountsV2');
+    lim.reserveSlot('getProgramAccounts'); // the legacy 10-credit method, for contrast
+
+    const s = meter.stats();
+    expect(s.byMethod.getProgramAccountsV2).toBe(1);
+    expect(s.byMethod.getProgramAccounts).toBe(10);
+    expect(s.totalCredits).toBe(11);
+  });
+
+  it('stats() breaks calls down by exact method — telemetry to find the credit-heavy call', () => {
+    const lim = new SolanaRpcRateLimiter(limits, () => 0);
+    lim.reserveSlot('getParsedTransaction');
+    lim.reserveSlot('getParsedTransaction');
+    lim.reserveSlot('getMultipleAccounts');
+    lim.reserveSlot('getProgramAccounts');
+    lim.reserveSlot(undefined);
+    const s = lim.stats();
+    expect(s.total).toBe(5);
+    expect(s.byMethod).toEqual({
+      getParsedTransaction: 2,
+      getMultipleAccounts: 1,
+      getProgramAccounts: 1,
+      unknown: 1,
+    });
+    expect(s.gpa).toBe(1); // coarse class buckets still tracked alongside the per-method split
   });
 });

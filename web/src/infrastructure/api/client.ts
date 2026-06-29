@@ -13,6 +13,7 @@ import type {
   WalletPnlCurve,
   WalletState,
 } from '@binsight/shared';
+import type { RpcTelemetry } from '@/domain/rpc-telemetry';
 
 export type ClosedQuery = {
   q?: string;
@@ -158,6 +159,9 @@ export const api = {
   revoke: (address: string) => send(`admin/access/${encodeURIComponent(address)}`, 'DELETE'),
   /** Operational overview of every monitored wallet. */
   adminWallets: () => get<WalletOverview[]>('admin/wallets'),
+  /** RPC credit telemetry — totals, by-method/codePath/wallet breakdown, live tail, anomalies,
+   *  kill-switch state, and the durable last-7d spend (owner only). */
+  debugRpc: () => get<RpcTelemetry>('debug/rpc'),
 };
 
 /** Result of asking the backend for a signature challenge (register / reset step 1). */

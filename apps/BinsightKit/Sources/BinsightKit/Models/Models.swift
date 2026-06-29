@@ -74,6 +74,9 @@ public struct ClosedPosition: Codable, Identifiable, Sendable {
     public let feesSol: Double
     public let depositSol: Double
     public let closedAt: Double?
+    /// DLMM shape the position was opened with. Travels with the position into closed status; nil for
+    /// historical closes the server never observed open (so the badge simply doesn't show).
+    public let strategy: StrategyFamily?
 }
 
 public struct ClosedPage: Codable, Sendable {

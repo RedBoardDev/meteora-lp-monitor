@@ -1,5 +1,7 @@
 import type { FetchMiddleware } from '@solana/web3.js';
 import { sleep } from '@/util/sleep';
+import { currentCodePath } from './code-path';
+import type { CreditMeter } from './credit-meter';
 
 /**
  * Evenly-spaced slot reserver. `reserve()` hands out the next instant a call may run and advances
@@ -82,10 +84,16 @@ export class SolanaRpcRateLimiter {
   private readonly send: Spacer;
   // Cumulative call counts per method-class — instrumentation to size the Helius tier on real usage.
   private readonly callCounts = { total: 0, gpa: 0, das: 0, send: 0, other: 0 };
+  // Per-EXACT-method counts (getMultipleAccounts, getParsedTransaction, getSignaturesForAddress, …) so
+  // the coarse gpa/das/send/other split can be broken down to the precise credit-heavy call.
+  private readonly byMethod: Record<string, number> = {};
 
   constructor(
     limits: SolanaRpcLimits,
     private readonly now: () => number = () => Date.now(),
+    // Shared credit meter (optional so the unit tests construct the limiter bare). When present, every
+    // gated method is recorded with its active code path.
+    private readonly meter?: CreditMeter,
   ) {
     this.overall = new Spacer(limits.rps, now);
     this.gpa = new Spacer(limits.gpaRps, now);
@@ -99,6 +107,10 @@ export class SolanaRpcRateLimiter {
   reserveSlot(method: string | undefined): number {
     const sub = this.subFor(method);
     this.callCounts.total++;
+    const m = method ?? 'unknown';
+    this.byMethod[m] = (this.byMethod[m] ?? 0) + 1;
+    // Credit attribution: every gated JSON-RPC call costs its method's credits on the active code path.
+    this.meter?.record(m, { codePath: currentCodePath() });
     if (sub === this.gpa) this.callCounts.gpa++;
     else if (sub === this.das) this.callCounts.das++;
     else if (sub === this.send) this.callCounts.send++;
@@ -107,9 +119,16 @@ export class SolanaRpcRateLimiter {
     return this.overall.reserveAtLeast(subAt);
   }
 
-  /** Cumulative RPC call counts by method-class since boot — for credit/tier instrumentation. */
-  stats(): { total: number; gpa: number; das: number; send: number; other: number } {
-    return { ...this.callCounts };
+  /** Cumulative RPC call counts by method-class + per-exact-method since boot — credit/tier instrumentation. */
+  stats(): {
+    total: number;
+    gpa: number;
+    das: number;
+    send: number;
+    other: number;
+    byMethod: Record<string, number>;
+  } {
+    return { ...this.callCounts, byMethod: { ...this.byMethod } };
   }
 
   async gate(method: string | undefined): Promise<void> {

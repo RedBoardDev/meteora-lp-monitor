@@ -74,9 +74,14 @@ export default function AdminPage() {
     <main className="mx-auto max-w-4xl px-6 py-8">
       <div className="mb-6 flex items-center justify-between">
         <h1 className="font-semibold text-lg text-text tracking-tight">Admin</h1>
-        <Link href="/" className="text-muted text-sm transition-colors hover:text-text">
-          ← Dashboard
-        </Link>
+        <div className="flex items-center gap-4">
+          <Link href="/admin/rpc" className="text-muted text-sm transition-colors hover:text-text">
+            RPC Credits
+          </Link>
+          <Link href="/" className="text-muted text-sm transition-colors hover:text-text">
+            ← Dashboard
+          </Link>
+        </div>
       </div>
 
       <div className="mb-6 inline-flex rounded-lg bg-surface-2/50 p-0.5 ring-1 ring-border ring-inset">

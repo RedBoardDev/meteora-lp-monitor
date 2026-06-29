@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { chunked, shouldRefreshRealized, symmetricDiffSize } from './utils';
+import {
+  chunked,
+  shouldRefreshOpenSnapshot,
+  shouldRefreshRealized,
+  symmetricDiffSize,
+} from './utils';
 
 // Mirrors the production schedule (engine/index.ts) so the WHY is encoded against real values:
 // front-loaded offsets after a close — Helius indexes parsed txs in ~1-2s, so the bottleneck is the
@@ -88,6 +93,46 @@ describe('shouldRefreshRealized — front-loaded post-close realized-PnL refresh
         ...base,
       }),
     ).toBe(true);
+  });
+});
+
+describe('shouldRefreshOpenSnapshot — slow periodic EXACT read so unclaimed fees stay current', () => {
+  const INTERVAL = 10_000; // mirrors SYNC_INTERVAL_MS (engine/index.ts) — the open-position refresh cadence
+  const ok = {
+    hasOpen: true,
+    reconciled: true,
+    snapshotting: false,
+    lastSyncAt: 0,
+    now: INTERVAL,
+    intervalMs: INTERVAL,
+  };
+
+  it('fires once an open-position wallet is interval-stale (drives the fee/size refresh)', () => {
+    // WHY: the 10s price-mark only re-prices frozen amounts — without this exact read, a quiet open
+    // position's unclaimed fees stay pinned at ≈0 from open until the next on-chain event.
+    expect(shouldRefreshOpenSnapshot(ok)).toBe(true);
+  });
+
+  it('never fires for a wallet with NO open positions (the near-zero guarantee: idle = 0 RPC)', () => {
+    expect(shouldRefreshOpenSnapshot({ ...ok, hasOpen: false })).toBe(false);
+  });
+
+  it('does not fire before reconciliation (never read before the first backfill seeds the open set)', () => {
+    expect(shouldRefreshOpenSnapshot({ ...ok, reconciled: false })).toBe(false);
+  });
+
+  it('does not fire while a snapshot is already in flight (no stacking / re-entrancy)', () => {
+    expect(shouldRefreshOpenSnapshot({ ...ok, snapshotting: true })).toBe(false);
+  });
+
+  it('throttles: does not fire again until a full interval since the last sync', () => {
+    expect(shouldRefreshOpenSnapshot({ ...ok, now: INTERVAL - 1 })).toBe(false);
+  });
+
+  it('fires exactly at the interval boundary (same clock+threshold as the persist gate)', () => {
+    expect(shouldRefreshOpenSnapshot({ ...ok, lastSyncAt: 1_000, now: 1_000 + INTERVAL })).toBe(
+      true,
+    );
   });
 });
 

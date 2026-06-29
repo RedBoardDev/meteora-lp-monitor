@@ -1,6 +1,7 @@
 import type { StrategyFamily } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { PositionRepository, StrategyResolver } from '@/domain/ports';
+import { withCodePath } from '@/infrastructure/solana/code-path';
 import { sleep } from '@/util/sleep';
 
 const BACKFILL_PAUSE_MS = 400; // gentle pacing for the historical backfill (~2-3 positions/s of RPC)
@@ -37,9 +38,12 @@ export class StrategyService {
   }
 
   /**
-   * Resolve strategy for any position still missing it — OPEN ones first (so the live card/badge gets
-   * its Spot/Curve/BidAsk tag even when the burst one-shot live resolution lost to RPC limits), then
-   * the closed-history tail. Bounded per run and paced so it never hammers the RPC; safe on a schedule.
+   * Resolve strategy for OPEN positions still missing it (the repo now returns open-only) — so the live
+   * card/badge gets its Spot/Curve/BidAsk tag even when the burst one-shot live resolution lost to RPC
+   * limits. Closed positions are NOT bulk-backfilled: re-paging tens of thousands of closed positions'
+   * open txs (getParsedTransaction) burned millions of credits for a label on already-closed rows. A
+   * position resolved while open keeps its strategy into closed history; old closed rows show no badge.
+   * Bounded per run and paced so it never hammers the RPC; safe on a schedule.
    */
   async backfill(maxPerRun = 60): Promise<void> {
     if (this.backfilling) return;
@@ -63,7 +67,9 @@ export class StrategyService {
   private async resolve(positionAddress: string): Promise<void> {
     this.attempted.add(positionAddress);
     try {
-      const family = await this.resolver.resolve(positionAddress);
+      // Strategy path: tag the resolver's getSignaturesForAddress + getParsedTransaction spend. Both the
+      // live get() and the bounded backfill() funnel through here, so this one wrap covers both callers.
+      const family = await withCodePath('strategy', () => this.resolver.resolve(positionAddress));
       if (family) {
         this.cache.set(positionAddress, family);
         await this.repo.setStrategy(positionAddress, family);
