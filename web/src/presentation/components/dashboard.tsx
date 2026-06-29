@@ -7,6 +7,7 @@ import { useWallets } from '@/application/stores/wallets-store';
 import { useIsMobile, useMounted } from '@/presentation/hooks/use-media-query';
 import { MobileApp } from '@/presentation/mobile/mobile-app';
 import { DesktopShell } from './desktop-shell';
+import { OpenAccessProvider } from './open-access-context';
 import { UrlState } from './url-state';
 
 /**
@@ -16,7 +17,7 @@ import { UrlState } from './url-state';
  * first-paint flash between the SSR default and the resolved client viewport; only the chosen
  * subtree mounts, so stores/queries are never subscribed twice.
  */
-export function Dashboard() {
+export function Dashboard({ openAccess = false }: { openAccess?: boolean }) {
   const start = usePortfolio((s) => s.start);
   const stop = usePortfolio((s) => s.stop);
   const refreshWallets = useWallets((s) => s.refresh);
@@ -39,11 +40,13 @@ export function Dashboard() {
   }, [refreshWallets, stopWallets]);
 
   return (
-    <div className="min-h-dvh">
-      <Suspense fallback={null}>
-        <UrlState />
-      </Suspense>
-      {mounted ? isMobile ? <MobileApp /> : <DesktopShell /> : null}
-    </div>
+    <OpenAccessProvider value={openAccess}>
+      <div className="min-h-dvh">
+        <Suspense fallback={null}>
+          <UrlState />
+        </Suspense>
+        {mounted ? isMobile ? <MobileApp /> : <DesktopShell /> : null}
+      </div>
+    </OpenAccessProvider>
   );
 }

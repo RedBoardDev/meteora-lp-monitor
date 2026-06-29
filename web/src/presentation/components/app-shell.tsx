@@ -18,6 +18,7 @@ import {
   SolMark,
 } from '@/presentation/ui';
 import { HealthIndicator } from './health-indicator';
+import { useOpenAccess } from './open-access-context';
 import { SettingsDrawer } from './settings-drawer';
 
 export function AppShell() {
@@ -34,6 +35,7 @@ export function AppShell() {
   const currency = usePrefs((s) => s.currency);
   const setCurrency = usePrefs((s) => s.setCurrency);
   const solUsd = useSolUsd((s) => s.rate);
+  const openAccess = useOpenAccess();
 
   // A single wallet makes "All" (the all-wallets aggregate) redundant — it equals that wallet — so the
   // scope selector is dropped to one option and hidden (the `options.length > 1` guard below).
@@ -71,7 +73,8 @@ export function AppShell() {
             {/* Only the scope tabs scroll horizontally on mobile — the health popover (absolute,
                 drops below the header) must NOT sit inside an overflow container, or it would add
                 scroll to the topbar (overflow-x:auto forces overflow-y:auto). */}
-            {options.length > 1 && (
+            {/* Open-access accounts are single-wallet — no scope selector. */}
+            {!openAccess && options.length > 1 && (
               <div className="-mx-1 min-w-0 overflow-x-auto px-1">
                 <Segmented options={options} value={scope} onChange={setScope} />
               </div>

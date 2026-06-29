@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { LoadedPoolMeta, ResidualSell, StoredLeg } from '@/domain/dlmm';
 import type { EnhancedTxGateway, PriceGateway } from '@/domain/ports';
 import {
+  mergeFlows,
   type RealizedLegSource,
   RealizedPnlEngine,
   type RealizedPositionSource,
@@ -179,5 +180,80 @@ describe('RealizedPnlEngine — chained FIFO cost-basis', () => {
     const out = await engine.computeForWallet('W');
     expect(out).not.toBeNull();
     expect(out!.size).toBe(0);
+  });
+});
+
+describe('mergeFlows', () => {
+  const s = (ts: number, tok = 1, sol = 1): ResidualSell => ({
+    ts,
+    mint: MINT,
+    tokenAmount: tok,
+    solReceived: sol,
+  });
+
+  it('appends only rows not already present (dedup by value key)', () => {
+    // WHY: an incremental refetch overlaps the cached window to avoid gaps, so the same swap reappears —
+    // it must not be double-counted (that would inflate realized proceeds).
+    const base = [s(100), s(200)];
+    const merged = mergeFlows(base, [s(200) /* dup */, s(300) /* new */]);
+    expect(merged.map((f) => f.ts).sort((a, b) => a - b)).toEqual([100, 200, 300]);
+  });
+
+  it('returns the base array untouched when the delta is empty (no-op refresh)', () => {
+    const base = [s(100)];
+    expect(mergeFlows(base, [])).toBe(base);
+  });
+
+  it('treats same-ts/mint swaps of different size as distinct (not a dup)', () => {
+    const merged = mergeFlows([s(100, 5, 1)], [s(100, 7, 1)]);
+    expect(merged).toHaveLength(2);
+  });
+});
+
+describe('RealizedPnlEngine — incremental refresh', () => {
+  it('re-pages only the delta and merges the late residual sell (same FIFO result)', async () => {
+    // A position closes holding its residual; the close-time (full) pass runs BEFORE the dump is indexed,
+    // so it marks the residual as held (~0 here). An incremental refresh must page only the NEWER window
+    // and pick up the now-visible sell — converging to the realized value WITHOUT re-paging all history.
+    const T = 1_700_000_000; // realistic unix seconds so the delta window is meaningfully narrower
+    const legs = [
+      leg('P1', 'deposit', 100, 10, T + 1000),
+      leg('P1', 'withdraw', 100, 5, T + 2000),
+    ];
+    const status = new Map([['P1', { status: 'closed', closedAt: (T + 2000) * 1000 }]]);
+    const buys: ResidualSell[] = [{ ts: T, mint: MINT, tokenAmount: 100, solReceived: 10 }];
+    let sellsNow: ResidualSell[] = []; // residual not yet sold/indexed at close time
+    const sellSince: number[] = [];
+    const enhanced = {
+      enabled: true,
+      fetchBuys: async () => ({ buys, complete: true, oldestTs: 0 }),
+      fetchSells: async (_w: string, sinceMs: number) => {
+        sellSince.push(sinceMs);
+        return { sells: sellsNow, complete: true, oldestTs: 0 };
+      },
+    } as unknown as EnhancedTxGateway;
+    const legSource: RealizedLegSource = {
+      legsByWallet: async () => legs,
+      getPoolMetas: async () => new Map([[POOL, POOL_META]]),
+    };
+    const posSource: RealizedPositionSource = { positionStatusForWallet: async () => status };
+    const prices = {
+      getPricesSol: async () => new Map<string, number>(),
+      getSolUsd: async () => null,
+    } as unknown as PriceGateway;
+    const engine = new RealizedPnlEngine(legSource, posSource, enhanced, prices, async () => 0, noopLogger);
+
+    // 1) Cold full pass — residual still held (≈0 mark), no realized sale yet.
+    const first = await engine.computeForWallet('W');
+    expect(first!.get('P1')).toBeCloseTo(-5, 4);
+
+    // 2) The dump lands; an INCREMENTAL refresh must converge to the realized value (-7).
+    sellsNow = [{ ts: T + 2100, mint: MINT, tokenAmount: 100, solReceived: 8 }];
+    const second = await engine.computeForWallet('W', { incremental: true });
+    expect(second!.get('P1')).toBeCloseTo(-7, 4);
+
+    // And it paged a NEWER (narrower) window than the cold full fetch — i.e. only the delta.
+    expect(sellSince).toHaveLength(2);
+    expect(sellSince[1]).toBeGreaterThan(sellSince[0]!);
   });
 });

@@ -6,6 +6,7 @@ import { useEffect } from 'react';
 import { useIdentity } from '@/application/stores/identity-store';
 import { shortAddr } from '@/domain/format';
 import { Drawer } from '@/presentation/ui';
+import { useOpenAccess } from './open-access-context';
 import { PushToggle } from './push-toggle';
 import { WalletsEditor } from './wallets-editor';
 
@@ -19,19 +20,25 @@ type Props = {
 export function SettingsDrawer({ open, onClose, wallets, onChanged }: Props) {
   const identity = useIdentity((s) => s.identity);
   const loadIdentity = useIdentity((s) => s.load);
+  const openAccess = useOpenAccess();
 
   useEffect(() => {
     void loadIdentity();
   }, [loadIdentity]);
 
   return (
-    <Drawer open={open} onClose={onClose} title="Wallets">
+    <Drawer open={open} onClose={onClose} title={openAccess ? 'Account' : 'Wallets'}>
       <div className="flex flex-col gap-7 p-5">
-        <section>
-          <h3 className="mb-3 font-medium text-faint text-xs uppercase tracking-wide">Watchlist</h3>
-          <WalletsEditor wallets={wallets} onChanged={onChanged} />
-        </section>
-        <PushToggle />
+        {/* Open-access accounts are single-wallet with notifications disabled — hide both. */}
+        {!openAccess && (
+          <section>
+            <h3 className="mb-3 font-medium text-faint text-xs uppercase tracking-wide">
+              Watchlist
+            </h3>
+            <WalletsEditor wallets={wallets} onChanged={onChanged} />
+          </section>
+        )}
+        {!openAccess && <PushToggle />}
         {identity?.isOwner && (
           <section>
             <h3 className="mb-3 font-medium text-faint text-xs uppercase tracking-wide">Admin</h3>

@@ -4,6 +4,7 @@ import { usePortfolio } from '@/application/stores/portfolio-store';
 import { useUi } from '@/application/stores/ui-store';
 import { useWallets } from '@/application/stores/wallets-store';
 import { EmptyWallets } from '@/presentation/components/empty-wallets';
+import { useOpenAccess } from '@/presentation/components/open-access-context';
 import { PositionDrawer } from '@/presentation/components/position-drawer';
 import { SettingsDrawer } from '@/presentation/components/settings-drawer';
 import { StatsPanel } from '@/presentation/components/stats-panel';
@@ -28,6 +29,7 @@ export function MobileApp() {
   const wallets = useWallets((s) => s.wallets);
   const refreshWallets = useWallets((s) => s.refresh);
   const noWallets = useWallets((s) => s.loaded && s.wallets.length === 0);
+  const openAccess = useOpenAccess();
 
   function onWalletsChanged(removed?: string) {
     void refreshWallets();
@@ -37,7 +39,8 @@ export function MobileApp() {
   return (
     <div className="flex min-h-dvh flex-col">
       <MobileAppBar />
-      <MobileScopeChips />
+      {/* Open-access accounts are single-wallet — no scope chips. */}
+      {!openAccess && <MobileScopeChips />}
       {/* Bottom padding clears the fixed tab bar (+ its safe-area inset). */}
       <main className="flex-1 px-4 pt-1 pb-[calc(5rem+env(safe-area-inset-bottom))]">
         {noWallets ? (

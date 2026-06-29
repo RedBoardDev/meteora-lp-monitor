@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { getOpenAccess } from '@/infrastructure/app-config';
 import { API_URL, SESSION_COOKIE } from '@/infrastructure/config';
 import { Dashboard } from '@/presentation/components/dashboard';
 
@@ -12,5 +13,6 @@ export default async function Home() {
     cache: 'no-store',
   }).catch(() => null);
   if (!res || !res.ok) redirect('/login');
-  return <Dashboard />;
+  const openAccess = await getOpenAccess();
+  return <Dashboard openAccess={openAccess} />;
 }

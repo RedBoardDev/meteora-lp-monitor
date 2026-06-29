@@ -223,6 +223,7 @@ export function compose(config: AppConfig): App {
         gecko,
         vapidPublicKey: config.VAPID_PUBLIC_KEY,
         sendTestPush: (userId) => pushRepo.forUser(userId).then((subs) => webPush.sendTest(subs)),
+        openAccess: config.OPEN_ACCESS_MODE,
       });
       // Periodic RPC call-count log (live + backfill lanes) for Helius tier-headroom monitoring —
       // the wallet PnL curve is served from persisted flows (SQL), so there's no cache to warm.
