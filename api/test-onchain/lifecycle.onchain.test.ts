@@ -128,6 +128,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · lifecycle — 
   // regression that ignored the new leg would leave tokenLegRatio ≈ 0. Then close → the copier must sweep the
   // returned token back to SOL (no dormant token). Gate the resize on ABSOLUTE growth, never on a ratio.
   it('mixed-leg: one-sided open → two-sided add introduces a token leg (copied) → close → swept to SOL', async () => {
+    const before = await h.copierMints(); // pre-existing session dust to ignore in the sweep clean check
     // One-sided SOL open: the copy starts with a SOL leg only.
     const leaderPos = await h.leaderOpen({ pool: POOL_STABLE, strategy: 'spot', sol: 0.08 });
     const copy = await h.waitForCopy(POOL_STABLE);
@@ -151,8 +152,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · lifecycle — 
     const start = Date.now();
     let cleanMs = -1;
     while (Date.now() - start < 80_000) {
-      const tokens = await h.copierTokens();
-      if (tokens.every((t) => t.amountRaw < 100_000n)) {
+      if (await h.copierCleanOf(before)) {
         cleanMs = Date.now() - start;
         break;
       }

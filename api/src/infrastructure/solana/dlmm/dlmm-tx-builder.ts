@@ -80,7 +80,8 @@ export async function buildAddByWeight(
   pair?: DlmmPair,
 ): Promise<Transaction | Transaction[]> {
   const dlmm = pair ?? (await DLMM.create(conn, pool));
-  return dlmm.addLiquidityByWeight({
+  // NB: both methods splice the distribution internally → pass a FRESH mapped array (never a shared ref).
+  const params = {
     positionPubKey,
     user: owner,
     totalXAmount: toBN(totalXLamports),
@@ -90,7 +91,48 @@ export async function buildAddByWeight(
       xAmountBpsOfTotal: new BN(d.xBps),
       yAmountBpsOfTotal: new BN(d.yBps),
     })),
-  });
+  };
+  // Token-2022 leg → the v2 ix `addLiquidityByWeight2` (routes the token program from the mint's real owner + carries
+  // transfer-hook accounts), the ONLY by-weight deposit that works for Token-2022. Classic SPL → keep the proven v1
+  // `addLiquidityByWeight` UNCHANGED (incl. its one-sided path; v2's weight math + always-array return differ, so we
+  // don't impose it on the classic path that already works). v1 is classic-pinned on-chain so it can't do Token-2022.
+  return isToken2022Pool(dlmm) ? dlmm.addLiquidityByWeight2(params) : dlmm.addLiquidityByWeight(params);
+}
+
+
+/** Token-2022 program id — a pool whose token leg is owned by this needs the v2 (interface) deposit ix, not v1. */
+const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+
+/** A DLMM pool is "Token-2022" when EITHER leg's mint is owned by the Token-2022 program (DLMM.create resolves the
+ *  real owner). Such pools REJECT the v1 by-weight deposit on-chain (token_x_program is pinned to classic) → the open
+ *  must use the 2-tx create + addLiquidityByWeight2 path; classic-SPL pools keep the atomic 1-tx by-weight open. */
+export function isToken2022Pool(pair: DlmmPair): boolean {
+  return pair.tokenX.owner.toBase58() === TOKEN_2022_PROGRAM_ID || pair.tokenY.owner.toBase58() === TOKEN_2022_PROGRAM_ID;
+}
+
+/** SDK DEFAULT_BIN_PER_POSITION: `createEmptyPosition` covers a span of ≤ this many bins; a wider span needs the
+ *  extended-position path. */
+const MAX_BINS_SINGLE_EMPTY_POSITION = 70;
+
+/**
+ * Builds the empty-position creation tx (TX1 of a Token-2022 open): `initializePosition` (+ bin arrays) only, which
+ * is token-program-agnostic so it works on a Token-2022 pool. The deposit (TX2 = `buildAddByWeight` →
+ * addLiquidityByWeight2) follows once this CONFIRMS on-chain. Signers: [owner, positionKeypair]. Unsigned.
+ */
+export async function buildCreateEmptyPosition(
+  conn: Connection,
+  pool: PublicKey,
+  owner: PublicKey,
+  positionPubKey: PublicKey,
+  minBinId: number,
+  maxBinId: number,
+  pair?: DlmmPair,
+): Promise<Transaction> {
+  const dlmm = pair ?? (await DLMM.create(conn, pool));
+  if (maxBinId - minBinId + 1 > MAX_BINS_SINGLE_EMPTY_POSITION) {
+    return dlmm.createExtendedEmptyPosition(minBinId, maxBinId, positionPubKey, owner);
+  }
+  return dlmm.createEmptyPosition({ positionPubKey, minBinId, maxBinId, user: owner });
 }
 
 /** Removes a FRACTION (`bps`) of OUR position WITHOUT closing it — mirrors a leader's partial trim. Unsigned. */

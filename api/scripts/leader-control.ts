@@ -12,7 +12,7 @@ import { reanchorShape } from '../src/domain/copybot/reanchor';
 import { type WeightBin, buildAddByStrategy, buildAddByStrategyTwoSided, buildAddByWeight, buildClaimTx, buildCloseTx, buildOpenByStrategy, buildOpenByStrategyTwoSided, buildOpenByWeight, buildRemovePartial, createDlmmPair, strategyTypeFromName } from '../src/infrastructure/solana/dlmm/dlmm-tx-builder';
 import { readLeaderPositionShape, readUserPositions } from '../src/infrastructure/solana/dlmm/leader-position-reader';
 import { OnchainPoolMetaReader } from '../src/infrastructure/solana/dlmm/pool-meta';
-import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterQuote } from '../src/infrastructure/solana/jupiter/jupiter-swap-builder';
+import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuoteExactIn, getJupiterQuote } from '../src/infrastructure/solana/jupiter/jupiter-swap-builder';
 import { readAllOwnerTokenBalances } from '../src/infrastructure/solana/token-balance-reader';
 
 const JUPITER_BASE = process.env.JUPITER_BASE_URL ?? DEFAULT_JUPITER_BASE_URL;
@@ -28,6 +28,22 @@ const arg = (name: string): string | undefined => {
   const a = process.argv.find((x) => x.startsWith(`--${name}=`));
   return a?.slice(name.length + 3);
 };
+
+const ownerTokenRaw = async (mint: string): Promise<bigint> => (await readAllOwnerTokenBalances(conn, leader.publicKey)).find((b) => b.mint === mint)?.amountRaw ?? 0n;
+
+/** Buy ~`tokenRaw` of `tokenMint` with SOL via ExactIn, returning the ACTUAL amount acquired. ExactOut has NO Jupiter
+ *  route for most Token-2022 memecoins (NO_ROUTES_FOUND → http 400), so we price the target via the SELL direction
+ *  (fully routed) then spend that SOL via ExactIn (output is variable → deposit the real balance delta, not a target). */
+async function buyTokenExactIn(tokenMint: string, tokenRaw: bigint): Promise<bigint> {
+  const before = await ownerTokenRaw(tokenMint);
+  const priceQ = await getJupiterQuote(JUPITER_BASE, tokenMint, tokenRaw, SWEEP_SLIPPAGE_BPS); // value tokenRaw in SOL
+  const q = await getJupiterBuyQuoteExactIn(JUPITER_BASE, tokenMint, BigInt(priceQ.outAmount), SWEEP_SLIPPAGE_BPS);
+  const buyTx = await buildJupiterSwapTx(JUPITER_BASE, q, leader.publicKey.toBase58());
+  await signLandConfirm(Transaction.from(Buffer.from(buyTx, 'base64')));
+  const bought = (await ownerTokenRaw(tokenMint)) - before;
+  console.log(`🟣 BUY (ExactIn) ${bought} ${tokenMint} cost~${Number(q.inAmount) / 1e9} SOL`);
+  return bought;
+}
 
 async function signLandConfirm(txOrArr: Transaction | Transaction[], extra: Signer[] = []): Promise<string[]> {
   const txs = Array.isArray(txOrArr) ? txOrArr : [txOrArr];
@@ -178,15 +194,13 @@ async function main(): Promise<void> {
     const sol = BigInt(Math.round(Number(arg('sol') ?? '0.1') * 1e9));
     const position = Keypair.generate();
     if (process.argv.includes('--twosided')) {
-      // Create a genuine TWO-SIDED leader position to copy: BUY the non-SOL token (Jupiter ExactOut) then deposit
-      // BOTH legs by strategy. --token = raw token units to buy+deposit (default ~5 USDC at 6 decimals).
+      // Create a genuine TWO-SIDED leader position to copy: BUY the non-SOL token (ExactIn — ExactOut has no route
+      // for Token-2022 memecoins) then deposit BOTH legs by strategy. --token = TARGET raw units; we deposit the
+      // ACTUAL bought amount (ExactIn output is variable).
       const tokenMint = solSide === 'Y' ? meta.mintX : meta.mintY;
       const tokenRaw = BigInt(arg('token') ?? '5000000');
-      const q = await getJupiterBuyQuote(JUPITER_BASE, tokenMint, tokenRaw, SWEEP_SLIPPAGE_BPS);
-      const buyTx = await buildJupiterSwapTx(JUPITER_BASE, q, leader.publicKey.toBase58());
-      await signLandConfirm(Transaction.from(Buffer.from(buyTx, 'base64')));
-      console.log(`🟣 BUY ${tokenRaw} token (${tokenMint}) cost~${Number(q.inAmount) / 1e9} SOL`);
-      const built = await buildOpenByStrategyTwoSided(conn, pk, leader.publicKey, position.publicKey, solSide, sol, tokenRaw, WIDTH_BINS, strategyTypeFromName(arg('strategy') ?? 'spot'));
+      const bought = await buyTokenExactIn(tokenMint, tokenRaw);
+      const built = await buildOpenByStrategyTwoSided(conn, pk, leader.publicKey, position.publicKey, solSide, sol, bought, WIDTH_BINS, strategyTypeFromName(arg('strategy') ?? 'spot'));
       const sigs = await signLandConfirm(built, [position]);
       console.log(`🟢🟢 OPEN [two-sided ${arg('strategy') ?? 'spot'}] position=${position.publicKey.toBase58()} sol=${Number(sol) / 1e9} token=${tokenRaw} sigs=${sigs.join(',')}`);
       return;
@@ -221,14 +235,11 @@ async function main(): Promise<void> {
     const solSide = meta.solSide as 'X' | 'Y';
     const sol = BigInt(Math.round(Number(arg('sol') ?? '0.05') * 1e9));
     if (process.argv.includes('--twosided')) {
-      // GROW the leader's two-sided position: BUY token then add BOTH legs within the position's fixed range.
+      // GROW the leader's two-sided position: BUY token (ExactIn) then add BOTH legs within the position's fixed range.
       const tokenMint = solSide === 'Y' ? meta.mintX : meta.mintY;
       const tokenRaw = BigInt(arg('token') ?? '2000000');
-      const q = await getJupiterBuyQuote(JUPITER_BASE, tokenMint, tokenRaw, SWEEP_SLIPPAGE_BPS);
-      const buyTx = await buildJupiterSwapTx(JUPITER_BASE, q, leader.publicKey.toBase58());
-      await signLandConfirm(Transaction.from(Buffer.from(buyTx, 'base64')));
-      console.log(`🟣 BUY ${tokenRaw} token cost~${Number(q.inAmount) / 1e9} SOL`);
-      const built = await buildAddByStrategyTwoSided(conn, pk, leader.publicKey, new PublicKey(shape.positionPubkey), solSide, sol, tokenRaw, shape.lowerBinId, shape.upperBinId, strategyTypeFromName(arg('strategy') ?? 'spot'));
+      const bought = await buyTokenExactIn(tokenMint, tokenRaw);
+      const built = await buildAddByStrategyTwoSided(conn, pk, leader.publicKey, new PublicKey(shape.positionPubkey), solSide, sol, bought, shape.lowerBinId, shape.upperBinId, strategyTypeFromName(arg('strategy') ?? 'spot'));
       console.log(`➕➕ ADD [two-sided] sol=${Number(sol) / 1e9} token=${tokenRaw} sigs=${(await signLandConfirm(built)).join(',')}`);
       return;
     }

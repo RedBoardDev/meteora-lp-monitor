@@ -12,6 +12,9 @@ export const COPIER_TEST = new PublicKey('Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrv
 /** Test pools: a STABLE SOL/USDC (clean fidelity, low arb) + a VOLATILE SOL/<Token-2022 pump> (realistic). */
 export const POOL_STABLE = '5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6';
 export const POOL_VOLATILE = 'Hzsx5pCjvPAYhXr6vhAV35C7KSTfacvyQEcE6P3PjRep';
+// A volatile COIN(pump.fun)/SOL pool (tokenX=9cRCn…pump, tokenY=WSOL, binStep=100/1%) — SOL-paired so the bot copies
+// it. User-requested coverage beyond the stable SOL/USDC: a wide-binStep, low-liquidity coin regime.
+export const POOL_COIN_SOL = 'AUvX4hEMi9t43aqovA5tEAA5AZ7yugcpHa8SkJVEoEKa';
 
 /** Minimum SOL each wallet must hold for the suite to run (else tests SKIP, not fail). */
 export const MIN_LEADER_SOL = 0.15;

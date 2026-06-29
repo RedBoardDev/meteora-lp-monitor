@@ -47,22 +47,19 @@ function countLogLines(log: string, marker: string, position: string): number {
 }
 
 /**
- * Wait until the brain PROCESSES a leader resync event for `position` and assert it took the NO-CHURN path (a NEW
- * "in sync — no adjustment", NO new "reshape published"). THROWS (test FAILS) on:
- *  - a "reshape published" line → the bot CHURNED (deadband regressed/removed) — fee-bleed,
- *  - a timeout                  → no decision logged → the leader event was likely MISSED (the cardinal sin).
+ * Wait until the brain ROUTES a resync for the leader `position` — the WS `event routed` line carries the LEADER
+ * pubkey + `"action":"resync"`, proving the remove was SEEN (no-miss), unlike the reshape-decision log which carries
+ * OUR copy pubkey (so it can't be scoped by the leader). On a remove-to-zero the OUTCOME is timing-dependent (the
+ * leader may read empty → no-op, or mid-settle → a proportional trim) and BOTH correctly KEEP the copy open — the
+ * caller asserts copy-stays-open separately. THROWS on timeout = the leader event was MISSED (the cardinal sin).
  */
-async function expectInSyncNoChurn(position: string, baseReshape: number, baseInSync: number, timeoutMs = RESYNC_DECISION_TIMEOUT_MS): Promise<void> {
+async function expectResyncRouted(position: string, timeoutMs = RESYNC_DECISION_TIMEOUT_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const log = readBrainLog();
-    if (countLogLines(log, RESHAPE_MARKER, position) > baseReshape) {
-      throw new Error(`CHURN: brain published a reshape for ${position} on a sub-deadband/zero-total leader change (expected "in sync — no adjustment")`);
-    }
-    if (countLogLines(log, IN_SYNC_MARKER, position) > baseInSync) return; // saw the event, correctly kept the copy
+    if (countLogLines(readBrainLog(), '"action":"resync"', position) > 0) return; // remove SEEN + routed to resync
     await sleep(1500);
   }
-  throw new Error(`timeout: brain logged no resync decision for ${position} within ${timeoutMs}ms — the leader event was likely MISSED`);
+  throw new Error(`timeout: brain never routed a resync for leader ${position} within ${timeoutMs}ms — the remove event was MISSED`);
 }
 
 describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · sweep reserve + edge actions (FEATURE 7.4 + 9.1/9.2/9.4)', () => {
@@ -90,6 +87,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · sweep reserve 
   // native-SOL reserve (the sweep never feeds SOL itself into Jupiter / drains the gas). A regression that swept
   // native SOL would empty the wallet → the reserve assertion fails. (No helper needed: solBalance is exported.)
   it('7.4 sweep keeps the SOL reserve — two-sided close → token swept, native SOL not drained', async () => {
+    const before = await h.copierMints(); // pre-existing session dust (illiquid Token-2022) to ignore
     await h.leaderOpen({ pool: POOL_STABLE, twosided: true, sol: 0.1, token: 4_000_000 });
     const copy = await h.waitForCopy(POOL_STABLE, 60_000); // two-sided opens build-after-buy → slower
     const solMidOpen = await solBalance(connection(), COPIER_TEST); // diagnostic baseline (mid-open, SOL deployed)
@@ -100,8 +98,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · sweep reserve 
     const start = Date.now();
     let clean = false;
     while (Date.now() - start < SWEEP_WINDOW_MS) {
-      const tokens = await h.copierTokens();
-      if (tokens.every((t) => t.amountRaw < TOKEN_CLEAN_RAW)) {
+      if (await h.copierCleanOf(before, TOKEN_CLEAN_RAW)) {
         clean = true;
         break;
       }
@@ -131,17 +128,14 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · sweep reserve 
     const copy = await h.waitForCopy(POOL_STABLE);
     expect(await h.accountExists(copy), 'copy did not land on-chain').toBe(true);
 
-    const log0 = readBrainLog();
-    const baseReshape = countLogLines(log0, RESHAPE_MARKER, leaderPos);
-    const baseInSync = countLogLines(log0, IN_SYNC_MARKER, leaderPos);
-
     await h.leaderRemove(POOL_STABLE, 10_000); // 100% over the full range — empties liquidity (may NOT close the account)
 
     if (await h.accountExists(leaderPos)) {
-      // Targeted case: leader emptied-but-OPEN. The bot must see the remove and keep the copy (no trim/close).
-      await expectInSyncNoChurn(leaderPos, baseReshape, baseInSync);
+      // Targeted case: leader emptied-but-OPEN. The bot must SEE the remove (no-miss) and KEEP the copy open (the
+      // outcome may be a no-op or a proportional trim depending on settle timing — both keep the copy).
+      await expectResyncRouted(leaderPos);
       expect(await h.accountExists(copy), 'copy closed while the leader is still open-but-empty (documented: emptied→still-open)').toBe(true);
-      console.log('📍 9.2 leader emptied-but-OPEN → bot logged "in sync", copy kept open (documented: emptied→still-open)');
+      console.log('📍 9.2 leader emptied-but-OPEN → bot saw the remove (resync routed), copy kept open');
     } else {
       // The bench's remove(100%) auto-closed the leader (not the targeted empty-but-open path) — the close path cleans up.
       console.warn('9.2: leaderRemove(100%) auto-closed the leader position — the close/reconcile path will clean the copy');

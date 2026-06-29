@@ -30,9 +30,13 @@ function spawnUntil(label: string, args: string[], env: NodeJS.ProcessEnv, ready
   });
 }
 
-// DUST_TOKEN_RAW=1e6 (≈1 USDC, 6-dec): a fresh "spot" open picks up a sub-1-USDC token leg from active-bin arb —
-// NOT worth a two-sided buy (wasteful + the tiny two-sided open is flaky). Above this → genuine two-sided.
-const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58(), COPYBOT_TWO_SIDED: 'on', COPYBOT_MIN_POSITION_SOL: '0.02', DUST_TOKEN_RAW: '1000000' });
+// DUST_TOKEN_RAW=1e6 (≈1 USDC, 6-dec): the two-sided CLASSIFICATION cutoff only — a fresh "spot" open picks up a
+// sub-1-USDC token leg from active-bin arb, NOT worth a two-sided buy (wasteful + flaky). Above this → genuine
+// two-sided. NB: it no longer gates SELLING — the close-sell + safety-sweep sell ANY non-SOL residual (gated by the
+// SOL-value floor minSellOutLamports), so the copier wallet always returns to SOL-only.
+// COPYBOT_INFINITE_ADD=true: the bench tests the RESIZE/GROW capability (follow the leader's adds); the product
+// default is false (Valhalla first-deposit-only), but the grow/lifecycle/two-sided tests need adds followed.
+const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58(), COPYBOT_TWO_SIDED: 'on', COPYBOT_MIN_POSITION_SOL: '0.02', COPYBOT_TRADE_RATIO_PCT: '50', COPYBOT_INFINITE_ADD: 'true', DUST_TOKEN_RAW: '1000000' });
 
 export async function startCoffre(): Promise<void> {
   if (coffre && coffre.exitCode === null) return;

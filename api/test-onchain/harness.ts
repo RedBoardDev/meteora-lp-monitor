@@ -125,7 +125,9 @@ export class Harness {
       return m ? Number(m[1]) : null;
     };
     const routed = stamp('/tmp/bench-brain.log', '👁️ event routed');
-    const landed = stamp('/tmp/bench-coffre.log', '🚀 signed + landed');
+    // Measure to SUBMISSION (tx on the wire) — the bot's CONTROLLABLE latency. On-chain CONFIRMATION ("🚀 signed +
+    // landed (confirmed)") is chain-bound (~1-2s) and a separate concern; the SLA is about the bot's reaction speed.
+    const landed = stamp('/tmp/bench-coffre.log', '🚀 submitted');
     return routed != null && landed != null ? landed - routed : null;
   }
   /** Compare on-chain fidelity. Retries on a transient "missing" (the SDK position enumerator can lag a freshly
@@ -144,6 +146,17 @@ export class Harness {
   }
   async copierTokens(): Promise<Array<{ mint: string; amountRaw: bigint }>> {
     return readAllOwnerTokenBalances(this.conn, COPIER_TEST); // SDK-free (web3 only) → safe in-process
+  }
+  /** Snapshot the mints the copier holds NOW — pre-existing dust to IGNORE in a later clean check. The bot correctly
+   *  leaves a sub-economic / ILLIQUID residual (e.g. an unswappable pump.fun Token-2022) that accumulates across a
+   *  bench session; a clean assertion must only flag a NEW token THIS test created, not that pre-existing dust. */
+  async copierMints(): Promise<Set<string>> {
+    return new Set((await this.copierTokens()).map((t) => t.mint));
+  }
+  /** True when the copier holds NO non-SOL token with a mint NOT in `ignore` at/above `floorRaw` (pre-existing dust
+   *  ignored). Use with a `copierMints()` snapshot taken at the test's start. */
+  async copierCleanOf(ignore: Set<string>, floorRaw = 100_000n): Promise<boolean> {
+    return (await this.copierTokens()).every((t) => ignore.has(t.mint) || t.amountRaw < floorRaw);
   }
 
   // ── robust copy detection (direct getAccountInfo via the brain-published copy pubkey — the SDK position
@@ -186,14 +199,22 @@ export class Harness {
   }
 
   /** Wait until the bot has published AND landed the copy open (the new copy account exists on-chain). */
-  async waitForCopy(_pool: string, timeoutMs = 35_000): Promise<string> {
+  async waitForCopy(pool: string, timeoutMs = 45_000): Promise<string> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const pk = this.lastPublishedCopy();
-      if (pk && (await this.accountExists(pk))) return pk;
+      if (pk && (await this.accountExists(pk))) {
+        // The position exists — but wait until it is FUNDED (has liquidity). A Token-2022 open lands in 2 tx
+        // (createEmptyPosition then addLiquidityByWeight2), so the EMPTY position appears first; a classic open is
+        // funded in its single tx (this returns immediately). A non-zero leg = the deposit landed → fully open.
+        const funded = await this.shape(COPIER_TEST, pk, pool)
+          .then((s) => s.bins.some((b) => b.sol > 0 || b.tok > 0))
+          .catch(() => false);
+        if (funded) return pk;
+      }
       await sleep(1500);
     }
-    throw new Error(`timeout: bot did not copy/land an open within ${timeoutMs}ms`);
+    throw new Error(`timeout: bot did not copy/land a FUNDED open within ${timeoutMs}ms`);
   }
   /** Wait until the copy position account is gone (closed). Direct read — no enumerator lag. */
   async waitForCopyClosed(copyPubkey: string, timeoutMs = 45_000): Promise<void> {

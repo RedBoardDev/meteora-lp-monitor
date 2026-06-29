@@ -19,7 +19,6 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 // The copier-token "clean" floor: a residual below this raw amount is dust/closed-out, not a dormant token leg.
 // Matches the robustness sweep test's threshold (well under the bench DUST_TOKEN_RAW=1e6).
 const TOKEN_CLEAN_FLOOR_RAW = 100_000n;
-const tokensClean = (tokens: Array<{ amountRaw: bigint }>): boolean => tokens.every((t) => t.amountRaw < TOKEN_CLEAN_FLOOR_RAW);
 
 // Timing constants (named per the no-magic-numbers rule).
 const MISSED_CLOSE_BACKSTOP_MS = 60_000; // window for the boot reconcile / cursor-poll to close a WS-missed close
@@ -45,13 +44,13 @@ async function waitForCopierPositionCount(h: Harness, pool: string, target: numb
 // Poll until the copier wallet reaches a CLEAN end state: zero positions on `pool` AND no above-floor token.
 // Returns the last observed values (so a timeout asserts the actual residual, not just "false"). The no-miss
 // guarantee = this becomes clean; a regression that orphans a position or strands a token never does → FAIL.
-async function waitForCleanEndState(h: Harness, pool: string, timeoutMs: number): Promise<{ positions: number; clean: boolean }> {
+async function waitForCleanEndState(h: Harness, pool: string, timeoutMs: number, ignoreMints: Set<string>): Promise<{ positions: number; clean: boolean }> {
   const deadline = Date.now() + timeoutMs;
   let positions = -1;
   let clean = false;
   while (Date.now() < deadline) {
     positions = (await h.copierPositions(pool)).length;
-    clean = tokensClean(await h.copierTokens());
+    clean = await h.copierCleanOf(ignoreMints, TOKEN_CLEAN_FLOOR_RAW); // ignore pre-existing session dust (illiquid Token-2022)
     if (positions === 0 && clean) return { positions, clean };
     await sleep(END_STATE_POLL_MS);
   }
@@ -93,6 +92,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · fail-safe — 
   // invariant: once the leader is gone, the end state is clean — NO dormant copy position AND NO stranded bought
   // token (the boot sweep recovers anything left mid-flight). FAILS if recovery leaves an orphan or a stuck token.
   it('6.4 brain dies mid-open → on restart no orphan position and no stranded token (sweep recovers any mid-flight buy)', async () => {
+    const before = await h.copierMints(); // pre-existing session dust to ignore in the clean check
     const leaderPos = await h.leaderOpen({ pool: POOL_STABLE, strategy: 'spot', sol: 0.1 });
     await sleep(MID_OPEN_KILL_DELAY_MS); // open SEEN, copy NOT yet landed
     await killBrain(); // 💥 crash mid-open — the copy may be half-built (or a token half-bought) and never placed
@@ -101,7 +101,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · fail-safe — 
     await h.leaderClose(POOL_STABLE); // the leader goes away; any (late) copy is now an orphan unless the bot closes it
     expect(await h.accountExists(leaderPos), 'leader close did not land — clean-state assertion would be vacuous').toBe(false);
 
-    const end = await waitForCleanEndState(h, POOL_STABLE, CLEAN_END_STATE_MS);
+    const end = await waitForCleanEndState(h, POOL_STABLE, CLEAN_END_STATE_MS, before);
     expect(end.positions, 'DORMANT copy after a mid-open crash + leader close — no-miss recovery regressed').toBe(0);
     expect(end.clean, 'copier still holds a non-SOL token after the mid-open crash — boot sweep missed it').toBe(true);
   }, 300_000);
@@ -135,12 +135,13 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · fail-safe — 
   // position and no stuck token, whether the copy never opened or opened-then-closed. We confirm the LEADER really
   // closed (accountExists on the pubkey we hold) so "no copy" is a real no-orphan result, not a silently-failed close.
   it('6.7 rapid open→close (close before the copy settles) → no orphan position, no stuck token', async () => {
+    const before = await h.copierMints(); // pre-existing session dust to ignore in the clean check
     const leaderPos = await h.leaderOpen({ pool: POOL_STABLE, strategy: 'spot', sol: 0.1 });
     await sleep(RAPID_CLOSE_DELAY_MS); // close almost immediately — race the copy build
     await h.leaderClose(POOL_STABLE);
     expect(await h.accountExists(leaderPos), 'leader close did not land — no-orphan assertion would be vacuous').toBe(false);
 
-    const end = await waitForCleanEndState(h, POOL_STABLE, CLEAN_END_STATE_MS);
+    const end = await waitForCleanEndState(h, POOL_STABLE, CLEAN_END_STATE_MS, before);
     expect(end.positions, 'rapid open→close ORPHANED a copy position (close-before-settle not handled)').toBe(0);
     expect(end.clean, 'rapid open→close left a stuck non-SOL token on the copier').toBe(true);
   }, 300_000);

@@ -34,11 +34,11 @@ import { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { ControlChannel } from '@/infrastructure/bus/control-channel';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { decodeDlmmLegs } from '@/infrastructure/solana/dlmm/dlmm-event-decoder';
-import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildOpenByWeight, buildRemovePartial, createDlmmPair } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
+import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildCreateEmptyPosition, buildOpenByWeight, buildRemovePartial, createDlmmPair, isToken2022Pool } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
 import { readLeaderPositionShape, type UserPosition, readUserPositions } from '@/infrastructure/solana/dlmm/leader-position-reader';
 import { readActiveTokenPrice } from '@/infrastructure/solana/dlmm/active-bin-price';
 import { OnchainPoolMetaReader } from '@/infrastructure/solana/dlmm/pool-meta';
-import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
+import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterBuyQuoteExactIn, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
 import { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
@@ -67,6 +67,11 @@ const RECONCILE_OPEN_GRACE_MS = Number(process.env.RECONCILE_OPEN_GRACE_MS ?? '3
 const DEADLINE_SLOTS = 150; // ~60s
 // Swap/reshape execution tunables now live in the runtime config (eff().execution) — see config/defaults.ts.
 const SWEEP_MS = Number(process.env.SWEEP_MS ?? '60000'); // wallet token→SOL safety-sweep cadence (SYSTEM): the no-miss backstop behind the close-triggered sell (catches any dormant non-SOL left by downtime/a missed close)
+// The close-sell + the safety-sweep sell ANY non-SOL residual (the wallet must NEVER hold a non-SOL token). The
+// economic floor is `minSellOutLamports` (a SOL-value gate applied AFTER quoting) — NOT a raw-token threshold, which
+// would mis-scale across token decimals AND conflate with the two-sided-CLASSIFICATION cutoff (`dustTokenRaw`, which
+// decides whether a leader TOKEN LEG is worth buying — a different concern). So selling uses 0 here.
+const SELL_RESIDUAL_DUST_RAW = 0n;
 const EV_EXECUTED_STREAM = 'copybot:ev:executed';
 const RUG_SL_POLL_MS = 15_000; // rug-SL price-poll cadence: ~4 samples per a 60s window — fast enough to catch a crash, one lbPair read per open pool (economical)
 const RUG_SL_RETAIN_MS = 180_000; // keep ≥ any sane windowSeconds so the detector always has its full lookback
@@ -111,7 +116,26 @@ const TWO_SIDED_CU_LIMIT = 1_400_000; // max CU cap (free — only used CU is me
 // even exist yet, so the SDK build produces a tx that fails on-chain. We publish the BUY, stash the open context
 // here keyed by the buy's commandId, and build+publish the open only when the buy's ev:executed arrives (token +
 // ATA now present → clean build). (A two-sided reshape ADD does NOT need this — its position's ATA already exists.)
-const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin[]; totalX: bigint; totalY: bigint; sizeSol: number }>();
+const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin[]; sizeLamports: bigint; solSide: 'X' | 'Y'; tokenMint: string; sizeSol: number }>();
+
+// TOKEN-2022 2-TX OPEN: a Token-2022 leg can't be deposited by the v1 by-weight ix (on-chain it pins the token
+// program to classic). The deposit must use the v2 ix (addLiquidityByWeight2), which is add-to-EXISTING → the open
+// splits into TX1 createEmptyPosition (kind 'open') then TX2 addLiquidityByWeight2 (kind 'add'), sequenced via
+// ev:executed (create lands → deposit; deposit lands → persist the mirror). We persist the mirror ONLY after the
+// deposit lands, so a crash/failure between the two leaves an UNTRACKED empty position that the orphan-sweep
+// auto-closes (no dormant position). `buildingToken2022Positions` (with a grace) stops the sweep from closing a
+// position WHILE its deposit is still in flight; once the grace expires (deposit never landed) the sweep cleans it.
+const pendingToken2022Deposits = new Map<string, { e: DetectedEvent; dist: WeightBin[]; totalX: bigint; totalY: bigint; lower: number; upper: number; sizeSol: number }>();
+const pendingToken2022Mirrors = new Map<string, { leaderPosition: string; ourPosition: string; pool: string; nonSolSymbol: string | null; sizeSol: number; lower: number; upper: number; leaderSizeSol: number }>();
+const buildingToken2022Positions = new Map<string, number>(); // ourPosition → ms the create was published (orphan-close grace while the deposit lands)
+// A two-sided open's BOUGHT token sits on the wallet between the buy landing and the deposit landing. Since the
+// safety-sweep now sells ANY non-SOL residual (SELL_RESIDUAL_DUST_RAW=0), it must NOT sell that in-flight token
+// mid-open (it would empty the token leg). Track the mint while the open is in flight; the sweep skips it within a
+// grace, after which a still-present token (the open failed) IS a real stranded residual → swept (cleanup).
+const inFlightBuyMints = new Map<string, number>(); // tokenMint → ms the two-sided buy was published
+const INFLIGHT_BUY_GRACE_MS = 90_000; // buy → (create →) deposit landing window the sweep must not race
+const TOKEN2022_DEPOSIT_GRACE_MS = 90_000; // orphan-close grace for an empty position whose deposit is still in flight; past it, a non-deposited position is cleaned
+const TOKEN2022_MAX_OPEN_BINS = 70; // a single createEmptyPosition + single addLiquidityByWeight2 chunk cover ≤70 bins; wider Token-2022 two-sided opens are skipped (no partial deposit)
 
 async function main(): Promise<void> {
   if (!cfg.httpUrl) {
@@ -221,6 +245,27 @@ async function main(): Promise<void> {
     return { issuedAtSlot: s, deadlineSlot: s + DEADLINE_SLOTS };
   }
 
+  // A freshly-changed leader position can read PARTIALLY (its bin arrays aren't indexed yet → a two-sided open's TOKEN
+  // leg, or a fresh add, reads as 0), making the bot misclassify a two-sided open as one-sided or skip a reshape (RPC
+  // read-after-write lag). Read until the shape is RELIABLE: a both-legs shape is fully indexed (return at once → zero
+  // added latency on the common two-sided open); a single-leg shape is confirmed STABLE (total liquidity unchanged
+  // across two reads) before trusting it as genuinely one-sided / settled. null only if the position is never readable.
+  async function readStableShape(poolPk: PublicKey, owner: PublicKey, position: string, pair: Awaited<ReturnType<typeof createDlmmPair>>) {
+    let last: Awaited<ReturnType<typeof readLeaderPositionShape>> = null;
+    let lastTotal = -1n;
+    for (let r = 0; r <= OPEN_SHAPE_READ_RETRIES; r++) {
+      if (r > 0) await sleep(OPEN_SHAPE_READ_DELAY_MS);
+      const shape = await readLeaderPositionShape(conn, poolPk, owner, position, pair);
+      if (!shape) continue; // not readable yet → retry
+      if (shape.perBin.some((b) => b.x > 0n) && shape.perBin.some((b) => b.y > 0n)) return shape; // both legs indexed
+      const total = shape.perBin.reduce((s, b) => s + b.x + b.y, 0n);
+      if (last && total === lastTotal && total > 0n) return shape; // single-leg but stable → genuinely settled
+      last = shape;
+      lastTotal = total;
+    }
+    return last;
+  }
+
   async function handleOpen(e: DetectedEvent): Promise<void> {
     log.info({ position: e.position, pool: e.pool, depositSol: e.depositSol }, '🔨 handleOpen start');
     const ec = eff();
@@ -252,12 +297,10 @@ async function main(): Promise<void> {
     }
 
     const pair = await pairP;
-    // Retry the read: a freshly-opened leader position settles in ~1-2s; a transient null here must NOT drop the open.
-    let shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
-    for (let r = 0; r < OPEN_SHAPE_READ_RETRIES && !shape; r++) {
-      await sleep(OPEN_SHAPE_READ_DELAY_MS);
-      shape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
-    }
+    // Read the leader's shape RELIABLY: a freshly-opened position settles in ~1-2s and can read partially (a transient
+    // null, OR a two-sided open whose TOKEN leg isn't indexed yet → it would misclassify as one-sided). readStableShape
+    // returns at once when both legs are present, else waits for the total to stabilize.
+    const shape = await readStableShape(poolPk, leaderPk, e.position, pair);
     if (!shape) {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { afterRetries: OPEN_SHAPE_READ_RETRIES } });
       return;
@@ -347,19 +390,20 @@ async function main(): Promise<void> {
     const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, ec.sizing.tradeRatioPct ?? 100, BigInt(Math.round(ec.sizing.maxTradeSizeSol * 1e9)));
     const sizeSol = Number(sizeLamports) / 1e9;
     const dist: WeightBin[] = fillContiguousWeights(plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }))); // contiguous span (SDK by-weight requirement)
-    const totalX = solSide === 'X' ? sizeLamports : tokenTarget;
-    const totalY = solSide === 'Y' ? sizeLamports : tokenTarget;
-
-    let buyQuote: Awaited<ReturnType<typeof getJupiterBuyQuote>>;
+    // ExactIn buy: ExactOut has NO Jupiter route for most memecoins (NO_ROUTES_FOUND). Price the token leg via the
+    // SELL direction (ExactIn, fully routed) → its SOL value → spend that to BUY the token (ExactIn). The token
+    // received is variable, so the build-after-buy step deposits the ACTUAL balance (not a pre-planned exact amount).
+    let buyQuote: Awaited<ReturnType<typeof getJupiterBuyQuoteExactIn>>;
     let buyTxB64: string;
     try {
-      buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, tokenTarget, ec.execution.slippageBps);
+      const priceQuote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, tokenTarget, ec.execution.slippageBps); // sell tokenTarget → its SOL value
+      const solToSpend = BigInt(priceQuote.outAmount);
+      if (!(solToSpend > 0n)) throw new Error('token leg priced at 0 SOL');
+      buyQuote = await getJupiterBuyQuoteExactIn(cfg.jupiterBaseUrl, tokenMint, solToSpend, ec.execution.slippageBps);
       buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
     } catch (err) {
-      // SAFE: the token leg can't be acquired (no Jupiter route / a 4xx quote — an illiquid or unroutable token).
-      // We do NOT open a HALF (one-sided) position that wouldn't match the two-sided leader's composition — we SKIP
-      // the open entirely. Nothing is stashed or published before this point, so it's a clean no-op (no partial
-      // position, no stranded token, no dormant state).
+      // SAFE: the token leg genuinely can't be acquired (no route EVEN via ExactIn, or a priced-at-0 leg). We do NOT
+      // open a HALF (one-sided) position — SKIP entirely (nothing stashed/published yet → clean no-op).
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_unbuyable', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { tokenMint, err: (err as Error).message } });
       return; // SAFE: never a partial/one-sided copy
     }
@@ -367,8 +411,10 @@ async function main(): Promise<void> {
     const buyCommandId = deriveCommandId(buyKey);
     const { issuedAtSlot, deadlineSlot } = await slots();
 
-    // Stash the open context → built+published only once the buy lands (see pendingTwoSidedOpens / build-after-buy).
-    pendingTwoSidedOpens.set(buyCommandId, { e, dist, totalX, totalY, sizeSol });
+    // Stash the open context → built+published once the buy lands; the build reads the ACTUAL token bought (ExactIn
+    // output is variable) and deposits THAT, keyed by solSide/tokenMint (not a pre-planned exact amount).
+    pendingTwoSidedOpens.set(buyCommandId, { e, dist, sizeLamports, solSide, tokenMint, sizeSol });
+    inFlightBuyMints.set(tokenMint, Date.now()); // protect this bought token from the safety-sweep until it's deposited
     await publish({
       commandId: buyCommandId,
       eventKey: buyKey,
@@ -377,13 +423,13 @@ async function main(): Promise<void> {
       positionPubkey: ownerPk.toBase58(), // n/a for a swap — Wall B binds to owner's ATA of the bought token
       owner: ownerPk.toBase58(),
       txBase64: buyTxB64,
-      sizeSol: Number(buyQuote.inAmount) / 1e9, // SOL spend cap → re-clamped against maxTradeSol by the coffre
+      sizeSol: Number(buyQuote.inAmount) / 1e9, // the ExactIn SOL input (spend) → re-clamped against maxTradeSol by the coffre
       targetBinRange: { lower: 0, upper: 0 },
       issuedAtSlot,
       deadlineSlot,
-      buy: { outputMint: tokenMint, exactOutAmountRaw: tokenTarget.toString(), maxInLamports: buyQuote.inAmount },
+      buy: { outputMint: tokenMint, exactOutAmountRaw: buyQuote.outAmount, maxInLamports: buyQuote.inAmount }, // expected token (informational) + the SOL input (cap)
     });
-    log.info({ tokenMint, tokenTarget: tokenTarget.toString(), maxInSol: Number(buyQuote.inAmount) / 1e9, solLamports: sizeLamports.toString(), bins: dist.length }, '🪙 two-sided BUY published — the open follows once the buy lands');
+    log.info({ tokenMint, expectToken: buyQuote.outAmount, spendSol: Number(buyQuote.inAmount) / 1e9, solLamports: sizeLamports.toString(), bins: dist.length }, '🪙 two-sided BUY (ExactIn) published — the open follows once the buy lands');
   }
 
   /** Build + publish the two-sided OPEN once its BUY has landed (token + ATA now exist → clean SDK build). Keyed
@@ -392,16 +438,61 @@ async function main(): Promise<void> {
     const ctx = pendingTwoSidedOpens.get(buyCommandId);
     if (!ctx) return;
     pendingTwoSidedOpens.delete(buyCommandId);
-    const { e, dist, totalX, totalY, sizeSol } = ctx;
+    const { e, dist, sizeLamports, solSide, tokenMint, sizeSol } = ctx;
     const poolPk = new PublicKey(e.pool);
     const pair = await createDlmmPair(conn, poolPk);
+    // Deposit the token we ACTUALLY bought (ExactIn output is variable) — read the settled balance, don't assume an
+    // exact amount. SOL leg = the sized lamports; token leg = the real balance, distributed by the same bps `dist`.
+    const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
+    const totalX = solSide === 'X' ? sizeLamports : actualToken;
+    const totalY = solSide === 'Y' ? sizeLamports : actualToken;
+    const lower = Math.min(...dist.map((d) => d.binId));
+    const upper = Math.max(...dist.map((d) => d.binId));
+
+    // TOKEN-2022 leg → the v1 by-weight open is rejected on-chain (token program pinned to classic). Split into
+    // TX1 createEmptyPosition (here, kind 'open') + TX2 addLiquidityByWeight2 (publishDepositAfterPositionCreated,
+    // kind 'add'), sequenced via ev:executed. The mirror is persisted ONLY after the deposit lands → a crash/failure
+    // between the two leaves an UNTRACKED empty position the orphan-sweep auto-closes (no dormant position).
+    if (isToken2022Pool(pair)) {
+      if (dist.length > TOKEN2022_MAX_OPEN_BINS) {
+        // Wider than a single create + single deposit chunk → SKIP (never a partial deposit). The bought token is
+        // recovered by the wallet sweep (sold back to SOL); a >70-bin two-sided memecoin copy is rare.
+        void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_token2022_too_wide', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { bins: dist.length, max: TOKEN2022_MAX_OPEN_BINS } });
+        return;
+      }
+      const createEventKey = `${cfg.leader}:${e.pool}:open-create:${e.signature}`;
+      const createCommandId = deriveCommandId(createEventKey);
+      const posKp: Keypair = derivePositionKeypair(createCommandId); // the coffre signs 'open' with derivePositionKeypair(commandId) → MUST match
+      const built = await buildCreateEmptyPosition(conn, poolPk, ownerPk, posKp.publicKey, lower, upper, pair);
+      const { issuedAtSlot, deadlineSlot } = await slots();
+      pendingToken2022Deposits.set(createCommandId, { e, dist, totalX, totalY, lower, upper, sizeSol });
+      buildingToken2022Positions.set(posKp.publicKey.toBase58(), Date.now()); // orphan-close grace until the deposit lands
+      await publish(
+        {
+          commandId: createCommandId,
+          eventKey: createEventKey,
+          kind: 'open',
+          pool: e.pool,
+          positionPubkey: posKp.publicKey.toBase58(),
+          owner: ownerPk.toBase58(),
+          txBase64: serializeUnsigned(built), // create deploys no SOL → no CU-limit override needed
+          sizeSol: 0, // position creation deploys no SOL; the deposit (TX2) deploys it
+          targetBinRange: { lower, upper },
+          issuedAtSlot,
+          deadlineSlot,
+        },
+        { leaderPosition: e.position, leaderSizeSol: e.depositSol },
+      );
+      log.info({ our: posKp.publicKey.toBase58(), bins: dist.length }, '🪙 two-sided Token-2022 CREATE published (deposit follows once it lands)');
+      return;
+    }
+
+    // CLASSIC SPL pool → the atomic 1-tx by-weight open (unchanged).
     const eventKey = `${cfg.leader}:${e.pool}:open:${e.signature}`;
     const commandId = deriveCommandId(eventKey);
     const posKp: Keypair = derivePositionKeypair(commandId);
     const built = await buildOpenByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair); // token held now → estimation works
     const { issuedAtSlot, deadlineSlot } = await slots();
-    const lower = Math.min(...dist.map((d) => d.binId));
-    const upper = Math.max(...dist.map((d) => d.binId));
     const sr: Omit<SignRequest, 'issuedAtMs'> = {
       commandId,
       eventKey,
@@ -419,6 +510,66 @@ async function main(): Promise<void> {
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
     await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
     log.info({ our: sr.positionPubkey, bins: dist.length }, '🪙 two-sided OPEN published (after buy landed)');
+  }
+
+  /** TX2 of a Token-2022 two-sided open: once the empty position (TX1) has CONFIRMED on-chain, build + publish the
+   *  exact-shape deposit via addLiquidityByWeight2 (kind 'add'). Keyed by the create's commandId; a no-op if there's
+   *  no pending deposit. The mirror is persisted only after THIS lands (finalizeToken2022Open). */
+  async function publishDepositAfterPositionCreated(createCommandId: string): Promise<void> {
+    const ctx = pendingToken2022Deposits.get(createCommandId);
+    if (!ctx) return;
+    pendingToken2022Deposits.delete(createCommandId);
+    const { e, dist, totalX, totalY, lower, upper, sizeSol } = ctx;
+    const poolPk = new PublicKey(e.pool);
+    const posKp: Keypair = derivePositionKeypair(createCommandId); // SAME position the create made
+    const pair = await createDlmmPair(conn, poolPk); // fresh: the position now exists on-chain (addLiquidityByWeight2 fetches it)
+    // The position just confirmed; a transient "not yet readable" must not drop the deposit → retry the build.
+    let built: Transaction | Transaction[] | undefined;
+    for (let r = 0; r < OPEN_SHAPE_READ_RETRIES && built === undefined; r++) {
+      try {
+        built = await buildAddByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair);
+      } catch (err) {
+        if (r === OPEN_SHAPE_READ_RETRIES - 1) throw err;
+        await sleep(OPEN_SHAPE_READ_DELAY_MS);
+      }
+    }
+    // addLiquidityByWeight2 returns Transaction[]; ≤TOKEN2022_MAX_OPEN_BINS bins = a single chunk. More than one
+    // chunk would be a PARTIAL deposit (shape mismatch) → abort (the empty position is then orphan-closed).
+    const txs = Array.isArray(built) ? built : [built!];
+    if (txs.length !== 1) throw new Error(`token2022 deposit chunked into ${txs.length} txs (range too wide) — aborting, no partial deposit`);
+    const depositEventKey = `${cfg.leader}:${e.pool}:open-deposit:${e.signature}`;
+    const depositCommandId = deriveCommandId(depositEventKey);
+    const { issuedAtSlot, deadlineSlot } = await slots();
+    pendingToken2022Mirrors.set(depositCommandId, { leaderPosition: e.position, ourPosition: posKp.publicKey.toBase58(), pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol, lower, upper, leaderSizeSol: e.depositSol });
+    await publish(
+      {
+        commandId: depositCommandId,
+        eventKey: depositEventKey,
+        kind: 'add',
+        pool: e.pool,
+        positionPubkey: posKp.publicKey.toBase58(),
+        owner: ownerPk.toBase58(),
+        txBase64: serializeUnsigned(withCuLimit(txs[0]!, TWO_SIDED_CU_LIMIT)),
+        sizeSol,
+        targetBinRange: { lower, upper },
+        issuedAtSlot,
+        deadlineSlot,
+      },
+      { leaderPosition: e.position, leaderSizeSol: e.depositSol },
+    );
+    log.info({ our: posKp.publicKey.toBase58(), bins: dist.length }, '🪙 two-sided Token-2022 DEPOSIT published (position created → addLiquidityByWeight2)');
+  }
+
+  /** Finalize a Token-2022 two-sided open once its deposit (TX2) has landed: NOW persist the mirror (the position is
+   *  funded + tracked) and lift the orphan-close grace. */
+  async function finalizeToken2022Open(depositCommandId: string): Promise<void> {
+    const pend = pendingToken2022Mirrors.get(depositCommandId);
+    if (!pend) return;
+    pendingToken2022Mirrors.delete(depositCommandId);
+    const mirror = registry.open({ leaderPosition: pend.leaderPosition, ourPosition: pend.ourPosition, pool: pend.pool, nonSolSymbol: pend.nonSolSymbol, sizeSol: pend.sizeSol, lowerBin: pend.lower, upperBin: pend.upper, openedAt: Date.now() });
+    await store.saveOpen(mirror); // tracked only NOW — a funded, deposited position
+    buildingToken2022Positions.delete(pend.ourPosition);
+    log.info({ our: pend.ourPosition }, '🪙 two-sided Token-2022 OPEN complete (deposit landed → mirror persisted)');
   }
 
   async function handleClose(e: DetectedEvent): Promise<void> {
@@ -457,7 +608,9 @@ async function main(): Promise<void> {
     }
     const solSide = meta.solSide;
     const pair = await createDlmmPair(conn, poolPk);
-    const leaderShape = await readLeaderPositionShape(conn, poolPk, leaderPk, e.position, pair);
+    // Stable read: a leader ADD/REMOVE we just saw may not be indexed yet → a premature read shows no change → we'd
+    // skip the reshape (the copy wouldn't grow/shrink). readStableShape waits for the leader's liquidity to settle.
+    const leaderShape = await readStableShape(poolPk, leaderPk, e.position, pair);
     if (!leaderShape) return; // leader gone → the reconcile closes ours
     const ourShape = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
     if (!ourShape) {
@@ -613,6 +766,14 @@ async function main(): Promise<void> {
       if (m) await publishReClose(m);
     }
     for (const orphan of plan.orphans) {
+      // A Token-2022 open's empty position (TX1 landed, deposit TX2 still in flight) is intentionally UNTRACKED until
+      // the deposit lands — don't orphan-close it mid-build. Past the grace (deposit never landed) the entry is
+      // dropped and the empty position IS cleaned up here as a normal orphan (no dormant position).
+      const buildingSince = buildingToken2022Positions.get(orphan);
+      if (buildingSince !== undefined) {
+        if (now - buildingSince < TOKEN2022_DEPOSIT_GRACE_MS) continue;
+        buildingToken2022Positions.delete(orphan);
+      }
       // Stray position on our wallet (a bug-forgotten mirror or a manual open) → AUTO-CLOSE it (spec 04
       // reconcile; Valhalla force-closes random DLMMs). We have its pool + bins from the enumerator. The grace
       // avoids re-publishing while a previous orphan-close is still landing.
@@ -730,7 +891,7 @@ async function main(): Promise<void> {
     if (!meta?.solSide) return; // non-SOL pool → nothing to re-swap into SOL
     const tokenMint = meta.solSide === 'X' ? meta.mintY : meta.mintX; // the non-SOL leg = residual to sell
     const residual = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
-    const decision = decideResidualSell(residual, BigInt(eff().execution.dustTokenRaw));
+    const decision = decideResidualSell(residual, SELL_RESIDUAL_DUST_RAW); // sell ANY residual; minSellOutLamports gates economics post-quote
     if (!decision.sell) {
       void journal.record({ stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, detail: { tokenMint } });
       return;
@@ -743,7 +904,11 @@ async function main(): Promise<void> {
    *  sell, or a residual from any other source — so the wallet never holds a dormant non-SOL balance. */
   async function sweepWallet(): Promise<void> {
     const balances = await readAllOwnerTokenBalances(conn, ownerPk);
-    const toSweep = planWalletSweep(balances, WSOL_MINT, BigInt(eff().execution.dustTokenRaw));
+    const swNow = Date.now();
+    // Sweep ANY non-SOL (minSellOutLamports gates economics post-quote) — EXCEPT a token still in-flight for a
+    // two-sided open (bought, awaiting deposit): selling it mid-open would empty the token leg. After the grace, a
+    // still-present in-flight token means the open failed → it IS a stranded residual → swept.
+    const toSweep = planWalletSweep(balances, WSOL_MINT, SELL_RESIDUAL_DUST_RAW).filter((b) => swNow - (inFlightBuyMints.get(b.mint) ?? 0) >= INFLIGHT_BUY_GRACE_MS);
     if (toSweep.length === 0) return;
     void journal.record({ stage: 'sweep', outcome: 'detected', leader: cfg.leader, detail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
     for (const b of toSweep) {
@@ -867,6 +1032,17 @@ async function main(): Promise<void> {
             // a two-sided open's token BUY just landed → build+publish the open now (token + ATA present)
             await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) =>
               alert(log, 'two-sided open failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }),
+            );
+          } else if (ev?.kind === 'open' && ev.commandId && pendingToken2022Deposits.has(ev.commandId)) {
+            // a Token-2022 open's empty position (TX1) just CONFIRMED → build+publish the deposit (TX2). (Classic
+            // 1-tx opens also emit kind 'open' but are not in this map → ignored here.)
+            await publishDepositAfterPositionCreated(ev.commandId).catch((e) =>
+              alert(log, 'token2022 deposit failed to build/publish after position created', { error: (e as Error).message, commandId: ev.commandId }),
+            );
+          } else if (ev?.kind === 'add' && ev.commandId && pendingToken2022Mirrors.has(ev.commandId)) {
+            // a Token-2022 open's deposit (TX2) just landed → persist the mirror (a reshape 'add' is not in this map).
+            await finalizeToken2022Open(ev.commandId).catch((e) =>
+              alert(log, 'token2022 open failed to finalize after deposit', { error: (e as Error).message, commandId: ev.commandId }),
             );
           }
           await evBus.ack(EV_EXECUTED_STREAM, 'brain', msg.id);

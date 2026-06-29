@@ -18,6 +18,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · robustness —
   // convert it back to SOL (close-sell + periodic sweep). This fails if the bot leaves a dormant token, OR if the
   // sweep takes longer than its cadence (≤ ~SWEEP_MS=60s + a margin). It also measures HOW LONG the sweep takes.
   it('after a two-sided close, the copier wallet is swept token→SOL (no dormant token, within ~75s)', async () => {
+    const before = await h.copierMints(); // pre-existing session dust (illiquid Token-2022) to ignore
     await h.leaderOpen({ pool: POOL_STABLE, twosided: true, sol: 0.1, token: 4_000_000 });
     const copy = await h.waitForCopy(POOL_STABLE);
     await h.leaderClose(POOL_STABLE);
@@ -26,8 +27,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · robustness —
     const start = Date.now();
     let cleanMs = -1;
     while (Date.now() - start < 80_000) {
-      const tokens = await h.copierTokens();
-      if (tokens.every((t) => t.amountRaw < 100_000n)) {
+      if (await h.copierCleanOf(before)) {
         cleanMs = Date.now() - start;
         break;
       }

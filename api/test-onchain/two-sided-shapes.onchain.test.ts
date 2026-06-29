@@ -52,6 +52,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · two-sided shap
   // above-floor token balance). The bot MUST convert that token back to SOL (close-sell + periodic sweep). This
   // FAILS if the bot leaves a dormant non-SOL token (a no-miss-sweep regression) OR the sweep never lands within 80s.
   it('two-sided close → copier swept token→SOL (no dormant token)', async () => {
+    const before = await h.copierMints(); // pre-existing session dust (illiquid Token-2022) to ignore
     await h.leaderOpen({ pool: POOL_STABLE, twosided: true, sol: 0.1, token: 4_000_000 });
     const copy = await h.waitForCopy(POOL_STABLE, 60_000); // two-sided open = build-after-buy (slowest path)
     await h.leaderClose(POOL_STABLE);
@@ -60,8 +61,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · two-sided shap
     const start = Date.now();
     let cleanMs = -1;
     while (Date.now() - start < 80_000) {
-      const tokens = await h.copierTokens(); // BOTH token programs (incl. Token-2022)
-      if (tokens.every((t) => t.amountRaw < 100_000n)) {
+      if (await h.copierCleanOf(before)) {
         cleanMs = Date.now() - start;
         break;
       }
