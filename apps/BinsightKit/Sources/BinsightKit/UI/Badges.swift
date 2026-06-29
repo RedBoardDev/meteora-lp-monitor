@@ -28,6 +28,8 @@ public struct RangeBadge: View {
         }
         // Prose status label (IN/OUT) stays on the system font — mono is reserved for data values.
         .font(.system(size: 10, weight: .semibold))
+        .lineLimit(1)
+        .fixedSize() // keep "OUT ↑" on one line — never let row compression wrap it to "OU"/"T".
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(color.opacity(0.15), in: RoundedRectangle(cornerRadius: 5))
         .foregroundStyle(color)
@@ -44,6 +46,8 @@ public struct StrategyBadge: View {
     public var body: some View {
         Text(family.rawValue)
             .font(.system(size: 10, weight: .semibold))
+            .lineLimit(1)
+            .fixedSize()
             .padding(.horizontal, 6).padding(.vertical, 2)
             .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 5))
             .foregroundStyle(.secondary)
@@ -67,6 +71,7 @@ public struct FeesLabel: View {
         }
         .font(.data(11))
         .foregroundStyle(.secondary)
+        .lineLimit(1)
     }
 }
 

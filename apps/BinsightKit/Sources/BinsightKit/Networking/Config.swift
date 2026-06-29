@@ -8,6 +8,10 @@ import Foundation
 public enum Config {
     public static let appGroup = "group.com.binsight"
 
+    /// Public web app. The menu-bar "open on the web" action deep-links here: Overview → the root,
+    /// a wallet scope → `?address=<wallet>` (the web reads `?address` to restore that wallet's scope).
+    public static let webURL = "https://binsight.thomasott.fr"
+
     static var defaults: UserDefaults { .standard }
 
     /// Non-empty Info.plist string baked at build time (see the Makefile's MLPM_* settings).
