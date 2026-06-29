@@ -140,7 +140,10 @@ export class Harness {
         console.error(`[fidelity] totalRatio=${r.totalRatio?.toFixed(3)} solLegRatio=${r.solLegRatio?.toFixed(3)} tokenLegRatio=${r.tokenLegRatio?.toFixed(3)} maxEconDiff=${r.maxEconDiffPct?.toFixed(2)}% leaderSol=${r.totalLeaderSol?.toFixed(5)} copySol=${r.totalCopySol?.toFixed(5)}`);
         return r;
       }
-      if (attempt >= 4) throw new Error(`fidelity: a position is still missing on-chain after retries (${out})`);
+      // A position read can transiently MISS under the bench↔bot shared-RPC load (the position exists — waitForCopy
+      // confirmed the copy was made from the leader's shape). Retry generously so a transient RPC read miss isn't
+      // recorded as a (bot) issue; a genuinely-gone position stays missing past this and surfaces.
+      if (attempt >= 9) throw new Error(`fidelity: a position is still missing on-chain after retries (${out})`);
       await sleep(3000);
     }
   }
