@@ -84,6 +84,10 @@ const OPEN_SHAPE_READ_DELAY_MS = 1_000;
 // seconds under load) — fidelity demands the full shape, and a half (one-sided) copy is forbidden. A ceiling: real
 // two-sided positions index well within this; production (RPC not shared) settles in ~1-2s.
 const TWO_SIDED_SHAPE_MAX_READS = 18;
+// A leader ADD/REMOVE seen via WS may not be on-chain-readable yet → retry the resync read+compute until the deficit
+// appears (else a premature read = no deficit = the copy wouldn't grow/shrink). Only when the event carries a real change.
+const RESYNC_READ_RETRIES = 8;
+const RESYNC_MIN_CHANGE_SOL = 0.001;
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
@@ -137,7 +141,11 @@ const buildingToken2022Positions = new Map<string, number>(); // ourPosition →
 // mid-open (it would empty the token leg). Track the mint while the open is in flight; the sweep skips it within a
 // grace, after which a still-present token (the open failed) IS a real stranded residual → swept (cleanup).
 const inFlightBuyMints = new Map<string, number>(); // tokenMint → ms the two-sided buy was published
-const INFLIGHT_BUY_GRACE_MS = 90_000; // buy → (create →) deposit landing window the sweep must not race
+// The sweep must not sell the bought token during buy → (create →) deposit (≤ ~20s under load). Kept SHORT so it
+// expires soon after the deposit lands — else it would also block the safety-sweep from selling that same token's
+// CLOSE residual (the close returns it to the wallet) for too long. The close-triggered sell is the primary path;
+// this grace only gates the backstop sweep.
+const INFLIGHT_BUY_GRACE_MS = 30_000;
 const TOKEN2022_DEPOSIT_GRACE_MS = 90_000; // orphan-close grace for an empty position whose deposit is still in flight; past it, a non-deposited position is cleaned
 const TOKEN2022_MAX_OPEN_BINS = 70; // a single createEmptyPosition + single addLiquidityByWeight2 chunk cover ≤70 bins; wider Token-2022 two-sided opens are skipped (no partial deposit)
 
@@ -624,25 +632,36 @@ async function main(): Promise<void> {
     const pair = await createDlmmPair(conn, poolPk);
     // Stable read: a leader ADD/REMOVE we just saw may not be indexed yet → a premature read shows no change → we'd
     // skip the reshape (the copy wouldn't grow/shrink). readStableShape waits for the leader's liquidity to settle.
-    const leaderShape = await readStableShape(poolPk, leaderPk, e.position, pair);
-    if (!leaderShape) return; // leader gone → the reconcile closes ours
-    const ourShape = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
-    if (!ourShape) {
-      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
-      return;
-    }
-
-    // SHAPE-EXACT re-sync. Align by offset-from-LOWER (the open re-anchor maps leader.lower ↔ our.lower), so the
-    // per-bin target = factor × leader per-bin. A SELECTIVE leader trim/add is mirrored on the exact bins (the
-    // old size-only resync only matched the total → shape drifted).
+    // SHAPE-EXACT re-sync, aligned by offset-from-LOWER. A leader ADD/REMOVE seen via WS may not be indexed yet
+    // (read-after-write lag) → a premature read shows no deficit → the copy wouldn't grow/shrink. When the event
+    // carries a real change, RETRY the read+compute until a deficit appears (or retries exhausted = a genuine noop).
     const solOf = (b: { x: bigint; y: bigint }) => lamportsToSol(solSide === 'Y' ? b.y : b.x);
     const tokenOf = (b: { x: bigint; y: bigint }) => Number(solSide === 'Y' ? b.x : b.y); // RAW token units
-    const leaderBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: solOf(b) }));
-    const ourBins = ourShape.perBin.map((b) => ({ offset: b.binId - ourShape.lowerBinId, sol: solOf(b) }));
-    const leaderTokenBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: tokenOf(b) }));
-    const ourTokenBins = ourShape.perBin.map((b) => ({ offset: b.binId - ourShape.lowerBinId, sol: tokenOf(b) }));
-    // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
-    const { ops, tokenAddOps } = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, ec.sizing.maxTradeSizeSol, ec.execution.reshapeBinDeadbandSol, ec.execution.reshapeBinDeadbandToken);
+    const changeExpected = e.depositSol > RESYNC_MIN_CHANGE_SOL || e.withdrawSol > RESYNC_MIN_CHANGE_SOL;
+    let ourShape: Awaited<ReturnType<typeof readLeaderPositionShape>> = null;
+    let plan: ReturnType<typeof planTwoSidedReshape> | null = null;
+    let leaderBins: Array<{ offset: number; sol: number }> = []; // hoisted: also used post-loop for the new-size calc
+    for (let r = 0; r <= (changeExpected ? RESYNC_READ_RETRIES : 0); r++) {
+      if (r > 0) await sleep(OPEN_SHAPE_READ_DELAY_MS);
+      const leaderShape = await readStableShape(poolPk, leaderPk, e.position, pair);
+      if (!leaderShape) return; // leader gone → the reconcile closes ours
+      const os = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
+      if (!os) {
+        void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+        return;
+      }
+      ourShape = os;
+      leaderBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: solOf(b) }));
+      const ourBins = os.perBin.map((b) => ({ offset: b.binId - os.lowerBinId, sol: solOf(b) }));
+      const leaderTokenBins = leaderShape.perBin.map((b) => ({ offset: b.binId - leaderShape.lowerBinId, sol: tokenOf(b) }));
+      const ourTokenBins = os.perBin.map((b) => ({ offset: b.binId - os.lowerBinId, sol: tokenOf(b) }));
+      // SOL-leg ops (removes are proportional → cover both legs); token-leg ADD deficit handled two-sided when enabled.
+      plan = planTwoSidedReshape(leaderBins, ourBins, leaderTokenBins, ourTokenBins, copyRatio, ec.sizing.maxTradeSizeSol, ec.execution.reshapeBinDeadbandSol, ec.execution.reshapeBinDeadbandToken);
+      if (plan.ops.length > 0 || (ec.twoSidedMode === 'on' && plan.tokenAddOps.length > 0)) break; // deficit found → proceed
+      // noop this read — if a change was expected, the leader event likely isn't indexed yet → retry
+    }
+    if (!ourShape || !plan) return;
+    const { ops, tokenAddOps } = plan;
     const twoSidedAdd = ec.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
       void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });

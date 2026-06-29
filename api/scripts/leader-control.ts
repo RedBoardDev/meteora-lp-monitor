@@ -40,7 +40,14 @@ async function buyTokenExactIn(tokenMint: string, tokenRaw: bigint): Promise<big
   const q = await getJupiterBuyQuoteExactIn(JUPITER_BASE, tokenMint, BigInt(priceQ.outAmount), SWEEP_SLIPPAGE_BPS);
   const buyTx = await buildJupiterSwapTx(JUPITER_BASE, q, leader.publicKey.toBase58());
   await signLandConfirm(Transaction.from(Buffer.from(buyTx, 'base64')));
-  const bought = (await ownerTokenRaw(tokenMint)) - before;
+  // The post-swap balance read can LAG the swap's settlement (RPC read-after-write) → a stale `after - before = 0`
+  // would deposit 0 token = a one-sided leader (the bot then faithfully copies one-sided → a false two-sided miss).
+  // Retry until the balance reflects the buy (it spent SOL, so a positive delta is expected).
+  let bought = 0n;
+  for (let r = 0; r < 12 && bought <= 0n; r++) {
+    if (r > 0) await new Promise((res) => setTimeout(res, 800));
+    bought = (await ownerTokenRaw(tokenMint)) - before;
+  }
   console.log(`🟣 BUY (ExactIn) ${bought} ${tokenMint} cost~${Number(q.inAmount) / 1e9} SOL`);
   return bought;
 }

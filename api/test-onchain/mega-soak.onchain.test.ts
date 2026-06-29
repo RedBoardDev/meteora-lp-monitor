@@ -37,7 +37,7 @@ const OPEN_FUNDED_TIMEOUT_MS = 70_000; // a Token-2022 two-sided open lands in 3
 const RESIZE_SETTLE_TIMEOUT_MS = 45_000; // time for the bot to mirror a leader reshape (add/remove) and settle
 const CLOSE_LAND_TIMEOUT_MS = 25_000; // leader close to confirm on-chain (poll + one retry)
 const COPY_CLOSED_TIMEOUT_MS = 70_000; // the bot's copy close to confirm gone (no-miss)
-const WALLET_SOL_ONLY_TIMEOUT_MS = 85_000; // ★ residual token→SOL: close-triggered sell (~5s) + the 60s safety-sweep backstop + margin
+const WALLET_SOL_ONLY_TIMEOUT_MS = 100_000; // ★ residual token→SOL: close-triggered sell (~5s) primary + the 60s safety-sweep backstop (after the in-flight grace) + margin
 const WALLET_START_SOL_ONLY_TIMEOUT_MS = 40_000; // a scenario must START SOL-only (prior close-sell/sweep landed); poll to absorb the async sweep before flagging contamination
 const RESETTLE_TIMEOUT_MS = 25_000; // settle to 0 before the next scenario
 // Latency is RECORDED here for visibility but only an egregious HANG is gated: the strict reaction-SLA (~800ms
@@ -47,6 +47,7 @@ const LATENCY_HANG_MS = 20_000; // above this = a genuine stall/hang (a real pro
 const TOTAL_RATIO_MIN = 0.43; // COPY_RATIO 0.5, arb/latency band on the economic (both-leg) ratio
 const TOTAL_RATIO_MAX = 0.6;
 const REANCHOR_SETTLE_MS = 5000; // let bins index + entry-instant arb settle before reading fidelity
+const INTER_SCENARIO_SETTLE_MS = 6000; // space scenarios so the RPC + chain settle between positions (one key shared with the bot → less contention)
 
 // ── scenario matrix ──────────────────────────────────────────────────────────────────────────────────────────
 // Only FULLY-SELLABLE pools: stable SOL/USDC (classic) + the COIN/SOL Token-2022 pool (9cRCn, buyable+sellable). On
@@ -116,6 +117,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
       let copy: string | null = null;
       let openMs: number | null = null;
       let closeMs: number | null = null;
+      if (i > 0) await sleep(INTER_SCENARIO_SETTLE_MS); // let the RPC + chain breathe between positions
       try {
         // CLEAN START: settle both sides to 0 so this scenario is INDEPENDENT (no cross-cycle pollution).
         const cleanStart = await pollUntil(async () => (await h.leaderPositions(pool)).length === 0 && (await h.copierPositions(pool)).length === 0, CLEAN_START_TIMEOUT_MS);
@@ -159,7 +161,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
               return !!g && g.totalCopySol > f.totalCopySol * 1.1; // copy grew ≥10% (clearly above arb noise)
             },
             RESIZE_SETTLE_TIMEOUT_MS,
-            5000, // gentle poll (heavy SDK read) — RPC headroom for the bot's resync
+            8000, // gentle poll (heavy SDK read) — RPC headroom for the bot
           );
           if (!grew) problems.push('copy did not grow after the leader add (reshape-grow not mirrored)');
         } else if (s.lifecycle === 'shrink') {
@@ -170,7 +172,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
               return !!g && g.totalCopySol < f.totalCopySol * 0.85; // copy shrank ≥15%
             },
             RESIZE_SETTLE_TIMEOUT_MS,
-            5000, // gentle poll (heavy SDK read)
+            8000, // gentle poll (heavy SDK read)
           );
           if (!shrank) problems.push('copy did not shrink after the leader remove (reshape-shrink not mirrored)');
         } else if (s.lifecycle === 'partial-remove') {
