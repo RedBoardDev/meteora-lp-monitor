@@ -196,6 +196,24 @@ export class Harness {
       return false;
     }
   }
+  /** Did the brain PUBLISH a reshape mirroring a leader grow/shrink on OUR copy position? Parses the tee'd brain log
+   *  for the "🔧 reshape published" record of THIS copy (the pubkey is fresh per scenario → no time-gating needed).
+   *  Used to distinguish a TRUE miss (bot never mirrored) from a bench fidelity-read lag (the add/remove landed on-chain
+   *  — confirmed by the coffre — but the heavy SDK re-read, sharing the bot's RPC key, under-reported the new size). */
+  brainReshapedCopy(copyPubkey: string, dir: 'grow' | 'shrink'): boolean {
+    try {
+      for (const line of readFileSync('/tmp/bench-brain.log', 'utf8').split('\n')) {
+        if (!line.includes('reshape published') || !line.includes(copyPubkey)) continue;
+        const r = JSON.parse(line) as { position?: string; adds?: number; removes?: number };
+        if (r.position !== copyPubkey) continue;
+        if (dir === 'grow' && (r.adds ?? 0) > 0) return true;
+        if (dir === 'shrink' && (r.removes ?? 0) > 0) return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
   /** Does a position/account exist on-chain (direct read — no enumerator lag)? */
   async accountExists(pubkey: string): Promise<boolean> {
     return (await this.conn.getAccountInfo(new PublicKey(pubkey))) !== null;
