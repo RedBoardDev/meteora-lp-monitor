@@ -37,8 +37,10 @@ export function AppShell() {
   const solUsd = useSolUsd((s) => s.rate);
   const openAccess = useOpenAccess();
 
+  // A single wallet makes "All" (the all-wallets aggregate) redundant — it equals that wallet — so the
+  // scope selector is dropped to one option and hidden (the `options.length > 1` guard below).
   const options = [
-    { label: 'All', value: 'all' },
+    ...(wallets.length > 1 ? [{ label: 'All', value: 'all' }] : []),
     ...wallets.map((w) => ({
       // A freshly-added wallet still backfilling its history shows "indexing…" until it's queryable.
       label: `${w.label || shortAddr(w.address)}${w.ready === false ? ' · indexing…' : ''}`,

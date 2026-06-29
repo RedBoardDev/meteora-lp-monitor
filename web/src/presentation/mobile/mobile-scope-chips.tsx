@@ -11,8 +11,9 @@ export function MobileScopeChips() {
   const setScope = usePortfolio((s) => s.setScope);
   const wallets = useWallets((s) => s.wallets);
 
-  // Nothing to switch between until there's at least one wallet — hide the row entirely.
-  if (wallets.length === 0) return null;
+  // Nothing to switch between with 0 or 1 wallet — a single wallet makes "Overview" (the aggregate)
+  // redundant since it equals that wallet — so the row is hidden until there are at least two.
+  if (wallets.length <= 1) return null;
 
   const options = [
     { label: 'Overview', value: 'all' },

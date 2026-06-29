@@ -45,8 +45,7 @@ const FLOW_REFETCH_OVERLAP_MS = 10 * 60_000;
 const newestTs = (flows: ResidualSell[]): number => flows.reduce((m, f) => Math.max(m, f.ts), 0);
 
 /** Value key for dedup — two distinct real swaps colliding on all four fields is not realistic. */
-const flowKey = (f: ResidualSell): string =>
-  `${f.ts}|${f.mint}|${f.tokenAmount}|${f.solReceived}`;
+const flowKey = (f: ResidualSell): string => `${f.ts}|${f.mint}|${f.tokenAmount}|${f.solReceived}`;
 
 /**
  * Merge a freshly-fetched delta into a cached flow list, dropping rows already present. Order is
