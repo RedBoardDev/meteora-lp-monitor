@@ -455,7 +455,10 @@ export class Engine {
    * single-flight per wallet so it can never pile up. Errors are swallowed — a failed pass must not
    * disturb the live snapshot loop; the existing values stay until the next close-notification retries.
    */
-  private async runRealizedPnl(wallet: string, opts: { incremental?: boolean } = {}): Promise<void> {
+  private async runRealizedPnl(
+    wallet: string,
+    opts: { incremental?: boolean } = {},
+  ): Promise<void> {
     if (this.realizedPnlRunning.has(wallet)) {
       this.realizedPnlRerun.add(wallet); // coalesce a mid-run trigger into one more pass
       return;

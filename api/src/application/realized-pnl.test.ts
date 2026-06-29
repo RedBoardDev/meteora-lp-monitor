@@ -216,10 +216,7 @@ describe('RealizedPnlEngine — incremental refresh', () => {
     // so it marks the residual as held (~0 here). An incremental refresh must page only the NEWER window
     // and pick up the now-visible sell — converging to the realized value WITHOUT re-paging all history.
     const T = 1_700_000_000; // realistic unix seconds so the delta window is meaningfully narrower
-    const legs = [
-      leg('P1', 'deposit', 100, 10, T + 1000),
-      leg('P1', 'withdraw', 100, 5, T + 2000),
-    ];
+    const legs = [leg('P1', 'deposit', 100, 10, T + 1000), leg('P1', 'withdraw', 100, 5, T + 2000)];
     const status = new Map([['P1', { status: 'closed', closedAt: (T + 2000) * 1000 }]]);
     const buys: ResidualSell[] = [{ ts: T, mint: MINT, tokenAmount: 100, solReceived: 10 }];
     let sellsNow: ResidualSell[] = []; // residual not yet sold/indexed at close time
@@ -241,7 +238,14 @@ describe('RealizedPnlEngine — incremental refresh', () => {
       getPricesSol: async () => new Map<string, number>(),
       getSolUsd: async () => null,
     } as unknown as PriceGateway;
-    const engine = new RealizedPnlEngine(legSource, posSource, enhanced, prices, async () => 0, noopLogger);
+    const engine = new RealizedPnlEngine(
+      legSource,
+      posSource,
+      enhanced,
+      prices,
+      async () => 0,
+      noopLogger,
+    );
 
     // 1) Cold full pass — residual still held (≈0 mark), no realized sale yet.
     const first = await engine.computeForWallet('W');
