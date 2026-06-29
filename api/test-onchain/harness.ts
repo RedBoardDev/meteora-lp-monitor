@@ -196,22 +196,36 @@ export class Harness {
       return false;
     }
   }
-  /** Did the brain PUBLISH a reshape mirroring a leader grow/shrink on OUR copy position? Parses the tee'd brain log
-   *  for the "🔧 reshape published" record of THIS copy (the pubkey is fresh per scenario → no time-gating needed).
-   *  Used to distinguish a TRUE miss (bot never mirrored) from a bench fidelity-read lag (the add/remove landed on-chain
-   *  — confirmed by the coffre — but the heavy SDK re-read, sharing the bot's RPC key, under-reported the new size). */
-  brainReshapedCopy(copyPubkey: string, dir: 'grow' | 'shrink'): boolean {
+  /** Did the brain PUBLISH a reshape mirroring this leader grow/shrink? The "🔧 reshape published" record is keyed by
+   *  the LEADER position (e.position, fresh per scenario → unambiguous), with `adds`/`removes` counts. Pair this with
+   *  coffreLandedCount() to separate a TRUE miss (bot never mirrored, or its add/remove reverted on-chain) from a mere
+   *  bench fidelity-read lag (heavy SDK re-read sharing the bot's RPC key under-reported the new size). */
+  brainMirroredReshape(leaderPosition: string, dir: 'grow' | 'shrink'): boolean {
     try {
       for (const line of readFileSync('/tmp/bench-brain.log', 'utf8').split('\n')) {
-        if (!line.includes('reshape published') || !line.includes(copyPubkey)) continue;
+        if (!line.includes('reshape published') || !line.includes(leaderPosition)) continue;
         const r = JSON.parse(line) as { position?: string; adds?: number; removes?: number };
-        if (r.position !== copyPubkey) continue;
+        if (r.position !== leaderPosition) continue;
         if (dir === 'grow' && (r.adds ?? 0) > 0) return true;
         if (dir === 'shrink' && (r.removes ?? 0) > 0) return true;
       }
       return false;
     } catch {
       return false;
+    }
+  }
+  /** How many `add`/`remove` reshape txs the coffre has LANDED on a pool (the on-chain truth, vs the brain merely
+   *  PUBLISHING). Captured before/after a leader change → a strictly higher count proves OUR copy actually grew/shrank
+   *  on-chain (one-at-a-time soak ⇒ the only position on the pool is ours). Matches the coffre's tee'd "🚀 SIGN landed
+   *  · <kind> · … pool=<first4>…<last4>" line. */
+  coffreLandedCount(kind: 'add' | 'remove', pool: string): number {
+    try {
+      const lo = pool.slice(0, 4);
+      return readFileSync('/tmp/bench-coffre.log', 'utf8')
+        .split('\n')
+        .filter((l) => l.includes('SIGN landed') && l.includes(`· ${kind} ·`) && l.includes(`pool=${lo}`)).length;
+    } catch {
+      return 0;
     }
   }
   /** Does a position/account exist on-chain (direct read — no enumerator lag)? */

@@ -171,6 +171,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
 
         // ── lifecycle-specific middle step ───────────────────────────────────────────────────────────────────
         if (s.lifecycle === 'grow') {
+          const addsBefore = h.coffreLandedCount('add', pool); // on-chain truth baseline (vs the flaky fidelity re-read)
           await h.leaderAdd({ pool, twosided: s.side === 'two', sol: ADD_SOL, token: 2_000_000 });
           const grew = await pollUntil(
             async () => {
@@ -180,12 +181,15 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
             RESIZE_SETTLE_TIMEOUT_MS,
             8000, // gentle poll (heavy SDK read) — RPC headroom for the bot
           );
-          // The fidelity SDK re-read shares the bot's RPC key → it can lag/under-report the freshly-grown size. Only a
-          // TRUE miss — the bot never PUBLISHED the mirroring add — is a SERIOUS issue; a published add (landed on-chain,
-          // confirmed by the coffre) that the read merely missed is bench lag, not a bot fault.
-          if (!grew && !h.brainReshapedCopy(copy!, 'grow')) problems.push('copy did not grow after the leader add (reshape-grow not mirrored)');
-          else if (!grew) console.log(`🛁 n=${n} grow: fidelity read lagged but the bot DID mirror the add (brain reshape published) — not flagged`);
+          // The fidelity SDK re-read shares the bot's RPC key → it can lag/under-report the freshly-grown size. Treat
+          // the on-chain facts as authoritative: a TRUE miss is SERIOUS — the bot never mirrored (no reshape published)
+          // OR its add did not land (coffre count unchanged ⇒ a revert). A reshape the brain published AND the coffre
+          // landed, that the fidelity read merely missed, is bench lag — not a bot fault.
+          const mirrored = h.brainMirroredReshape(leaderPos, 'grow') && h.coffreLandedCount('add', pool) > addsBefore;
+          if (!grew && !mirrored) problems.push('copy did not grow after the leader add (reshape-grow not mirrored)');
+          else if (!grew) console.log(`🛁 n=${n} grow: add landed on-chain (coffre) — bench fidelity read lagged, not flagged`);
         } else if (s.lifecycle === 'shrink') {
+          const removesBefore = h.coffreLandedCount('remove', pool);
           await h.leaderRemove(pool, REMOVE_BPS);
           const shrank = await pollUntil(
             async () => {
@@ -195,10 +199,11 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
             RESIZE_SETTLE_TIMEOUT_MS,
             8000, // gentle poll (heavy SDK read)
           );
-          // Same as grow: a published remove the bench read merely lagged is not a bot fault — only a never-mirrored
-          // shrink (the bot published no remove) is a SERIOUS issue.
-          if (!shrank && !h.brainReshapedCopy(copy!, 'shrink')) problems.push('copy did not shrink after the leader remove (reshape-shrink not mirrored)');
-          else if (!shrank) console.log(`🛁 n=${n} shrink: fidelity read lagged but the bot DID mirror the remove (brain reshape published) — not flagged`);
+          // Same as grow: only a never-mirrored shrink (no reshape published) or one whose remove never landed (coffre
+          // count unchanged) is SERIOUS; a landed remove the fidelity read merely lagged is bench lag.
+          const mirrored = h.brainMirroredReshape(leaderPos, 'shrink') && h.coffreLandedCount('remove', pool) > removesBefore;
+          if (!shrank && !mirrored) problems.push('copy did not shrink after the leader remove (reshape-shrink not mirrored)');
+          else if (!shrank) console.log(`🛁 n=${n} shrink: remove landed on-chain (coffre) — bench fidelity read lagged, not flagged`);
         } else if (s.lifecycle === 'partial-remove') {
           await h.leaderRemove(pool, REMOVE_BPS, undefined, undefined); // proportional sub-range remove
           await sleep(REANCHOR_SETTLE_MS * 2);
