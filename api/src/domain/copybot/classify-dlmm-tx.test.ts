@@ -65,6 +65,22 @@ describe('buildDetectedEvent — routing DLMM legs into SOL (golden: open/close/
     expect(e?.position).toBe(POSITION); // surfaced from the leg → P2 tracker key
     expect(e?.nonSolMint).toBe(NONSOL); // SOL is on side Y → the non-SOL is mintX
     expect(e?.blockTime).toBe(1_700_000_000);
+    expect(e?.depositTokenRaw).toBe(0); // one-sided SOL open (X=0) → no token leg
+  });
+
+  // WHY: the two-sided decision must come from the leader's tx DECODE (authoritative), NOT the per-bin shape read
+  // (which can race per-leg on-chain indexing → a partial read would misclassify a two-sided open as one-sided = a
+  // forbidden half copy). depositTokenRaw surfaces the raw NON-SOL units deposited so the brain knows to wait for both
+  // legs before classifying. A regression that drops the token-leg amount would make this 0 → caught here.
+  it('TWO-SIDED open → depositTokenRaw carries the raw NON-SOL amount (authoritative two-sided signal)', () => {
+    const e = buildDetectedEvent('sigTwo', tx('AddLiquidityByStrategy2', [addLiquidity(2_000_000n, 1_500_000_000n, 0)]), lookupSolY);
+    expect(e?.depositSol).toBeGreaterThan(1.5); // BOTH legs valued in SOL (1.5 SOL + the token leg's SOL value)
+    expect(e?.depositTokenRaw).toBe(2_000_000); // NON-SOL (X) leg → marks it two-sided
+  });
+
+  it('TWO-SIDED open → depositTokenRaw SUMS the non-SOL leg across multiple Adds in one tx', () => {
+    const e = buildDetectedEvent('sigTwoMulti', tx('AddLiquidityByStrategy2', [addLiquidity(2_000_000n, 1_000_000_000n, 0), addLiquidity(500_000n, 250_000_000n, 0)]), lookupSolY);
+    expect(e?.depositTokenRaw).toBe(2_500_000); // 2.0M + 0.5M
   });
 
   it('CLOSE (RemoveLiquidity + ClaimFee2) → capital out in withdrawSol AND fees in claimSol, no deposit', () => {

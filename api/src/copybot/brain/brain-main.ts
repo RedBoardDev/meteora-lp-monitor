@@ -250,7 +250,7 @@ async function main(): Promise<void> {
   // read-after-write lag). Read until the shape is RELIABLE: a both-legs shape is fully indexed (return at once → zero
   // added latency on the common two-sided open); a single-leg shape is confirmed STABLE (total liquidity unchanged
   // across two reads) before trusting it as genuinely one-sided / settled. null only if the position is never readable.
-  async function readStableShape(poolPk: PublicKey, owner: PublicKey, position: string, pair: Awaited<ReturnType<typeof createDlmmPair>>) {
+  async function readStableShape(poolPk: PublicKey, owner: PublicKey, position: string, pair: Awaited<ReturnType<typeof createDlmmPair>>, expectBothLegs = false) {
     let last: Awaited<ReturnType<typeof readLeaderPositionShape>> = null;
     let lastTotal = -1n;
     for (let r = 0; r <= OPEN_SHAPE_READ_RETRIES; r++) {
@@ -258,6 +258,12 @@ async function main(): Promise<void> {
       const shape = await readLeaderPositionShape(conn, poolPk, owner, position, pair);
       if (!shape) continue; // not readable yet → retry
       if (shape.perBin.some((b) => b.x > 0n) && shape.perBin.some((b) => b.y > 0n)) return shape; // both legs indexed
+      // The tx decode says this is two-sided but a leg's bin array isn't indexed yet → DON'T accept the partial
+      // (single-leg) shape; keep reading until the missing leg appears (or retries exhausted → best-effort).
+      if (expectBothLegs) {
+        last = shape;
+        continue;
+      }
       const total = shape.perBin.reduce((s, b) => s + b.x + b.y, 0n);
       if (last && total === lastTotal && total > 0n) return shape; // single-leg but stable → genuinely settled
       last = shape;
@@ -297,10 +303,11 @@ async function main(): Promise<void> {
     }
 
     const pair = await pairP;
-    // Read the leader's shape RELIABLY: a freshly-opened position settles in ~1-2s and can read partially (a transient
-    // null, OR a two-sided open whose TOKEN leg isn't indexed yet → it would misclassify as one-sided). readStableShape
-    // returns at once when both legs are present, else waits for the total to stabilize.
-    const shape = await readStableShape(poolPk, leaderPk, e.position, pair);
+    // Read the leader's shape RELIABLY. The tx decode tells us AUTHORITATIVELY whether the leader deposited a TOKEN
+    // leg (two-sided) — independent of the race-prone shape read; when so, wait for BOTH legs to index before
+    // classifying (a partial read would misclassify a two-sided open as one-sided = a forbidden half copy).
+    const expectTwoSided = (e.depositTokenRaw ?? 0) > ec.execution.dustTokenRaw;
+    const shape = await readStableShape(poolPk, leaderPk, e.position, pair, expectTwoSided);
     if (!shape) {
       void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { afterRetries: OPEN_SHAPE_READ_RETRIES } });
       return;

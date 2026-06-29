@@ -10,6 +10,9 @@ export interface DetectedEvent {
   instruction: string;
   /** capital in (open/add). */
   depositSol: number;
+  /** raw NON-SOL token units deposited (open/add), summed over the tx's legs. AUTHORITATIVE two-sided signal — it
+   *  comes from the leader's tx decode, so it is independent of the (race-prone) per-bin shape read. 0/absent = one-sided. */
+  depositTokenRaw?: number;
   /** capital out (close/remove). */
   withdrawSol: number;
   /** fees harvested (claim). */

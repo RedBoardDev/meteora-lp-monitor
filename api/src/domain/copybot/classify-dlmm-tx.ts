@@ -44,6 +44,7 @@ export function buildDetectedEvent(
 
   const instruction = parseInstruction(logs) ?? '(DLMM)';
   let depositSol = 0;
+  let depositTokenRaw = 0; // raw NON-SOL units deposited — authoritative two-sided signal (decode, not the shape read)
   let withdrawSol = 0;
   let claimSol = 0;
   let pool = '';
@@ -56,8 +57,10 @@ export function buildDetectedEvent(
     if (!meta || !meta.solSide) continue; // pool not valuable in SOL → action kept, without amount
     nonSolMint = meta.mintX === SOL_MINT ? meta.mintY : meta.mintX;
     const sol = legValueSol(leg, { binStep: meta.binStep, solSide: meta.solSide });
-    if (leg.kind === 'deposit') depositSol += sol;
-    else if (leg.kind === 'withdraw') withdrawSol += sol;
+    if (leg.kind === 'deposit') {
+      depositSol += sol;
+      depositTokenRaw += Number(meta.mintX === SOL_MINT ? leg.amountY : leg.amountX); // the non-SOL leg's raw amount
+    } else if (leg.kind === 'withdraw') withdrawSol += sol;
     else claimSol += sol;
   }
 
@@ -66,6 +69,7 @@ export function buildDetectedEvent(
     blockTime: tx.blockTime ?? null,
     instruction,
     depositSol,
+    depositTokenRaw,
     withdrawSol,
     claimSol,
     pool,
