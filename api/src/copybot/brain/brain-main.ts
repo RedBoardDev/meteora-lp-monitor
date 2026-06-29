@@ -38,7 +38,7 @@ import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildCrea
 import { readLeaderPositionShape, type UserPosition, readUserPositions } from '@/infrastructure/solana/dlmm/leader-position-reader';
 import { readActiveTokenPrice } from '@/infrastructure/solana/dlmm/active-bin-price';
 import { OnchainPoolMetaReader } from '@/infrastructure/solana/dlmm/pool-meta';
-import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuote, getJupiterBuyQuoteExactIn, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
+import { DEFAULT_JUPITER_BASE_URL, WSOL_MINT, buildJupiterSwapTx, getJupiterBuyQuoteExactIn, getJupiterQuote } from '@/infrastructure/solana/jupiter/jupiter-swap-builder';
 import { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
@@ -88,6 +88,10 @@ const TWO_SIDED_SHAPE_MAX_READS = 18;
 // appears (else a premature read = no deficit = the copy wouldn't grow/shrink). Only when the event carries a real change.
 const RESYNC_READ_RETRIES = 8;
 const RESYNC_MIN_CHANGE_SOL = 0.001;
+// addLiquidityByWeight2 distributes a total by per-bin bps; the rounded per-bin amounts can sum to a hair MORE than
+// the total → the token TransferChecked fails "insufficient funds". Deposit just under the wallet balance to absorb
+// it (the tiny remainder is swept). ≤0.1% → negligible fidelity impact.
+const depositableToken = (raw: bigint): bigint => (raw > 10_000n ? (raw * 999n) / 1000n : raw);
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
@@ -135,6 +139,10 @@ const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin
 // position WHILE its deposit is still in flight; once the grace expires (deposit never landed) the sweep cleans it.
 const pendingToken2022Deposits = new Map<string, { e: DetectedEvent; dist: WeightBin[]; totalX: bigint; totalY: bigint; lower: number; upper: number; sizeSol: number }>();
 const pendingToken2022Mirrors = new Map<string, { leaderPosition: string; ourPosition: string; pool: string; nonSolSymbol: string | null; sizeSol: number; lower: number; upper: number; leaderSizeSol: number }>();
+// TWO-SIDED RESHAPE ADD (grow with a token-leg deficit): like the open, the token can't be bought via ExactOut on a
+// Token-2022 coin → buy via ExactIn (variable output) then build+publish the add ONCE the buy lands (deposit the
+// ACTUAL balance). Stashed by the reshape buy's commandId; consumed in publishReshapeAddAfterBuy.
+const pendingReshapeAdds = new Map<string, { dist: WeightBin[]; addLamports: bigint; solSide: 'X' | 'Y'; tokenMint: string; lower: number; upper: number; totalAddSol: number; ourPosition: string; pool: string; leaderPosition: string; signature: string }>();
 const buildingToken2022Positions = new Map<string, number>(); // ourPosition → ms the create was published (orphan-close grace while the deposit lands)
 // A two-sided open's BOUGHT token sits on the wallet between the buy landing and the deposit landing. Since the
 // safety-sweep now sells ANY non-SOL residual (SELL_RESIDUAL_DUST_RAW=0), it must NOT sell that in-flight token
@@ -465,7 +473,7 @@ async function main(): Promise<void> {
     const pair = await createDlmmPair(conn, poolPk);
     // Deposit the token we ACTUALLY bought (ExactIn output is variable) — read the settled balance, don't assume an
     // exact amount. SOL leg = the sized lamports; token leg = the real balance, distributed by the same bps `dist`.
-    const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
+    const actualToken = depositableToken(await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint))); // reserve a hair for per-bin bps rounding (TransferChecked insufficient-funds)
     const totalX = solSide === 'X' ? sizeLamports : actualToken;
     const totalY = solSide === 'Y' ? sizeLamports : actualToken;
     const lower = Math.min(...dist.map((d) => d.binId));
@@ -594,6 +602,24 @@ async function main(): Promise<void> {
     log.info({ our: pend.ourPosition }, '🪙 two-sided Token-2022 OPEN complete (deposit landed → mirror persisted)');
   }
 
+  /** Build + publish a two-sided RESHAPE ADD once its token BUY (ExactIn) has landed — deposit the ACTUAL bought
+   *  amount (variable). Keyed by the reshape buy's commandId; a no-op if there's no pending reshape add. */
+  async function publishReshapeAddAfterBuy(buyCommandId: string): Promise<void> {
+    const ctx = pendingReshapeAdds.get(buyCommandId);
+    if (!ctx) return;
+    pendingReshapeAdds.delete(buyCommandId);
+    const { dist, addLamports, solSide, tokenMint, lower, upper, totalAddSol, ourPosition, pool, leaderPosition, signature } = ctx;
+    const poolPk = new PublicKey(pool);
+    const pair = await createDlmmPair(conn, poolPk);
+    const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint)); // ExactIn output is variable → deposit the real balance
+    const depositToken = depositableToken(actualToken); // reserve a hair for per-bin bps rounding (else TransferChecked → insufficient funds)
+    const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(ourPosition), solSide === 'X' ? depositToken : addLamports, solSide === 'Y' ? depositToken : addLamports, dist, pair);
+    const { issuedAtSlot, deadlineSlot } = await slots();
+    const addKey = `${cfg.leader}:${pool}:reshape-add:${signature}`;
+    await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool, positionPubkey: ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(firstTx(built), TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot }, { stage: 'reshape', leaderPosition });
+    log.info({ our: ourPosition, bins: dist.length }, '🪙 two-sided reshape ADD published (after buy landed)');
+  }
+
   async function handleClose(e: DetectedEvent): Promise<void> {
     const m = registry.get(e.position);
     if (!m) return;
@@ -685,8 +711,9 @@ async function main(): Promise<void> {
       rm++;
     }
     if (twoSidedAdd) {
-      // TWO-SIDED reshape add: deficit on the SOL leg AND the token leg → BUY the token deficit (ExactOut,
-      // published first so the coffre confirms it before the add lands) then add both legs by-weight.
+      // TWO-SIDED reshape add: a deficit on the SOL leg AND the token leg → BUY the token deficit via ExactIn (ExactOut
+      // has no Token-2022 route), then ADD both legs once the buy lands — the bought amount is variable, so we
+      // build-after-buy and deposit the ACTUAL balance (exactly like the two-sided OPEN).
       const tokenMint = solSide === 'Y' ? meta.mintX : meta.mintY;
       const tokenAdds = tokenAddOps
         .map((o) => ({ binId: ourShape.lowerBinId + o.offset, raw: Math.round(o.addSol) }))
@@ -705,20 +732,28 @@ async function main(): Promise<void> {
       // The SDK by-weight requires CONTIGUOUS binIds (a deadband-dropped per-bin add would leave a gap → it
       // errors "Discontinuous Bin ID"). Fill the [min,max] span with 0/0 entries so the listed bins are contiguous.
       const dist: WeightBin[] = fillContiguousWeights([...byBin.values()]);
-      const loBin = dist[0]!.binId;
-      const hiBin = dist.at(-1)!.binId;
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
       const addLamports = BigInt(Math.round(totalAddSol * 1e9));
       const totalTokenRaw = BigInt(tokenAdds.reduce((s, a) => s + a.raw, 0));
-      const buyQuote = await getJupiterBuyQuote(cfg.jupiterBaseUrl, tokenMint, totalTokenRaw, ec.execution.slippageBps);
-      const buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
-      const buyKey = `${cfg.leader}:${m.pool}:reshape-buy:${e.signature}`;
-      await publish({ commandId: deriveCommandId(buyKey), eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: totalTokenRaw.toString(), maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
-      const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? addLamports : totalTokenRaw, solSide === 'Y' ? addLamports : totalTokenRaw, dist, pair);
-      const lower = loBin;
-      const upper = hiBin;
-      const addKey = `${cfg.leader}:${m.pool}:reshape-add:${e.signature}`;
-      await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(built, TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot });
+      // Price the token target (sell direction, fully routed) → spend that SOL via ExactIn (output variable → the add
+      // is built after the buy lands, reading the real balance). Skip cleanly if the token can't be priced/bought.
+      try {
+        const priceQuote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, totalTokenRaw, ec.execution.slippageBps);
+        const solToSpend = BigInt(priceQuote.outAmount);
+        if (!(solToSpend > 0n)) throw new Error('token leg priced at 0 SOL');
+        const buyQuote = await getJupiterBuyQuoteExactIn(cfg.jupiterBaseUrl, tokenMint, solToSpend, ec.execution.slippageBps);
+        const buyTxB64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, buyQuote, ownerPk.toBase58());
+        const buyKey = `${cfg.leader}:${m.pool}:reshape-buy:${e.signature}`;
+        const buyCommandId = deriveCommandId(buyKey);
+        pendingReshapeAdds.set(buyCommandId, { dist, addLamports, solSide, tokenMint, lower: dist[0]!.binId, upper: dist.at(-1)!.binId, totalAddSol, ourPosition: m.ourPosition, pool: m.pool, leaderPosition: m.leaderPosition, signature: e.signature });
+        inFlightBuyMints.set(tokenMint, Date.now()); // protect the bought token from the sweep until the reshape add deposits it
+        await publish({ commandId: buyCommandId, eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: buyQuote.outAmount, maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
+        log.info({ our: m.ourPosition, tokenMint, bins: dist.length }, '🪙 two-sided reshape BUY (ExactIn) published — the add follows once the buy lands');
+      } catch (err) {
+        // SAFE: can't acquire the token deficit → the SOL-leg removes already published stand; skip the token add (no
+        // partial two-sided add). The reconcile self-corrects on the next leader event.
+        void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'reshape_token_unbuyable', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, detail: { tokenMint, err: (err as Error).message } });
+      }
     } else if (adds.length > 0) {
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
       const shaped = reanchorShape(0, 0, adds.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))); // delta 0: keep binIds, amounts → BPS
@@ -1062,10 +1097,13 @@ async function main(): Promise<void> {
               alert(log, 'residual sell failed to build/publish', { error: (e as Error).message, pool: ev.pool }),
             );
           } else if (ev?.kind === 'buy' && ev.commandId) {
-            // a two-sided open's token BUY just landed → build+publish the open now (token + ATA present)
-            await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) =>
-              alert(log, 'two-sided open failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }),
-            );
+            // a token BUY just landed → build+publish the OPEN (open buy) or the RESHAPE ADD (reshape buy), reading
+            // the actual bought balance. Each helper no-ops if the commandId isn't its pending buy.
+            if (pendingReshapeAdds.has(ev.commandId)) {
+              await publishReshapeAddAfterBuy(ev.commandId).catch((e) => alert(log, 'two-sided reshape add failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }));
+            } else {
+              await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) => alert(log, 'two-sided open failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }));
+            }
           } else if (ev?.kind === 'open' && ev.commandId && pendingToken2022Deposits.has(ev.commandId)) {
             // a Token-2022 open's empty position (TX1) just CONFIRMED → build+publish the deposit (TX2). (Classic
             // 1-tx opens also emit kind 'open' but are not in this map → ignored here.)
