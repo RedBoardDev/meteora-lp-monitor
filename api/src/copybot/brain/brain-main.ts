@@ -80,6 +80,10 @@ const RUG_SL_RETAIN_MS = 180_000; // keep ≥ any sane windowSeconds so the dete
 // poll won't re-cover it → no other backstop). The normal case reads on the 1st try → zero added latency.
 const OPEN_SHAPE_READ_RETRIES = 6;
 const OPEN_SHAPE_READ_DELAY_MS = 1_000;
+// When the tx decode says an open is TWO-SIDED, wait longer for BOTH legs' bin arrays to index (RPC lag can be
+// seconds under load) — fidelity demands the full shape, and a half (one-sided) copy is forbidden. A ceiling: real
+// two-sided positions index well within this; production (RPC not shared) settles in ~1-2s.
+const TWO_SIDED_SHAPE_MAX_READS = 18;
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
@@ -253,13 +257,14 @@ async function main(): Promise<void> {
   async function readStableShape(poolPk: PublicKey, owner: PublicKey, position: string, pair: Awaited<ReturnType<typeof createDlmmPair>>, expectBothLegs = false) {
     let last: Awaited<ReturnType<typeof readLeaderPositionShape>> = null;
     let lastTotal = -1n;
-    for (let r = 0; r <= OPEN_SHAPE_READ_RETRIES; r++) {
+    const maxReads = expectBothLegs ? TWO_SIDED_SHAPE_MAX_READS : OPEN_SHAPE_READ_RETRIES;
+    for (let r = 0; r <= maxReads; r++) {
       if (r > 0) await sleep(OPEN_SHAPE_READ_DELAY_MS);
       const shape = await readLeaderPositionShape(conn, poolPk, owner, position, pair);
       if (!shape) continue; // not readable yet → retry
       if (shape.perBin.some((b) => b.x > 0n) && shape.perBin.some((b) => b.y > 0n)) return shape; // both legs indexed
       // The tx decode says this is two-sided but a leg's bin array isn't indexed yet → DON'T accept the partial
-      // (single-leg) shape; keep reading until the missing leg appears (or retries exhausted → best-effort).
+      // (single-leg) shape; keep reading until the missing leg appears.
       if (expectBothLegs) {
         last = shape;
         continue;
@@ -269,7 +274,9 @@ async function main(): Promise<void> {
       last = shape;
       lastTotal = total;
     }
-    return last;
+    // Expected two-sided but never saw both legs → return null (NOT a half/single-leg shape): handleOpen then SKIPS
+    // the open rather than copying a forbidden one-sided half of a two-sided leader (both-or-nothing).
+    return expectBothLegs ? null : last;
   }
 
   async function handleOpen(e: DetectedEvent): Promise<void> {

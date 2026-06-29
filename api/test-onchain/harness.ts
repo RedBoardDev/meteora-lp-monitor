@@ -212,7 +212,7 @@ export class Harness {
           .catch(() => false);
         if (funded) return pk;
       }
-      await sleep(1500);
+      await sleep(2500); // gentle: the funded-check does a heavy SDK read — don't starve the bot's RPC under load
     }
     throw new Error(`timeout: bot did not copy/land a FUNDED open within ${timeoutMs}ms`);
   }

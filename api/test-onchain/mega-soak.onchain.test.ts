@@ -131,7 +131,15 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
         copy = await h.waitForCopy(pool, OPEN_FUNDED_TIMEOUT_MS); // waits for a FUNDED position
         await sleep(REANCHOR_SETTLE_MS);
 
-        const f = await h.fidelity(pool, leaderPos, copy);
+        // A single fidelity read can be PARTIAL under RPC load (a bin still indexing → under-reported ratio / a
+        // token leg read as 0). Re-confirm a suspicious reading after a settle before flagging — a real miss persists,
+        // a transient partial read clears. (The strict, contention-free fidelity SLA lives in the dedicated tests.)
+        let f = await h.fidelity(pool, leaderPos, copy);
+        const suspicious = (g: typeof f): boolean => !(g.totalRatio > TOTAL_RATIO_MIN && g.totalRatio < TOTAL_RATIO_MAX) || (s.side === 'two' && !(g.tokenLegRatio > 0));
+        if (suspicious(f)) {
+          await sleep(REANCHOR_SETTLE_MS * 2);
+          f = await h.fidelity(pool, leaderPos, copy);
+        }
         if (typeof f.totalRatio !== 'number' || Number.isNaN(f.totalRatio)) problems.push('fidelity read returned no totalRatio');
         else if (!(f.totalRatio > TOTAL_RATIO_MIN && f.totalRatio < TOTAL_RATIO_MAX)) problems.push(`totalRatio ${f.totalRatio.toFixed(3)} off-band`);
         // Two-sided ⇒ the token leg MUST be replicated (proves the buy + deposit landed; a one-sided copy = tokenLegRatio 0).
@@ -145,17 +153,25 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
         // ── lifecycle-specific middle step ───────────────────────────────────────────────────────────────────
         if (s.lifecycle === 'grow') {
           await h.leaderAdd({ pool, twosided: s.side === 'two', sol: ADD_SOL, token: 2_000_000 });
-          const grew = await pollUntil(async () => {
-            const g = await h.fidelity(pool, leaderPos, copy!).catch(() => null);
-            return !!g && g.totalCopySol > f.totalCopySol * 1.1; // copy grew ≥10% (clearly above arb noise)
-          }, RESIZE_SETTLE_TIMEOUT_MS);
+          const grew = await pollUntil(
+            async () => {
+              const g = await h.fidelity(pool, leaderPos, copy!).catch(() => null);
+              return !!g && g.totalCopySol > f.totalCopySol * 1.1; // copy grew ≥10% (clearly above arb noise)
+            },
+            RESIZE_SETTLE_TIMEOUT_MS,
+            5000, // gentle poll (heavy SDK read) — RPC headroom for the bot's resync
+          );
           if (!grew) problems.push('copy did not grow after the leader add (reshape-grow not mirrored)');
         } else if (s.lifecycle === 'shrink') {
           await h.leaderRemove(pool, REMOVE_BPS);
-          const shrank = await pollUntil(async () => {
-            const g = await h.fidelity(pool, leaderPos, copy!).catch(() => null);
-            return !!g && g.totalCopySol < f.totalCopySol * 0.85; // copy shrank ≥15%
-          }, RESIZE_SETTLE_TIMEOUT_MS);
+          const shrank = await pollUntil(
+            async () => {
+              const g = await h.fidelity(pool, leaderPos, copy!).catch(() => null);
+              return !!g && g.totalCopySol < f.totalCopySol * 0.85; // copy shrank ≥15%
+            },
+            RESIZE_SETTLE_TIMEOUT_MS,
+            5000, // gentle poll (heavy SDK read)
+          );
           if (!shrank) problems.push('copy did not shrink after the leader remove (reshape-shrink not mirrored)');
         } else if (s.lifecycle === 'partial-remove') {
           await h.leaderRemove(pool, REMOVE_BPS, undefined, undefined); // proportional sub-range remove
