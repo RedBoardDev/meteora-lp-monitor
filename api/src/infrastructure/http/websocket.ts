@@ -109,6 +109,10 @@ export function registerWebSocket(
     // of the SameSite cookie that gates the ws-ticket). Native clients send no Origin → allowed.
     const origin = req.headers.origin;
     if (typeof origin === 'string' && !allowedOrigins.includes(origin)) {
+      app.log.warn(
+        { origin, allowedOrigins },
+        'live WS upgrade rejected: origin not allow-listed (set WEB_ORIGINS)',
+      );
       socket.close(1008, 'forbidden origin');
       return;
     }

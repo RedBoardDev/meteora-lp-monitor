@@ -2,6 +2,7 @@ import { SOL_MINT, USDC_MINT, USDT_MINT } from '@binsight/shared';
 import type { Logger } from 'pino';
 import type { TokenMeta, TokenMetadataGateway } from '@/domain/ports';
 import { singleFlight, TokenBucket, TtlCache } from '@/util/cache';
+import type { CreditMeter } from './credit-meter';
 
 const DAS_BATCH = 1000; // getAssetBatch id cap
 const META_TTL_MS = 24 * 60 * 60 * 1000; // metadata is ~immutable → cache a full day
@@ -29,9 +30,11 @@ interface DasAsset {
 /** Fetches one batch of mints → mint→meta (only mints that actually carry a symbol). Throws on transport error. */
 export type DasTransport = (mints: string[]) => Promise<Map<string, TokenMeta>>;
 
-function heliusTransport(httpUrl: string, bucket: TokenBucket): DasTransport {
+function heliusTransport(httpUrl: string, bucket: TokenBucket, meter?: CreditMeter): DasTransport {
   return async (mints) => {
     await bucket.acquire();
+    // 10 credits per DAS getAssetBatch request (Helius credit model), attributed to the metadata path.
+    meter?.record('das', { codePath: 'metadata' });
     const res = await fetch(httpUrl, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -71,9 +74,12 @@ export class HeliusTokenMetadataGateway implements TokenMetadataGateway {
     private readonly logger: Logger,
     dasRps = 2,
     transport?: DasTransport,
+    // Shared credit meter (optional). Threaded into the default transport so DAS spend is metered; an
+    // injected test transport (no real fetch) needn't carry it.
+    meter?: CreditMeter,
   ) {
     const rps = Math.max(1, dasRps);
-    this.transport = transport ?? heliusTransport(httpUrl, new TokenBucket(rps, rps));
+    this.transport = transport ?? heliusTransport(httpUrl, new TokenBucket(rps, rps), meter);
   }
 
   async resolve(mints: string[]): Promise<Map<string, TokenMeta>> {

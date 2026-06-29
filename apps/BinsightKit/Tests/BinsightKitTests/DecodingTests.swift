@@ -54,5 +54,49 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(signed(-0.5), "-0.5000")
         XCTAssertEqual(pct2(-3.14159), "-3.14%")
         XCTAssertEqual(pctOf(0, 0), "—")
+        // 2-dp size formatter used by the closed-row resting summary.
+        XCTAssertEqual(abs2(2.4131), "2.41")
+        XCTAssertEqual(abs2(-2.4181), "2.42")
+    }
+
+    // WHY: the panel keeps relative ages fresh by feeding `ageString` a clock from a periodic timeline.
+    // A fixed `now` proves the output is driven by the injected clock (not the wall clock) and that the
+    // minute/hour/day bucketing is correct — a revert to an internal `Date()` would fail these.
+    func testAgeStringHonorsInjectedClock() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let msAgo: (Double) -> Double = { (1_000_000 - $0) * 1000 } // epoch-ms `secs` before `now`
+        XCTAssertEqual(ageString(msAgo(300), now: now), "5m")     // 5 min  → minutes bucket
+        XCTAssertEqual(ageString(msAgo(5400), now: now), "1h")    // 90 min → hours bucket (floored)
+        XCTAssertEqual(ageString(msAgo(172_800), now: now), "2d") // 2 days → days bucket
+        XCTAssertEqual(ageString(nil, now: now), "—")
+        XCTAssertEqual(ageString(0, now: now), "—")
+    }
+
+    // WHY: the "open in Binsight" quick-link must target the WEB origin (api. host prefix dropped), not
+    // the API origin; a non-standard host (localhost dev API) falls back to the live production site.
+    func testWebURLDerivation() {
+        XCTAssertEqual(Config.webURL(fromAPI: "https://api.binsight.thomasott.fr"), "https://binsight.thomasott.fr")
+        XCTAssertEqual(Config.webURL(fromAPI: "https://api.staging.example.com"), "https://staging.example.com")
+        XCTAssertEqual(Config.webURL(fromAPI: "http://localhost:8787"), Config.prodWebURL)
+        XCTAssertEqual(Config.webURL(fromAPI: "not a url"), Config.prodWebURL)
+    }
+
+    // WHY: the closed-row shows a strategy badge; the model must decode the wire's `strategy` and also
+    // tolerate its absence (historical closes the server never observed open carry no strategy → nil).
+    func testClosedPositionDecodesStrategy() throws {
+        let withStrategy = """
+        {"positionAddress":"P","wallet":"W","tokenX":"BONK","tokenY":"SOL","tokenXMint":"M",
+         "pnlSol":0.5,"pnlPctSol":1.2,"feesSol":0.1,"depositSol":2.41,"closedAt":123,"strategy":"Curve"}
+        """
+        let c = try JSONDecoder().decode(ClosedPosition.self, from: Data(withStrategy.utf8))
+        XCTAssertEqual(c.strategy, .curve)
+        XCTAssertEqual(c.depositSol, 2.41)
+
+        let noStrategy = """
+        {"positionAddress":"P","wallet":"W","tokenX":"BONK","tokenY":"SOL","tokenXMint":"M",
+         "pnlSol":0.5,"pnlPctSol":1.2,"feesSol":0.1,"depositSol":2.41,"closedAt":123}
+        """
+        let c2 = try JSONDecoder().decode(ClosedPosition.self, from: Data(noStrategy.utf8))
+        XCTAssertNil(c2.strategy)
     }
 }

@@ -358,17 +358,17 @@ export class PostgresPositionRepository implements PositionRepository {
   }
 
   async addressesMissingStrategy(limit: number): Promise<string[]> {
-    // Any position still missing its strategy — OPEN ones first (they drive the live card/badge,
-    // where the burst one-shot resolution often loses to RPC rate-limits), then the closed-history
-    // tail. Paced resolution in StrategyService.backfill succeeds where the live get() didn't stick.
+    // OPEN positions missing their strategy ONLY. Strategy is resolved from the position's open tx
+    // (an expensive getParsedTransaction), then persisted and travels with the position into closed
+    // history — so resolving it WHILE the position is open is the cheap, correct moment. We deliberately
+    // do NOT bulk-backfill the closed-history tail: a wallet can hold tens of thousands of closed
+    // positions, and re-paging each one's open tx burned millions of getParsedTransaction credits just
+    // to label already-closed rows. A historical closed position simply shows no strategy badge.
     const rows = await this.db
       .select({ a: positionsTable.positionAddress })
       .from(positionsTable)
-      .where(isNull(positionsTable.strategy))
-      .orderBy(
-        sql`case when ${positionsTable.status} = 'open' then 0 else 1 end`,
-        desc(positionsTable.openedAt),
-      )
+      .where(and(isNull(positionsTable.strategy), eq(positionsTable.status, 'open')))
+      .orderBy(desc(positionsTable.openedAt))
       .limit(limit);
     return rows.map((r) => r.a);
   }

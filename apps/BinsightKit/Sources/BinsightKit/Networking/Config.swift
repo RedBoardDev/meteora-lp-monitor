@@ -8,10 +8,6 @@ import Foundation
 public enum Config {
     public static let appGroup = "group.com.binsight"
 
-    /// Public web app. The menu-bar "open on the web" action deep-links here: Overview → the root,
-    /// a wallet scope → `?address=<wallet>` (the web reads `?address` to restore that wallet's scope).
-    public static let webURL = "https://binsight.thomasott.fr"
-
     static var defaults: UserDefaults { .standard }
 
     /// Non-empty Info.plist string baked at build time (see the Makefile's MLPM_* settings).
@@ -25,6 +21,22 @@ public enum Config {
     public static var apiURL: String {
         get { defaults.string(forKey: "apiURL") ?? seed("MLPMApiURL") ?? "http://localhost:8787" }
         set { defaults.set(newValue, forKey: "apiURL") }
+    }
+
+    /// Production web origin — the live public site the panel's "open in browser" quick-link targets.
+    public static let prodWebURL = "https://binsight.thomasott.fr"
+
+    /// The web app origin for deep-links, mirroring the configured API origin.
+    public static var webURL: String { webURL(fromAPI: apiURL) }
+
+    /// Pure derivation (testable): the web origin is the API origin minus the `api.` host prefix
+    /// (api.binsight.thomasott.fr → binsight.thomasott.fr). Non-`api.` hosts (e.g. a localhost dev API)
+    /// fall back to the production web origin, since the quick-link always points at the live app.
+    static func webURL(fromAPI apiURL: String) -> String {
+        if let u = URL(string: apiURL), let scheme = u.scheme, let host = u.host, host.hasPrefix("api.") {
+            return "\(scheme)://\(host.dropFirst(4))"
+        }
+        return prodWebURL
     }
 
     /// Master switch: when off, the app shows no native notifications (default on).

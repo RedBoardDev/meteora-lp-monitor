@@ -28,6 +28,16 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 
+  /** Master switch for the on-chain realized-PnL pass (the chained-FIFO `market_pnl_sol` writer). It
+   *  needs the wallet's FULL buys/sells history, fetched from Helius and NOT persisted, so on a cold
+   *  in-memory cache (every restart) it re-pages the entire SWAP history — prohibitively expensive on a
+   *  very active wallet and unscalable to many wallets. Set 'false' to disable: closed positions keep
+   *  their already-persisted `market_pnl_sol`, new closes fall back to the pool mark, RPC cost ≈ 0. */
+  REALIZED_PNL_ENABLED: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
+
   SOLANA_WS_URL: z.string().url(),
   SOLANA_HTTP_URL: z.string().url().optional(),
 

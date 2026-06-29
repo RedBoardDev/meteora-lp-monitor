@@ -12,6 +12,7 @@ import { PositionSync } from './application/position-sync-service';
 import { RealizedPnlEngine } from './application/realized-pnl';
 import { ResidualBackfill } from './application/residual-backfill';
 import { flowFromHistory } from './application/residual-realized';
+import { SwapFlowIngest } from './application/swap-flow-ingest';
 import { WalletFlowIngest } from './application/wallet-flow-ingest';
 import { WalletPnlService } from './application/wallet-pnl-service';
 import type { AppConfig } from './config/env';
@@ -31,15 +32,24 @@ import { DlmmLegRepository } from './infrastructure/persistence/dlmm-leg-reposit
 import { NetworthSnapshotRepository } from './infrastructure/persistence/networth-snapshot-repository';
 import { PostgresPositionRepository } from './infrastructure/persistence/position-repository';
 import { PushRepository } from './infrastructure/persistence/push-repository';
+import { RpcCreditLedgerRepository } from './infrastructure/persistence/rpc-credit-ledger-repository';
+import { SwapFlowRepository } from './infrastructure/persistence/swap-flow-repository';
 import { WalletFlowRepository } from './infrastructure/persistence/wallet-flow-repository';
+import { WalletStreamCursorRepository } from './infrastructure/persistence/wallet-stream-cursor-repository';
+import { CreditMeter } from './infrastructure/solana/credit-meter';
 import { DlmmIngest } from './infrastructure/solana/dlmm/dlmm-ingest';
 import { OnchainDlmmGateway } from './infrastructure/solana/dlmm/onchain-gateway';
 import { OnchainPoolMetaReader } from './infrastructure/solana/dlmm/pool-meta';
 import { StrategyResolver } from './infrastructure/solana/dlmm/strategy-resolver';
 import { HeliusEnhancedGateway } from './infrastructure/solana/helius-enhanced';
 import { HeliusSubscriber } from './infrastructure/solana/helius-subscriber';
+import { createHeliusWsTransportFactory } from './infrastructure/solana/helius-ws-transport';
 import { SolanaRpcRateLimiter } from './infrastructure/solana/rpc-rate-limiter';
 import { HeliusTokenMetadataGateway } from './infrastructure/solana/token-metadata-gateway';
+import { TransactionStream } from './infrastructure/solana/transaction-stream';
+
+/** Cadence to flush the CreditMeter's since-last-drain deltas into the rpc_credit_daily rollup. */
+const CREDIT_FLUSH_INTERVAL_MS = 60_000;
 
 export interface App {
   start(): Promise<void>;
@@ -64,13 +74,27 @@ export function compose(config: AppConfig): App {
 
   const bus = new EventBus();
   const health = new HealthMonitor();
+  // ONE shared credit meter wired into every billable chokepoint (both RPC lanes, the Enhanced REST
+  // gateway, the DAS metadata gateway) — the single in-memory ledger behind /debug/rpc.
+  const meter = new CreditMeter();
   const gateway = new MeteoraGateway(logger);
   // Resource-keyed (per-mint) price cache + single-flight + token bucket: N wallets/snapshots
   // needing the same token in one window collapse to ONE Jupiter call (cross-user dedup).
   const prices = new CachedPriceGateway(
     new JupiterPriceGateway(logger, config.JUPITER_PRICE_URL, health),
   );
+  // LEGACY 'meteora' WS backbone (logsSubscribe). Built unconditionally but only started/watched when
+  // POSITIONS_SOURCE !== 'onchain' — it never opens a socket until the engine calls subscriber.start().
   const subscriber = new HeliusSubscriber(config.SOLANA_WS_URL, logger);
+  // ON-CHAIN WS backbone: ONE Helius transactionSubscribe multiplexing every wallet, the trigger for the
+  // cursor-based delta ingest (replacing the deleted BACKSTOP_INGEST_MS sweep). The transport factory opens
+  // the real socket ONLY when the engine calls stream.start() in onchain mode — never at composition time —
+  // and the durable wallet_stream_cursor backs the no-miss reconnect/replay (Step 5a machinery).
+  const stream = new TransactionStream({
+    transportFactory: createHeliusWsTransportFactory(config.SOLANA_WS_URL),
+    cursors: new WalletStreamCursorRepository(db),
+    logger,
+  });
   // One shared rate limiter gates EVERY RPC call on this Connection (overall + per-method sub-limits),
   // so the live engine and the heavy history backfill stay within the provider's plan. The config
   // values are the PLAN limits; we target a fraction of them so the provider's sliding-window
@@ -79,12 +103,16 @@ export function compose(config: AppConfig): App {
   const liveFrac = config.SOLANA_LIVE_FRACTION;
   // LIVE lane — the snapshot/valuation path. Reserved share of the overall budget so a history backfill
   // on the other lane can never starve live valuation.
-  const rpcLimiter = new SolanaRpcRateLimiter({
-    rps: config.SOLANA_RPS * RPS_SAFETY * liveFrac,
-    gpaRps: config.SOLANA_GPA_RPS * RPS_SAFETY,
-    dasRps: config.SOLANA_DAS_RPS * RPS_SAFETY,
-    sendRps: config.SOLANA_SEND_RPS * RPS_SAFETY,
-  });
+  const rpcLimiter = new SolanaRpcRateLimiter(
+    {
+      rps: config.SOLANA_RPS * RPS_SAFETY * liveFrac,
+      gpaRps: config.SOLANA_GPA_RPS * RPS_SAFETY,
+      dasRps: config.SOLANA_DAS_RPS * RPS_SAFETY,
+      sendRps: config.SOLANA_SEND_RPS * RPS_SAFETY,
+    },
+    undefined,
+    meter,
+  );
   const connection = new Connection(config.solanaHttpUrl, {
     commitment: 'confirmed',
     fetchMiddleware: rpcLimiter.middleware(),
@@ -97,12 +125,16 @@ export function compose(config: AppConfig): App {
   // method sub-limits are pinned to its overall rate (they never bind); the live lane keeps the FULL
   // per-method plan limits (it's the sole gpa user; das is the token-metadata gateway's own budget).
   const backfillRps = config.SOLANA_RPS * RPS_SAFETY * (1 - liveFrac);
-  const backfillLimiter = new SolanaRpcRateLimiter({
-    rps: backfillRps,
-    gpaRps: backfillRps,
-    dasRps: backfillRps,
-    sendRps: backfillRps,
-  });
+  const backfillLimiter = new SolanaRpcRateLimiter(
+    {
+      rps: backfillRps,
+      gpaRps: backfillRps,
+      dasRps: backfillRps,
+      sendRps: backfillRps,
+    },
+    undefined,
+    meter,
+  );
   const backfillConnection = new Connection(config.solanaHttpUrl, {
     commitment: 'confirmed',
     fetchMiddleware: backfillLimiter.middleware(),
@@ -123,16 +155,29 @@ export function compose(config: AppConfig): App {
     config.solanaHttpUrl,
     logger,
     config.SOLANA_DAS_RPS * RPS_SAFETY,
+    undefined,
+    meter,
   );
   const positionSync = new PositionSync(dlmmPositionPnl, tokenMetadata, positionRepo, logger);
   const strategy = new StrategyService(new StrategyResolver(connection), positionRepo, logger);
-  const enhanced = new HeliusEnhancedGateway(config.solanaHttpUrl, logger);
+  const enhanced = new HeliusEnhancedGateway(
+    config.solanaHttpUrl,
+    logger,
+    undefined,
+    undefined,
+    meter,
+  );
   // Free OHLCV candle source (no key) for the position price chart.
   const gecko = new GeckoTerminalGateway(logger);
   // Persisted wallet cash-flow: ingested once at backfill + topped up on the cadence, so the wallet
   // PnL curve is served by SQL instead of re-paging the chain per request.
   const walletFlowRepo = new WalletFlowRepository(db);
   const walletFlowIngest = new WalletFlowIngest(enhanced, walletFlowRepo, logger);
+  // Persisted decoded SWAP legs (realized-PnL FIFO inputs): seeded once at backfill + topped up on the
+  // SAME cadence as the wallet cash-flow, so a restart/close reads them from the DB instead of re-paging
+  // the whole Enhanced SWAP history (the incident this kills).
+  const swapFlowRepo = new SwapFlowRepository(db);
+  const swapFlowIngest = new SwapFlowIngest(enhanced, swapFlowRepo, logger);
   // Exact per-position SOL leg + net residual from the decoded DLMM event history (LPAgent-grade:
   // per-position amounts, not the wallet's aggregate native flow which over-counts multi-position opens).
   const positionFlow = async (address: string) => {
@@ -140,15 +185,16 @@ export function compose(config: AppConfig): App {
     return hist ? flowFromHistory(hist) : null;
   };
   const backfill = new ResidualBackfill(enhanced, positionFlow, positionRepo, bus, logger);
-  // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + Helius buys/sells,
-  // held residual marked via the shared price gateway). Triggered by the engine after a wallet's closed
-  // set changes — the production port of scripts/fifo-cost-basis.ts.
+  // Authoritative on-chain realized market_pnl_sol writer (chained-FIFO over legs + the PERSISTED
+  // swap_flows buys/sells, held residual marked via the shared price gateway). Triggered by the engine
+  // after a wallet's closed set changes — the production port of scripts/fifo-cost-basis.ts. Reading the
+  // persisted swaps (instead of re-paging the Enhanced API) is what makes a restart/close cost ~0 credits;
+  // SwapFlowIngest owns the Enhanced paging now (seed-once + delta).
   const realizedPnl = new RealizedPnlEngine(
     dlmmLegRepo,
     positionRepo,
-    enhanced,
-    prices,
-    (mint) => onchain.decimalsOf(mint),
+    swapFlowRepo,
+    (mints) => onchain.decimalsOfMany(mints),
     logger,
   );
   // Wallet PnL curve — the TRUE realized SOL over time from on-chain cash-flow (captures rug/slippage
@@ -166,6 +212,7 @@ export function compose(config: AppConfig): App {
   );
   // Browser/PWA Web Push, routed per-wallet to subscribers. Fans out alongside Bark via a composite.
   const pushRepo = new PushRepository(db);
+  const creditLedgerRepo = new RpcCreditLedgerRepository(db);
   const webPush = new WebPushChannel(
     pushRepo,
     {
@@ -180,6 +227,7 @@ export function compose(config: AppConfig): App {
     gateway,
     prices,
     subscriber,
+    stream,
     onchain,
     health,
     strategy,
@@ -192,6 +240,7 @@ export function compose(config: AppConfig): App {
     dlmmIngest,
     positionSync,
     walletFlowIngest,
+    swapFlowIngest,
     realizedPnl,
   });
   const notifications = new NotificationManager(bus, configRepo, presence, bark, webPush, logger);
@@ -221,6 +270,8 @@ export function compose(config: AppConfig): App {
         presence,
         pushRepo,
         gecko,
+        meter,
+        creditLedger: creditLedgerRepo,
         vapidPublicKey: config.VAPID_PUBLIC_KEY,
         sendTestPush: (userId) => pushRepo.forUser(userId).then((subs) => webPush.sendTest(subs)),
         openAccess: config.OPEN_ACCESS_MODE,
@@ -230,9 +281,24 @@ export function compose(config: AppConfig): App {
       let statsTimer: ReturnType<typeof setInterval> | undefined;
       const logRpcStats = () => {
         logger.info(
-          { live: rpcLimiter.stats(), backfill: backfillLimiter.stats() },
+          {
+            live: rpcLimiter.stats(),
+            backfill: backfillLimiter.stats(),
+            // Enhanced REST (getEnhancedTransactionsByAddress): billed per request and BYPASSES the
+            // JSON-RPC limiter, so it had no counter — this is the line that exposes the real RPC spend.
+            enhanced: enhanced.stats(),
+            // The unified CREDIT ledger across every chokepoint (totals + by method/codePath/wallet).
+            credits: meter.stats(),
+          },
           'rpc call counts (Helius tier instrumentation)',
         );
+      };
+      // Persist the since-last-drain credit deltas into the rpc_credit_daily rollup, so /debug/rpc keeps
+      // real spend history across restarts (the in-memory meter resets on boot).
+      let flushTimer: ReturnType<typeof setInterval> | undefined;
+      const flushCredits = async () => {
+        const deltas = meter.drainForFlush();
+        if (deltas.length > 0) await creditLedgerRepo.addDeltas(deltas);
       };
 
       // db closes last (after in-flight requests drain in app.close); engine stops first. (Hooks must
@@ -243,6 +309,7 @@ export function compose(config: AppConfig): App {
           async () => engine.stop(),
           async () => {
             if (statsTimer) clearInterval(statsTimer);
+            if (flushTimer) clearInterval(flushTimer);
           },
         ],
       });
@@ -250,7 +317,8 @@ export function compose(config: AppConfig): App {
       logger.info({ port: config.PORT }, 'Binsight API listening');
 
       logRpcStats();
-      statsTimer = setInterval(() => logRpcStats(), 600_000); // every 10 min
+      statsTimer = setInterval(() => logRpcStats(), 60_000); // every 60s (tightened for RPC debugging)
+      flushTimer = setInterval(() => void flushCredits(), CREDIT_FLUSH_INTERVAL_MS);
     },
   };
 }

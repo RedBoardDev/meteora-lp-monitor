@@ -15,6 +15,7 @@ import {
 } from '@solana/web3.js';
 import type { OnchainPositionValue, OnchainWalletSnapshot, SnapshotPlan } from '@/domain/dlmm';
 import type { OnchainDlmmGateway as OnchainDlmmGatewayPort } from '@/domain/ports';
+import { buildGpaV2Params, GPA_V2_PAGE_LIMIT, parseGpaV2Response, type RawRpc } from './gpa-v2';
 import {
   DLMM_PROGRAM_ID,
   decodeLbPair,
@@ -44,7 +45,7 @@ const u64le = (b: Uint8Array, o: number): bigint => {
 };
 
 /**
- * 100%-on-chain DLMM wallet snapshot. Discovers a wallet's positions (getProgramAccounts owner@40),
+ * 100%-on-chain DLMM wallet snapshot. Discovers a wallet's positions (getProgramAccountsV2 owner@40),
  * then values every position + reads native SOL + stable ATAs in ONE pinned getMultipleAccounts pass
  * so the whole total is internally consistent (no two-clock double-counting). Validated byte-exact
  * vs the datapi (see verify.spike.ts / backend-validation-report.md §1).
@@ -56,7 +57,24 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     { hist: PositionHistory; at: number; closed: boolean }
   >();
 
-  constructor(private readonly conn: Connection) {}
+  // Raw JSON-RPC caller for methods web3.js's Connection has no typed helper for (getProgramAccountsV2).
+  // Defaults to the Connection's internal `_rpcRequest`, which routes through the SAME fetch middleware as
+  // every other call — so the rate-limiter + CreditMeter still meter it (method 'getProgramAccountsV2' →
+  // 1 credit). Injectable so the gateway is unit-tested with a spy (no network).
+  private readonly rawRpc: RawRpc;
+
+  constructor(
+    private readonly conn: Connection,
+    rawRpc?: RawRpc,
+  ) {
+    this.rawRpc =
+      rawRpc ??
+      ((method, params) =>
+        (conn as unknown as { _rpcRequest(m: string, a: unknown[]): Promise<unknown> })._rpcRequest(
+          method,
+          params,
+        ));
+  }
 
   deriveAta(owner: PublicKey, mint: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync(
@@ -65,18 +83,37 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     )[0];
   }
 
-  /** getProgramAccounts → just the position pubkeys for this owner (pubkeys only, cheap). */
+  /**
+   * getProgramAccountsV2 → just the position pubkeys for this owner (pubkeys only, cheap). Paginates the
+   * 1-credit V2 method (the legacy getProgramAccounts was 10 credits) over the SAME metered Connection,
+   * with the identical owner-memcmp + position-discriminator filters → byte-identical result set.
+   *
+   * DEFERRED (no-miss): `changedSinceSlot` (incremental discovery) is supported by the builder but NOT
+   * wired here — a delta-only discovery would drop unchanged-but-still-open positions unless merged
+   * against a durable cached set. We do a FULL paginated discovery (gated by the engine's Layer-A so it
+   * only runs on a position-SET change), keeping discovery results identical to the legacy path.
+   */
   private async discover(owner: string): Promise<PublicKey[]> {
     const filters: GetProgramAccountsFilter[] = [
       { memcmp: { offset: 0, bytes: minimalBase58(Uint8Array.from(POSITION_V2_DISC)) } },
       { memcmp: { offset: POSITION_V2_OWNER_OFFSET, bytes: owner } },
     ];
-    const accts = await this.conn.getProgramAccounts(DLMM_PROGRAM_ID, {
-      commitment: 'confirmed',
-      filters,
-      dataSlice: { offset: 0, length: 0 },
-    });
-    return accts.map((a) => a.pubkey);
+    const programId = DLMM_PROGRAM_ID.toBase58();
+    const pubkeys: PublicKey[] = [];
+    let paginationKey: string | null = null;
+    do {
+      const params = buildGpaV2Params(programId, {
+        filters,
+        dataSlice: { offset: 0, length: 0 },
+        commitment: 'confirmed',
+        limit: GPA_V2_PAGE_LIMIT,
+        paginationKey,
+      });
+      const page = parseGpaV2Response(await this.rawRpc('getProgramAccountsV2', params));
+      for (const pk of page.pubkeys) pubkeys.push(new PublicKey(pk));
+      paginationKey = page.paginationKey;
+    } while (paginationKey !== null);
+    return pubkeys;
   }
 
   /** Chunked getMultipleAccounts pinned to one target slot. Returns infos in key order + slot skew. */
@@ -137,6 +174,15 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     return this.decimalsCache.get(mint) ?? 0;
   }
 
+  /** Token decimals for MANY mints in one batched pass (≤100 per getMultipleAccounts, cached). The
+   *  realized-PnL engine needs every traded mint's decimals; fetching them one-by-one cost ~1 RPC per
+   *  mint (~1600 on a cold wallet). This batches them via the shared `decimalsFor` so a cold pass is
+   *  ~ceil(mints/100) calls and a warm one is 0. Missing mints default to 0 (same as `decimalsOf`). */
+  async decimalsOfMany(mints: string[]): Promise<Map<string, number>> {
+    await this.decimalsFor(mints.map((m) => new PublicKey(m)));
+    return new Map(mints.map((m) => [m, this.decimalsCache.get(m) ?? 0]));
+  }
+
   /** Per-bin liquidity distribution of one open position (for the Price-Bin histogram). */
   positionBins(positionAddress: string): Promise<PositionBins | null> {
     return fetchPositionBins(this.conn, (m) => this.decimalsOf(m), positionAddress);
@@ -166,7 +212,7 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
   ): Promise<OnchainWalletSnapshot & { plan: SnapshotPlan }> {
     const owner = new PublicKey(ownerStr);
     // Layer A: reuse a cached discovery plan when the position set/ranges haven't changed (the engine
-    // invalidates it on WS open/close/add/remove), skipping the 10-credit getProgramAccounts AND the
+    // invalidates it on WS open/close/add/remove), skipping the getProgramAccountsV2 discovery AND the
     // round-1 header read. The round-2 valuation below is byte-identical either way.
     const plan = cachedPlan ?? (await this.buildPlan(ownerStr));
     const { positionKeys, lbPairByPos, coverageByPos, lbPairKeys, binArrayKeys, binArrayMeta } =
@@ -281,7 +327,7 @@ export class OnchainDlmmGateway implements OnchainDlmmGatewayPort {
     };
   }
 
-  /** Discovery (getProgramAccounts) + round-1 header read → the cacheable snapshot plan. */
+  /** Discovery (getProgramAccountsV2) + round-1 header read → the cacheable snapshot plan. */
   private async buildPlan(ownerStr: string): Promise<SnapshotPlan> {
     const positionKeys = await this.discover(ownerStr);
     const headers = (await this.fetchAtSlot(positionKeys)).infos;

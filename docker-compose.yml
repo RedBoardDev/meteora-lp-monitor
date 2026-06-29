@@ -15,7 +15,7 @@ services:
     ports:
       - '5435:5432'
     volumes:
-      - meteora-pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U meteora -d meteora']
       interval: 10s
@@ -29,6 +29,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      # The api runs INSIDE compose, so DATABASE_URL must target the `postgres` service on the compose
+      # network — the code default (localhost:5435) is only reachable when the api runs on the host.
+      # Set here (not just .env) so the compose deploy is self-contained. See the header note above.
+      - DATABASE_URL=postgres://meteora:meteora@postgres:5432/meteora
     ports:
       - '8787:8787'
     volumes:
@@ -38,5 +43,5 @@ services:
         condition: service_healthy
 
 volumes:
-  meteora-pgdata:
+  pgdata:
   api-data:

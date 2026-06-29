@@ -17,7 +17,9 @@ import type { GeckoTerminalGateway } from '@/infrastructure/geckoterminal/geckot
 import type { PresenceTracker } from '@/infrastructure/notifications/presence';
 import type { NetworthSnapshotRepository } from '@/infrastructure/persistence/networth-snapshot-repository';
 import type { PushRepository, PushSub } from '@/infrastructure/persistence/push-repository';
+import type { RpcCreditLedgerRepository } from '@/infrastructure/persistence/rpc-credit-ledger-repository';
 import { renderClosedPnlCard } from '@/infrastructure/share-card/pnl-card';
+import type { CreditMeter } from '@/infrastructure/solana/credit-meter';
 import { TtlCache, VersionedCache } from '@/util/cache';
 import { isValidSolanaAddress } from './auth';
 
@@ -25,6 +27,8 @@ import { isValidSolanaAddress } from './auth';
 const MAX_WALLETS_PER_ACCOUNT = 3;
 /** Global ceiling on distinct monitored wallets — protects the shared Meteora/Helius budget. */
 const GLOBAL_WALLET_CAP = 200;
+/** How many recent UTC days of persisted credit spend /debug/rpc returns (the panel's last-7d window). */
+const DEBUG_RPC_HISTORY_DAYS = 7;
 
 export type RouteDeps = {
   bus: EventBus;
@@ -41,6 +45,10 @@ export type RouteDeps = {
   pushRepo: PushRepository;
   /** Free OHLCV candle source for the position price chart (GeckoTerminal). */
   gecko: GeckoTerminalGateway;
+  /** Shared RPC credit ledger — drives the owner-only /debug/rpc telemetry + the kill-switch view. */
+  meter: CreditMeter;
+  /** Durable RPC-credit rollup — backs the persisted last-7d spend on /debug/rpc (survives restarts). */
+  creditLedger: RpcCreditLedgerRepository;
   /** VAPID public key handed to the browser so it can subscribe ('' when push is disabled). */
   vapidPublicKey: string;
   /** Send a test push to an account's own subscriptions; returns how many were targeted. */
@@ -70,6 +78,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
     presence,
     pushRepo,
     gecko,
+    meter,
+    creditLedger,
     vapidPublicKey,
     sendTestPush,
     openAccess,
@@ -135,6 +145,18 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps): void {
       kind,
       activeDevices,
       willRoute: activeDevices.length > 0 ? 'native' : 'bark',
+    };
+  });
+
+  // RPC credit telemetry: the in-memory ledger (totals + by method/codePath/wallet + live tail) and the
+  // pure structural anomaly signals (owner only).
+  app.get('/debug/rpc', async (req, reply) => {
+    if (!requireOwner(req, reply)) return;
+    return {
+      stats: meter.stats(),
+      anomalies: meter.anomalies(),
+      // Durable spend history (per day/method/wallet/codePath) from the rollup — survives restarts.
+      last7d: await creditLedger.since(DEBUG_RPC_HISTORY_DAYS),
     };
   });
 
