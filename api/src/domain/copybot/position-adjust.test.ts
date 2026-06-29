@@ -103,6 +103,30 @@ describe('reshapeToCalls — per-offset ops → SDK calls at our lower-bin base 
     expect(calls.adds).toEqual([]);
   });
 
+  it('near-uniform bps (per-bin rounding jitter) → coalesced into ONE range (fixes the per-bin-tx explosion on wide memecoin positions)', () => {
+    // A uniform ~50% leader trim: planReshape rounds (-delta/cur)×10000 per bin → 4999/5000/5001 jitter. Strict
+    // equality used to emit ONE removeLiquidity PER BIN (≈8 txs on a 17-bin bidask position). They must now merge.
+    const calls = reshapeToCalls([rm(0, 5001), rm(1, 4999), rm(2, 5000), rm(3, 5001)], BASE);
+    expect(calls.removes).toEqual([{ fromBin: 100, toBin: 103, bps: 5000 }]); // midpoint of [4999,5001] = 5000
+  });
+
+  it('bps differing BEYOND the tolerance → still split (a genuine selective trim is preserved, not blurred away)', () => {
+    const calls = reshapeToCalls([rm(0, 5000), rm(1, 5025)], BASE); // 25 bps apart > 20 tol
+    expect(calls.removes).toEqual([
+      { fromBin: 100, toBin: 100, bps: 5000 },
+      { fromBin: 101, toBin: 101, bps: 5025 },
+    ]);
+  });
+
+  it('a slowly-drifting gradient splits when the RUN spread (not the step) exceeds the tolerance', () => {
+    // 5000→5015 merges (spread 15 ≤ 20); adding 5030 would make the run span 30 > 20 → it starts a new range.
+    const calls = reshapeToCalls([rm(0, 5000), rm(1, 5015), rm(2, 5030)], BASE);
+    expect(calls.removes).toEqual([
+      { fromBin: 100, toBin: 101, bps: 5008 }, // midpoint of [5000,5015] = 5007.5 → 5008
+      { fromBin: 102, toBin: 102, bps: 5030 },
+    ]);
+  });
+
   it('selective remove (non-contiguous) → separate ranges', () => {
     const calls = reshapeToCalls([rm(0, 10000), rm(3, 10000)], BASE);
     expect(calls.removes).toEqual([

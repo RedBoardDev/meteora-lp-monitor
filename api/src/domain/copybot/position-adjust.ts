@@ -8,6 +8,13 @@
 
 const BPS_TOTAL = 10_000;
 const LAMPORTS_PER_SOL = 1_000_000_000;
+// Contiguous remove bins whose bps differ by ≤ this are treated as ONE uniform trim. planReshape derives each bin's
+// bps from `Math.round((-delta/cur)×10000)`; on a UNIFORM proportional leader remove the bps is "the same" in intent
+// but per-bin `cur` rounding (open by-weight + fees + price drift) jitters it a few units. With STRICT equality that
+// split one uniform trim into one `removeLiquidity` tx PER BIN on wide positions (memecoin bidask ≈ 17 bins → ~8 txs),
+// burning needless fees + on-chain noise. Coalescing within this tolerance restores ONE tx per uniform trim; a
+// GENUINELY selective leader trim (bps differing by more) still splits. Bounded spread ⇒ per-bin shape error ≤ tol/2.
+const REMOVE_BPS_COALESCE_TOL = 20; // 0.20% — well inside the copy's fidelity band, above mere rounding jitter
 
 export const lamportsToSol = (lamports: bigint): number => Number(lamports) / LAMPORTS_PER_SOL;
 
@@ -67,10 +74,21 @@ export function reshapeToCalls(ops: ReshapeOp[], baseBin: number): ReshapeCalls 
     .sort((a, b) => a.binId - b.binId);
 
   const removes: ReshapeCalls['removes'] = [];
+  let runMin = 0;
+  let runMax = 0; // span of the current run's per-bin bps → keep its spread ≤ tolerance so the merged bps stays faithful
   for (const r of removeBins) {
     const last = removes.at(-1);
-    if (last && last.bps === r.bps && r.binId === last.toBin + 1) last.toBin = r.binId; // extend the contiguous run
-    else removes.push({ fromBin: r.binId, toBin: r.binId, bps: r.bps });
+    const contiguous = last && r.binId === last.toBin + 1;
+    if (contiguous && Math.max(runMax, r.bps) - Math.min(runMin, r.bps) <= REMOVE_BPS_COALESCE_TOL) {
+      last.toBin = r.binId; // extend the run; merged bps = midpoint of its span (unbiased, |per-bin error| ≤ spread/2)
+      runMin = Math.min(runMin, r.bps);
+      runMax = Math.max(runMax, r.bps);
+      last.bps = Math.round((runMin + runMax) / 2);
+    } else {
+      removes.push({ fromBin: r.binId, toBin: r.binId, bps: r.bps });
+      runMin = r.bps;
+      runMax = r.bps;
+    }
   }
   return { removes, adds };
 }
