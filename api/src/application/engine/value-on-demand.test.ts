@@ -205,10 +205,12 @@ describe('Step 6: value-on-demand', () => {
     h.engine.stop();
   });
 
-  it('the shared price tick re-marks a VIEWED open wallet from cached data — NO gateway read', async () => {
-    // WHY: between exact reads, a viewed wallet's value/range must stay live off the Jupiter price ALONE
-    // (zero RPC). The gateway (getMultipleAccounts) must NOT be touched on the clock; the emitted mark
-    // must reflect the FRESH price and be NON-'fresh' so it is display-only (never persisted).
+  it('a viewed open wallet per 10s tick: ONE aligned exact fee/size read, then a fresh-price re-mark', async () => {
+    // WHY: ccf00d8 aligned the open-position EXACT read (fees/size — the `doSnapshot` gate) to the 10s
+    // shared price-mark cadence, so a VIEWED open wallet costs exactly ONE gateway read per 10s tick
+    // (bounded to viewed wallets — the idle test proves un-viewed ones still cost 0 recurring RPC). The
+    // zero-RPC price-mark then re-prices off the Jupiter price and emits LAST as the display-only,
+    // NON-'fresh' approximate state, so the NetworthRecorder never persists it.
     const priceRef = { v: 0.001 };
     const h = makeEngine({ withOpen: true, priceRef });
     await h.engine.start();
@@ -221,16 +223,16 @@ describe('Step 6: value-on-demand', () => {
     expect(h.states.at(-1)!.freshness).toBe('fresh'); // exact read persists
     expect(h.states.at(-1)!.totals.walletTotalSol).toBeCloseTo(0.001, 9);
 
-    // Price moves; advance one shared price tick. The mark must re-price WITHOUT a new snapshotWallet.
+    // Price moves; advance one 10s tick → the aligned exact fee/size read fires once, then the price-mark.
     priceRef.v = 0.002;
     h.states.length = 0;
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(h.snapshotWallet).toHaveBeenCalledTimes(exactCalls); // gateway NOT read on the price tick
+    expect(h.snapshotWallet).toHaveBeenCalledTimes(exactCalls + 1); // exactly ONE aligned exact read per tick
     expect(h.getPricesSol).toHaveBeenCalled(); // the free Jupiter fetch DID run
     const marked = h.states.at(-1)!;
     expect(marked.totals.walletTotalSol).toBeCloseTo(0.002, 9); // re-priced at the fresh price
-    expect(marked.freshness).not.toBe('fresh'); // approximate ⇒ NetworthRecorder skips it (not persisted)
+    expect(marked.freshness).not.toBe('fresh'); // price-mark emits LAST ⇒ display-only, not persisted
     h.engine.stop();
   });
 });
