@@ -36,6 +36,11 @@ const FAIL_LOG_TAIL_LINES = 600; // brain/coffre log lines archived per FAILED s
 // ── tunables (named; no magic numbers) ───────────────────────────────────────────────────────────────────────
 const CLEAN_START_TIMEOUT_MS = 30_000; // settle any lingering position from a prior cycle to 0 before this one
 const OPEN_FUNDED_TIMEOUT_MS = 70_000; // a Token-2022 two-sided open lands in 3 tx (buy → create → deposit) → generous
+// 'multi' opens a 2nd position (often coinSOL Token-2022, a 3-tx open) WHILE the 1st is still live → the bot's
+// landing queue + the bench's shared RPC double-load push the 2nd copy past the single-open budget. The true
+// contention-free latency SLA is gated by latency.onchain.test.ts; here we only need to confirm BOTH land+close.
+const MULTI_OPEN_TIMEOUT_MS = 120_000;
+const CORROBORATE_LAND_TIMEOUT_MS = 30_000; // after the fidelity poll gives up, how long to wait for the reshape add/remove to LAND on-chain (coffre) before ruling a TRUE miss — absorbs slow lands under RPC contention
 const RESIZE_SETTLE_TIMEOUT_MS = 45_000; // time for the bot to mirror a leader reshape (add/remove) and settle
 const CLOSE_LAND_TIMEOUT_MS = 25_000; // leader close to confirm on-chain (poll + one retry)
 const COPY_CLOSED_TIMEOUT_MS = 70_000; // the bot's copy close to confirm gone (no-miss)
@@ -185,7 +190,11 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
           // the on-chain facts as authoritative: a TRUE miss is SERIOUS — the bot never mirrored (no reshape published)
           // OR its add did not land (coffre count unchanged ⇒ a revert). A reshape the brain published AND the coffre
           // landed, that the fidelity read merely missed, is bench lag — not a bot fault.
-          const mirrored = h.brainMirroredReshape(leaderPos, 'grow') && h.coffreLandedCount('add', pool) > addsBefore;
+          // Under RPC contention the add can land SLOWLY (well after the fidelity poll gives up) → POLL the coffre
+          // count rather than sampling it once, so a slow-but-landed add isn't misread as a miss (the n=147 race).
+          const mirrored =
+            h.brainMirroredReshape(leaderPos, 'grow') &&
+            (await pollUntil(() => Promise.resolve(h.coffreLandedCount('add', pool) > addsBefore), CORROBORATE_LAND_TIMEOUT_MS, 3000));
           if (!grew && !mirrored) problems.push('copy did not grow after the leader add (reshape-grow not mirrored)');
           else if (!grew) console.log(`🛁 n=${n} grow: add landed on-chain (coffre) — bench fidelity read lagged, not flagged`);
         } else if (s.lifecycle === 'shrink') {
@@ -201,7 +210,9 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
           );
           // Same as grow: only a never-mirrored shrink (no reshape published) or one whose remove never landed (coffre
           // count unchanged) is SERIOUS; a landed remove the fidelity read merely lagged is bench lag.
-          const mirrored = h.brainMirroredReshape(leaderPos, 'shrink') && h.coffreLandedCount('remove', pool) > removesBefore;
+          const mirrored =
+            h.brainMirroredReshape(leaderPos, 'shrink') &&
+            (await pollUntil(() => Promise.resolve(h.coffreLandedCount('remove', pool) > removesBefore), CORROBORATE_LAND_TIMEOUT_MS, 3000));
           if (!shrank && !mirrored) problems.push('copy did not shrink after the leader remove (reshape-shrink not mirrored)');
           else if (!shrank) console.log(`🛁 n=${n} shrink: remove landed on-chain (coffre) — bench fidelity read lagged, not flagged`);
         } else if (s.lifecycle === 'partial-remove') {
@@ -234,7 +245,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · MEGA-SOAK — 
           poolB = pool === POOL_STABLE ? POOL_COIN_SOL : POOL_STABLE;
           await pollUntil(async () => (await h.leaderPositions(poolB!)).length === 0 && (await h.copierPositions(poolB!)).length === 0, CLEAN_START_TIMEOUT_MS);
           leaderB = await h.leaderOpen({ pool: poolB, strategy: 'spot', sol: 0.05 });
-          copyB = await h.waitForCopy(poolB, OPEN_FUNDED_TIMEOUT_MS);
+          copyB = await h.waitForCopy(poolB, MULTI_OPEN_TIMEOUT_MS); // 2nd position lands under double-load → more patience
           if ((await h.copierPositions(pool)).length === 0) problems.push('multi: position A copy missing while B is open');
           if ((await h.copierPositions(poolB)).length === 0) problems.push('multi: position B copy missing');
         }
