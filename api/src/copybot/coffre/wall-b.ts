@@ -30,8 +30,19 @@ const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM];
 const JITO_TIP_SET = new Set(JITO_TIP_ACCOUNTS.map((a) => a.toBase58()));
 const MAX_JITO_TIP_LAMPORTS = 10_000_000; // 0.01 SOL hard ceiling (far above the conservative ~0.00005 SOL tip)
 
+// A ComputeBudget priority fee (compute-unit PRICE) is SOL burned to the validator — NOT a System-Transfer, so it
+// bypasses the foreign-destination + wrap-cap checks. The brain caps it (applyPriorityFee/maxCapSol), but Wall B
+// must NOT trust the brain: an inflated `setComputeUnitPrice` is a drain vector symmetric to (and larger than) the
+// Jito tip, which IS already capped. Bound the worst-case fee (price × CU-limit) independently here.
+const COMPUTE_BUDGET = 'ComputeBudget111111111111111111111111111111';
+const CB_SET_UNIT_LIMIT = 2; // ComputeBudget instruction discriminator (SetComputeUnitLimit): [2, u32 units]
+const CB_SET_UNIT_PRICE = 3; // ComputeBudget instruction discriminator (SetComputeUnitPrice): [3, u64 microLamports/CU]
+const MICRO_LAMPORTS_PER_LAMPORT = 1_000_000n;
+const PROTOCOL_MAX_CU = 1_400_000n; // Solana per-tx CU ceiling — the worst-case CU when a tx sets a price but no explicit limit (never under-bound the fee)
+const MAX_PRIORITY_FEE_LAMPORTS = 50_000_000n; // 0.05 SOL hard ceiling on the worst-case priority fee — ~10× the default 0.005 SOL maxCapSol budget (generous headroom for congestion), but bounds a compromised-brain fee-drain to a tiny amount per tx
+
 const ALLOWED_PROGRAMS = new Set([
-  'ComputeBudget111111111111111111111111111111',
+  COMPUTE_BUDGET,
   SYSTEM,
   TOKEN,
   TOKEN_2022, // Token-2022 (residual pump.fun-style legs route through it)
@@ -76,11 +87,20 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
 
   const ownerWsolAta = ownerAta(new PublicKey(intent.owner), WSOL, TOKEN_PROGRAM); // the SOL the tx wraps for deployment/swap
   let wrapLamports = 0n; // sum of owner→WSOL-ATA System-Transfers = the ACTUAL SOL this tx deploys
+  let cbUnitLimit: bigint | null = null; // explicit ComputeBudget CU limit, if the tx sets one
+  let cbUnitPriceMicro = 0n; // ComputeBudget CU price (microLamports/CU) → the priority fee
   const accountKeys = new Set<string>();
   for (const ix of tx.instructions) {
     const prog = ix.programId.toBase58();
     if (!ALLOWED_PROGRAMS.has(prog)) return { ok: false, reason: `program_not_allowed:${prog}` };
     for (const k of ix.keys) accountKeys.add(k.pubkey.toBase58());
+
+    // Decode the ComputeBudget priority fee so the worst case (price × CU-limit) can be capped below — a drain vector
+    // Wall B must bound independently of the brain (the fee is burned, not transferred, so the wrap-cap can't catch it).
+    if (prog === COMPUTE_BUDGET) {
+      if (ix.data.length >= 5 && ix.data[0] === CB_SET_UNIT_LIMIT) cbUnitLimit = BigInt(ix.data.readUInt32LE(1));
+      if (ix.data.length >= 9 && ix.data[0] === CB_SET_UNIT_PRICE) cbUnitPriceMicro = ix.data.readBigUInt64LE(1);
+    }
 
     // INV-4/5: an outgoing System-Transfer (instruction index 2) must target owner or their WSOL ATA.
     if (prog === SYSTEM && ix.data.length >= 4 && ix.data.readUInt32LE(0) === 2) {
@@ -98,6 +118,12 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
       }
     }
   }
+
+  // Priority-fee cap (defense in depth, ALL kinds): the worst-case fee = price × CU-limit. Use the explicit CU limit
+  // if the tx sets one, else the protocol per-tx ceiling (never under-bound). A compromised brain that inflates the
+  // compute-unit price to drain SOL via fees is rejected here, even though the fee is not a System-Transfer.
+  const worstCaseFeeLamports = (cbUnitPriceMicro * (cbUnitLimit ?? PROTOCOL_MAX_CU)) / MICRO_LAMPORTS_PER_LAMPORT;
+  if (worstCaseFeeLamports > MAX_PRIORITY_FEE_LAMPORTS) return { ok: false, reason: 'priority_fee_too_large' };
 
   // SOL-spend cap (defense in depth): the ACTUAL wrapped SOL must stay under the caller's ceiling, regardless of the
   // self-reported sizeSol. Closes/removes/claims/sells wrap nothing (0 ≤ cap). The ceiling is generous (covers rent +

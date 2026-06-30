@@ -1,5 +1,5 @@
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
-import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from '@solana/web3.js';
 import { describe, expect, it } from 'vitest';
 import { JITO_TIP_ACCOUNTS } from '@/domain/copybot/jito-tip';
 import { type WallBIntent, verifyTx } from './wall-b';
@@ -336,5 +336,60 @@ describe('Wall B — SOL-spend cap (the ACTUAL wrapped SOL is bounded, not just 
 
   it('no maxLamports set → the cap is NOT enforced (backward compatible)', () => {
     expect(verifyTx(openWrapping(CAP * 100), openIntent())).toEqual({ ok: true });
+  });
+});
+
+describe('Wall B — priority-fee cap (ComputeBudget price × CU-limit is bounded, a compromised brain cannot drain via fees)', () => {
+  const MAX_PRIORITY_FEE_LAMPORTS = 50_000_000; // mirrors wall-b's constant (0.05 SOL)
+  // An open carrying an explicit CU limit + a CU price (the priority fee), like the brain's applyPriorityFee sets.
+  const openWithFee = (units: number | null, microLamportsPerCu: number): Transaction =>
+    buildTx(owner, [
+      ...(units === null ? [] : [ComputeBudgetProgram.setComputeUnitLimit({ units })]),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: microLamportsPerCu }),
+      ix(DLMM, [
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: position, isSigner: true, isWritable: true },
+        { pubkey: pool, isSigner: false, isWritable: true },
+      ]),
+    ]);
+
+  it('a normal priority fee (~0.005 SOL worst case) → ok', () => {
+    // 1.4M CU × 3,571,428 µLamports/CU ≈ 0.005 SOL — the default maxCapSol budget; far under the 0.05 SOL ceiling.
+    expect(verifyTx(openWithFee(1_400_000, 3_571_428), openIntent())).toEqual({ ok: true });
+  });
+
+  it('an inflated CU price (worst case 0.14 SOL) → reject priority_fee_too_large', () => {
+    // WHY: a priority fee is SOL burned to the validator, NOT a System-Transfer, so the wrap-cap can't catch it.
+    // Wall B's job is to bound a compromised brain — an inflated setComputeUnitPrice must be rejected.
+    expect(verifyTx(openWithFee(1_400_000, 100_000_000), openIntent())).toMatchObject({ ok: false, reason: 'priority_fee_too_large' });
+  });
+
+  it('cap boundary: exactly the max is tolerated, one lamport over is rejected (no off-by-one)', () => {
+    // With CU limit = 1,000,000, worst-case fee (price × limit / 1e6) == price in lamports → easy exact boundary.
+    expect(verifyTx(openWithFee(1_000_000, MAX_PRIORITY_FEE_LAMPORTS), openIntent())).toEqual({ ok: true });
+    expect(verifyTx(openWithFee(1_000_000, MAX_PRIORITY_FEE_LAMPORTS + 1), openIntent())).toMatchObject({ ok: false, reason: 'priority_fee_too_large' });
+  });
+
+  it('a huge price with NO explicit CU limit → still rejected (protocol-max CU fallback prevents under-bounding)', () => {
+    // WHY: a compromised brain could omit the limit ix hoping the fee escapes the cap; the protocol per-tx ceiling
+    // (1.4M CU) is used as the worst-case CU so the drain is still caught.
+    expect(verifyTx(openWithFee(null, 100_000_000), openIntent())).toMatchObject({ ok: false, reason: 'priority_fee_too_large' });
+  });
+
+  it('a modest price with no explicit CU limit (worst case ~0.014 SOL) → ok (no false-reject)', () => {
+    expect(verifyTx(openWithFee(null, 10_000_000), openIntent())).toEqual({ ok: true });
+  });
+
+  it('the cap applies to a SELL too (checked before the swap binding short-circuits) → reject priority_fee_too_large', () => {
+    // WHY: the priority-fee drain vector exists on every signed tx, not just opens; the check must run for all kinds.
+    const t = buildTx(owner, [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000_000 }),
+      ix(JUP, [
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: ownerAta(inputMint), isSigner: false, isWritable: true },
+      ]),
+    ]);
+    expect(verifyTx(t, sellIntent())).toMatchObject({ ok: false, reason: 'priority_fee_too_large' });
   });
 });

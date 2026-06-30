@@ -158,6 +158,7 @@ const RAW_CODE_REGISTRY = {
   'wallb.pool_not_referenced': { category: 'WALLB', severity: 'error', audience: 'internal' },
   'wallb.foreign_sol_destination': { category: 'WALLB', severity: 'error', audience: 'internal' },
   'wallb.jito_tip_too_large': { category: 'WALLB', severity: 'error', audience: 'internal' },
+  'wallb.priority_fee_too_large': { category: 'WALLB', severity: 'error', audience: 'internal' },
   'wallb.swap_missing_token_mint': { category: 'WALLB', severity: 'error', audience: 'internal' },
   'wallb.swap_token_not_owner_ata': { category: 'WALLB', severity: 'error', audience: 'internal' },
   'wallb.sol_spend_over_cap': { category: 'WALLB', severity: 'error', audience: 'internal' },
