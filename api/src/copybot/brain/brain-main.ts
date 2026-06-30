@@ -201,6 +201,13 @@ async function main(): Promise<void> {
   // (correctly collapses to one row). The leaf differs per stage so an open-skip and a reshape-skip never alias.
   const openSkipKey = (e: DetectedEvent): string => `${cfg.leader}:${e.pool}:open-skip:${e.signature}:${e.position}`;
   const reshapeSkipKey = (e: DetectedEvent, m: Mirror): string => `${cfg.leader}:${m.pool}:reshape-skip:${e.signature}:${m.ourPosition}`;
+  // Per-position correlation keys for the `lifecycle.*_confirmed` FEED events. These confirmed emits carry no
+  // commandId of their own, yet the emit dedup keys on `(correlationId, code)` — without a per-position key the
+  // `correlationId` would be empty and two DISTINCT positions' confirms within the 120s LRU would collapse into one
+  // row (lost feed). Keyed by OUR position so the SAME position's duplicate confirms (ev:executed + reconcile)
+  // correctly collapse to one row, while distinct positions stay distinct. The leaf differs per code.
+  const openConfirmedKey = (pool: string, ourPosition: string): string => `${cfg.leader}:${pool}:open-confirmed:${ourPosition}`;
+  const closeConfirmedKey = (pool: string, ourPosition: string): string => `${cfg.leader}:${pool}:close-confirmed:${ourPosition}`;
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // the CopybotConfig blob; polled + ping-reloaded live below
   const reloadConfig = async (): Promise<void> => {
@@ -634,6 +641,10 @@ async function main(): Promise<void> {
     const mirror = registry.open({ leaderPosition: pend.leaderPosition, ourPosition: pend.ourPosition, pool: pend.pool, nonSolSymbol: pend.nonSolSymbol, sizeSol: pend.sizeSol, lowerBin: pend.lower, upperBin: pend.upper, openedAt: Date.now() });
     await store.saveOpen(mirror); // tracked only NOW — a funded, deposited position
     buildingToken2022Positions.delete(pend.ourPosition);
+    // Token-2022 open is COMPLETE (deposit landed → mirror persisted) → emit the FEED `lifecycle.open_confirmed`,
+    // the SAME confirm a classic open fires in onOpenConfirmed (the classic branch's ev:executed 'open' carries the
+    // empty-position create, never the funded mirror, so it is excluded there). Observability-only.
+    events.opened({ stage: 'open', outcome: 'confirmed', leader: cfg.leader, pool: mirror.pool, leaderPosition: mirror.leaderPosition, ourPosition: mirror.ourPosition, ourSizeSol: mirror.sizeSol, eventKey: openConfirmedKey(mirror.pool, mirror.ourPosition), adminDetail: { nonSolSymbol: mirror.nonSolSymbol, openCount: registry.openPositions().length } });
     log.info({ our: pend.ourPosition }, '🪙 two-sided Token-2022 OPEN complete (deposit landed → mirror persisted)');
   }
 
@@ -860,7 +871,7 @@ async function main(): Promise<void> {
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
       rugSlTracker.forget(our);
-      events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, ourSizeSol: m.sizeSol, adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'reconcile' } });
+      events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, ourSizeSol: m.sizeSol, eventKey: closeConfirmedKey(m.pool, our), adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'reconcile' } });
     }
     for (const rc of plan.reClose) {
       // Grace: skip if we published a close for this position recently (let the in-flight close land first).
@@ -942,6 +953,38 @@ async function main(): Promise<void> {
     events.emit('failsafe.orphan_closed', { stage: 'failsafe', outcome: 'published', reason: 'orphan', leader: cfg.leader, pool: p.pool, ourPosition: p.position, commandId, eventKey, adminDetail: { position: p.position, pool: p.pool } });
   }
 
+  // ev:executed(open) → a CLASSIC open LANDED on-chain: emit the FEED `lifecycle.open_confirmed` so the user sees
+  // the open (the publish only emits the internal `lifecycle.open_published`). The mirror is already persisted at
+  // publish time (no untracked open), so we look it up by OUR position. No-op if there's no mirror (e.g. a Token-2022
+  // open's empty-position create lands here too — but those carry a pendingToken2022Deposits commandId and are routed
+  // to the deposit step, never to this handler; the Token-2022 FEED confirm fires in finalizeToken2022Open instead).
+  // Observability-only — never touches decision/tx-build/reconcile state.
+  function onOpenConfirmed(ourPosition: string): void {
+    const m = registry.getByOurPosition(ourPosition);
+    if (!m) return;
+    events.opened({ stage: 'open', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, eventKey: openConfirmedKey(m.pool, ourPosition), adminDetail: { nonSolSymbol: m.nonSolSymbol, openCount: registry.openPositions().length } });
+  }
+
+  // ev:executed(add) → a reshape ADD leg LANDED → emit the FEED `lifecycle.add_confirmed` (the publish only emits the
+  // internal `lifecycle.open_published` trace for a reshape add). The Token-2022 open's deposit also lands as kind
+  // 'add' but carries a pendingToken2022Mirrors commandId and is routed to finalizeToken2022Open, never here. The
+  // landed command's `commandId` (carried by the ev) is the correlation key → a duplicate confirm of the SAME add leg
+  // collapses while distinct legs (distinct commandIds) stay distinct. Observability-only.
+  function onAddConfirmed(ourPosition: string, commandId: string): void {
+    const m = registry.getByOurPosition(ourPosition);
+    if (!m) return;
+    events.addedLiquidity({ stage: 'reshape', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, commandId, adminDetail: { nonSolSymbol: m.nonSolSymbol } });
+  }
+
+  // ev:executed(claim) → a fees CLAIM LANDED → emit the FEED `lifecycle.claim_confirmed` (the publish only emits the
+  // internal `lifecycle.open_published` trace). Correlation = the landed command's `commandId` (same-claim duplicate
+  // confirms collapse; distinct claims stay distinct). Observability-only.
+  function onClaimConfirmed(ourPosition: string, commandId: string): void {
+    const m = registry.getByOurPosition(ourPosition);
+    if (!m) return;
+    events.claimed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, commandId, adminDetail: { nonSolSymbol: m.nonSolSymbol } }); // 'claim' maps to the close-domain stage (stageForKind)
+  }
+
   // ev:executed(close) → the close LANDED, so our position is gone: mark the mirror closed in the DB NOW (don't
   // wait for the periodic reconcile, which the open-grace can defer up to ~grace+cadence). Orphan close (no
   // tracked mirror) → nothing to do. The reconcile + orphan-sweep stay the backstop if this ev was ever missed.
@@ -952,7 +995,7 @@ async function main(): Promise<void> {
     registry.close(m.leaderPosition);
     recentlyPublishedClose.delete(ourPosition);
     rugSlTracker.forget(ourPosition);
-    events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'ev_executed' } });
+    events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, eventKey: closeConfirmedKey(m.pool, ourPosition), adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'ev_executed' } });
   }
 
   // ev:executed feedback → fast residual sell. Once the vault confirms a CLOSE landed, the close returned SOL +
@@ -1153,16 +1196,28 @@ async function main(): Promise<void> {
             }
           } else if (ev?.kind === 'open' && ev.commandId && pendingToken2022Deposits.has(ev.commandId)) {
             // a Token-2022 open's empty position (TX1) just CONFIRMED → build+publish the deposit (TX2). (Classic
-            // 1-tx opens also emit kind 'open' but are not in this map → ignored here.)
+            // 1-tx opens also emit kind 'open' but are not in this map → ignored here, handled by the next branch.)
             await publishDepositAfterPositionCreated(ev.commandId).catch((e) =>
               // the deposit leg of a Token-2022 OPEN failed to build/publish → the open did not complete (open_failed).
               events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_deposit' } }),
             );
+          } else if (ev?.kind === 'open' && ev.positionPubkey && !(ev.commandId !== undefined && pendingToken2022Deposits.has(ev.commandId))) {
+            // a CLASSIC 1-tx open just LANDED on-chain → emit the FEED `lifecycle.open_confirmed` (the user sees the
+            // open, not just the close). Token-2022 creates take the branch above (their deposit lands as kind 'add'
+            // → finalizeToken2022Open emits the same confirm). Observability-only.
+            onOpenConfirmed(ev.positionPubkey);
           } else if (ev?.kind === 'add' && ev.commandId && pendingToken2022Mirrors.has(ev.commandId)) {
             // a Token-2022 open's deposit (TX2) just landed → persist the mirror (a reshape 'add' is not in this map).
             await finalizeToken2022Open(ev.commandId).catch((e) =>
               events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_finalize' } }),
             );
+          } else if (ev?.kind === 'add' && ev.positionPubkey && ev.commandId) {
+            // a CLASSIC reshape ADD leg just LANDED → emit the FEED `lifecycle.add_confirmed` (the Token-2022 deposit
+            // 'add' took the branch above; this is a reshape add on an existing mirror). Observability-only.
+            onAddConfirmed(ev.positionPubkey, ev.commandId);
+          } else if (ev?.kind === 'claim' && ev.positionPubkey && ev.commandId) {
+            // a fees CLAIM just LANDED → emit the FEED `lifecycle.claim_confirmed`. Observability-only.
+            onClaimConfirmed(ev.positionPubkey, ev.commandId);
           }
           await evBus.ack(EV_EXECUTED_STREAM, 'brain', msg.id);
         }
