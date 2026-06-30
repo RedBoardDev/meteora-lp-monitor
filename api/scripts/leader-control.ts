@@ -6,7 +6,7 @@
  *   yarn bot:build → node --env-file=../.env dist/copybot/scripts/leader-control.cjs <pools|status|open|close|claim> [--pool=P] [--sol=0.1]
  */
 import { readFileSync } from 'node:fs';
-import { ComputeBudgetProgram, Connection, Keypair, PublicKey, type Signer, Transaction } from '@solana/web3.js';
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, type Signer, Transaction, TransactionInstruction } from '@solana/web3.js';
 import { planWalletSweep } from '../src/domain/copybot/residual-sell';
 import { reanchorShape } from '../src/domain/copybot/reanchor';
 import { type WeightBin, buildAddByStrategy, buildAddByStrategyTwoSided, buildAddByWeight, buildClaimTx, buildCloseTx, buildOpenByStrategy, buildOpenByStrategyTwoSided, buildOpenByWeight, buildRemovePartial, createDlmmPair, strategyTypeFromName } from '../src/infrastructure/solana/dlmm/dlmm-tx-builder';
@@ -131,6 +131,27 @@ async function main(): Promise<void> {
   }
 
   if (cmd === 'sweep') {
+    // UNWRAP wrapped SOL FIRST. A DLMM close (removeLiquidity) returns the SOL leg as WSOL to the owner's WSOL ATA
+    // and does NOT unwrap it → it sits locked (getBalance shows only native SOL; the token sweep skips WSOL since
+    // it's "already SOL"). Close the WSOL ATA → reclaim the wrapped SOL + rent. Without this the leader-test wallet
+    // appears to drain on every close (the SOL is wrapped, not lost).
+    const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+    const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+    const wsolAta = PublicKey.findProgramAddressSync([leader.publicKey.toBuffer(), TOKEN_PROGRAM.toBuffer(), new PublicKey(WSOL_MINT).toBuffer()], ATA_PROGRAM)[0];
+    if ((await conn.getAccountInfo(wsolAta)) !== null) {
+      // SPL Token CloseAccount (discriminator 9): close the WSOL ATA → all lamports (wrapped SOL + rent) to the owner.
+      const closeIx = new TransactionInstruction({
+        programId: TOKEN_PROGRAM,
+        keys: [
+          { pubkey: wsolAta, isSigner: false, isWritable: true },
+          { pubkey: leader.publicKey, isSigner: false, isWritable: true },
+          { pubkey: leader.publicKey, isSigner: true, isWritable: false },
+        ],
+        data: Buffer.from([9]),
+      });
+      const sigs = await signLandConfirm(new Transaction().add(closeIx));
+      console.log(`🪙 unwrapped WSOL (closed ${wsolAta.toBase58()}) sigs=${sigs.join(',')}`);
+    }
     // Convert EVERY non-SOL token on leader-test back to SOL (classic SPL + Token-2022) — mirrors the bot's
     // wallet sweep, but signs directly with the leader-test key (a test wallet, not the copier). Recovers the
     // value locked as token (a wallet UI shows it in the total; getBalance shows only native SOL).

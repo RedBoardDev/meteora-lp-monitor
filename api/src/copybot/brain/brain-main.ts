@@ -35,7 +35,7 @@ import { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { ControlChannel } from '@/infrastructure/bus/control-channel';
 import { openDatabase } from '@/infrastructure/persistence/database';
 import { decodeDlmmLegs } from '@/infrastructure/solana/dlmm/dlmm-event-decoder';
-import { type WeightBin, buildAddByWeight, buildClaimTx, buildCloseTx, buildCreateEmptyPosition, buildOpenByWeight, buildRemovePartial, createDlmmPair, isToken2022Pool } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
+import { type WeightBin, buildAddByWeight, buildAddByWeight2, buildClaimTx, buildCloseTx, buildCreateEmptyPosition, buildOpenByWeight, buildRemovePartial, createDlmmPair, isToken2022Pool } from '@/infrastructure/solana/dlmm/dlmm-tx-builder';
 import { readLeaderPositionShape, type UserPosition, readUserPositions } from '@/infrastructure/solana/dlmm/leader-position-reader';
 import { readActiveTokenPrice } from '@/infrastructure/solana/dlmm/active-bin-price';
 import { OnchainPoolMetaReader } from '@/infrastructure/solana/dlmm/pool-meta';
@@ -767,7 +767,9 @@ async function main(): Promise<void> {
     const pair = await createDlmmPair(conn, poolPk);
     const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint)); // ExactIn output is variable → deposit the real balance
     const depositToken = depositableToken(actualToken); // reserve a hair for per-bin bps rounding (else TransferChecked → insufficient funds)
-    const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(ourPosition), solSide === 'X' ? depositToken : addLamports, solSide === 'Y' ? depositToken : addLamports, dist, pair);
+    // TWO-SIDED add → addLiquidityByWeight2 ALWAYS (both legs held now): correct two-sided placement AND fits ≤70 bins
+    // in one tx (v1 would chunk at 26 → onlyTx throw → the wide two-sided grow would fail). Works classic + Token-2022.
+    const built = await buildAddByWeight2(conn, poolPk, ownerPk, new PublicKey(ourPosition), solSide === 'X' ? depositToken : addLamports, solSide === 'Y' ? depositToken : addLamports, dist, pair);
     const { issuedAtSlot, deadlineSlot } = await slots();
     const addKey = `${cfg.leader}:${pool}:reshape-add:${signature}`;
     await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool, positionPubkey: ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(onlyTx(built, 'reshape add (two-sided)'), TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot }, { stage: 'reshape', leaderPosition });

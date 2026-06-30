@@ -101,6 +101,37 @@ export async function buildAddByWeight(
 }
 
 
+/** Adds TWO-SIDED liquidity by-weight to an EXISTING position via the v2 ix `addLiquidityByWeight2` ALWAYS. v2 is the
+ *  correct two-sided deposit (BOTH legs span the active bin) and fits a full position span (≤70 bins) in ONE
+ *  self-contained tx — whereas v1 `addLiquidityByWeight` chunks at 26 bins into [pre, main, post], which can't be one
+ *  published tx. Used for the two-sided RESHAPE ADD (the token leg is held after the buy); v2 routes each leg's token
+ *  program from its mint's real owner, so it works for classic AND Token-2022 pools. (One-sided adds must NOT use this
+ *  — v2 deposits 0 for a one-sided leg on the wrong side of active; they use buildAddByWeight → addLiquidityOneSide.) */
+export async function buildAddByWeight2(
+  conn: Connection,
+  pool: PublicKey,
+  owner: PublicKey,
+  positionPubKey: PublicKey,
+  totalXLamports: bigint,
+  totalYLamports: bigint,
+  distribution: WeightBin[],
+  pair?: DlmmPair,
+): Promise<Transaction[]> {
+  const dlmm = pair ?? (await DLMM.create(conn, pool));
+  return dlmm.addLiquidityByWeight2({
+    positionPubKey,
+    user: owner,
+    totalXAmount: toBN(totalXLamports),
+    totalYAmount: toBN(totalYLamports),
+    xYAmountDistribution: distribution.map((d) => ({
+      binId: d.binId,
+      xAmountBpsOfTotal: new BN(d.xBps),
+      yAmountBpsOfTotal: new BN(d.yBps),
+    })),
+  });
+}
+
+
 /** Token-2022 program id — a pool whose token leg is owned by this needs the v2 (interface) deposit ix, not v1. */
 const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
