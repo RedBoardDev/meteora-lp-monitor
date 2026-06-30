@@ -7,7 +7,7 @@
  *   yarn tsup --config tsup.copybot.config.ts → node --env-file=../.env dist/copybot/brain-main.cjs [--once] [--seconds=N]
  */
 import { DLMM_PROGRAM_ID } from '@binsight/shared';
-import { Connection, type Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, type Transaction } from '@solana/web3.js';
+import { Connection, type Keypair, LAMPORTS_PER_SOL, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
 import { pino } from 'pino';
 import { type CapsState, checkCaps } from '@/domain/copybot/caps';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
@@ -24,6 +24,7 @@ import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-to
 import { TtlCache } from '@/domain/copybot/ttl-cache';
 import { type EventSource, LeaderDetector } from '@/domain/copybot/leader-detector';
 import { LeaderPositionTracker } from '@/domain/copybot/leader-position';
+import { isWideOpen } from '@/domain/copybot/open-routing';
 import { fillContiguousWeights, lamportsToSol, reshapeToCalls } from '@/domain/copybot/position-adjust';
 import { reanchorShape } from '@/domain/copybot/reanchor';
 import { type TwoSidedPlan, planTwoSided, planTwoSidedReshape, sizeTwoSided } from '@/domain/copybot/two-sided';
@@ -122,6 +123,24 @@ const ENV_EFFECTIVE_OVERRIDE = envEffectiveOverride(process.env);
 
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 const firstTx = (t: Transaction | Transaction[]): Transaction => (Array.isArray(t) ? (t[0] as Transaction) : t);
+// A by-weight OPEN/ADD build must be a SINGLE tx — if the SDK chunked it (range too wide for one tx), publishing only
+// the first tx would deposit nothing (create the position but not the liquidity, or land a partial deposit). Wide
+// opens/adds are routed through create + add2 (one ≤70-bin deposit tx); this asserts that invariant — fail LOUD
+// rather than silently drop a chunk (the no-miss/shape-fidelity pillar). Close/claim/remove are ≤70 bins → 1 tx.
+const onlyTx = (t: Transaction | Transaction[], context: string): Transaction => {
+  const arr = Array.isArray(t) ? t : [t];
+  if (arr.length !== 1) throw new Error(`${context}: build chunked into ${arr.length} txs (range too wide) — aborting, no partial open/deposit`);
+  return arr[0] as Transaction;
+};
+// Merge several SDK txs into ONE (concatenate their instructions). A WIDE atomic open chunks into [pre, main, post];
+// the DEPOSIT half is `main` (the native addLiquidityOneSide/addLiquidityByWeight) + `post` (unwrap leftover WSOL).
+// We publish `pre` (create+wrap) as TX1, then this merged deposit as TX2 — the unwrap MUST ride with the deposit (it
+// references no pool/position of its own → Wall B would reject it alone). Stale CU/fee/blockhash are reset at publish.
+const mergeDeposit = (txs: Transaction[]): Transaction => {
+  const merged = new Transaction();
+  for (const tx of txs) for (const ix of tx.instructions) merged.add(ix);
+  return merged;
+};
 
 // A two-sided open/add builds a tx that DEPOSITS token the copier doesn't hold yet (the BUY lands first, in the
 // coffre). The SDK's compute-unit estimation SIMULATES that deposit → fails "insufficient funds" → the tx ships
@@ -141,7 +160,12 @@ const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin
 // deposit lands, so a crash/failure between the two leaves an UNTRACKED empty position that the orphan-sweep
 // auto-closes (no dormant position). `buildingToken2022Positions` (with a grace) stops the sweep from closing a
 // position WHILE its deposit is still in flight; once the grace expires (deposit never landed) the sweep cleans it.
-const pendingToken2022Deposits = new Map<string, { e: DetectedEvent; dist: WeightBin[]; totalX: bigint; totalY: bigint; lower: number; upper: number; sizeSol: number }>();
+// Keyed by the CREATE's commandId. Two deposit strategies share this map + the create→deposit→finalize sequencing:
+//  · REBUILD (Token-2022 two-sided): `dist`/`totalX`/`totalY` present → addLiquidityByWeight2 is REBUILT after the
+//    create lands (add2 fetches the positionV2 account, so it can't be pre-built).
+//  · PREBUILT (one-sided wide / classic-wide two-sided): `prebuiltDeposit` present → the deposit (native
+//    addLiquidityOneSide/addLiquidityByWeight + unwrap, built atomically with the create) is published as-is.
+const pendingToken2022Deposits = new Map<string, { e: DetectedEvent; lower: number; upper: number; sizeSol: number; prebuiltDeposit?: Transaction; dist?: WeightBin[]; totalX?: bigint; totalY?: bigint }>();
 const pendingToken2022Mirrors = new Map<string, { leaderPosition: string; ourPosition: string; pool: string; nonSolSymbol: string | null; sizeSol: number; lower: number; upper: number; leaderSizeSol: number }>();
 // TWO-SIDED RESHAPE ADD (grow with a token-leg deficit): like the open, the token can't be bought via ExactOut on a
 // Token-2022 coin → buy via ExactIn (variable output) then build+publish the add ONCE the buy lands (deposit the
@@ -434,11 +458,25 @@ async function main(): Promise<void> {
     // binId gap → "Discontinuous Bin ID". Fill gaps with 0/0 (min/max unchanged, so targetBinRange stays correct).
     const dist: WeightBin[] = fillContiguousWeights(reanchored.weights.map((w) => ({ binId: w.binId, xBps: meta.solSide === 'X' ? w.bps : 0, yBps: meta.solSide === 'Y' ? w.bps : 0 })));
 
-    const eventKey = `${cfg.leader}:${e.pool}:open:${e.signature}`;
+    const sizeLamports = BigInt(Math.round(decision.sizeSol * 1e9));
+    const totalX = meta.solSide === 'X' ? sizeLamports : 0n;
+    const totalY = meta.solSide === 'Y' ? sizeLamports : 0n;
+    const lower = reanchored.lowerBinId;
+    const upper = reanchored.upperBinId;
+    // A WIDE one-sided open (≥26 bins) chunks the atomic by-weight open into [pre, main(addLiquidityOneSide), post].
+    // The deposit (main) is NOT the first tx, so we sequence it: publish `pre` (create+wrap) then `main`+`post`
+    // (deposit+unwrap) once the create lands (publishSplitOpen). The commandId is derived from `open-create:` so the
+    // create's position keypair matches the one baked into the SDK build. Narrow opens (≤25) keep the atomic 1-tx path.
+    const wide = isWideOpen(dist.length);
+    const eventKey = wide ? `${cfg.leader}:${e.pool}:open-create:${e.signature}` : `${cfg.leader}:${e.pool}:open:${e.signature}`;
     const commandId = deriveCommandId(eventKey);
     const posKp: Keypair = derivePositionKeypair(commandId);
-    const sizeLamports = BigInt(Math.round(decision.sizeSol * 1e9));
-    const built = await buildOpenByWeight(conn, poolPk, ownerPk, posKp.publicKey, meta.solSide === 'X' ? sizeLamports : 0n, meta.solSide === 'Y' ? sizeLamports : 0n, dist, pair);
+    const built = await buildOpenByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair);
+    if (wide) {
+      void slotsP.catch(() => undefined); // the parallel slot fetch is unused on this path; publishSplitOpen fetches its own
+      const arr = Array.isArray(built) ? built : [built]; // ≥26 bins → [pre, main, post]
+      return publishSplitOpen(e, { createTx: arr[0] as Transaction, depositTx: mergeDeposit(arr.slice(1)), posPubkey: posKp.publicKey.toBase58(), commandId, eventKey, lower, upper, sizeSol: decision.sizeSol });
+    }
     const { issuedAtSlot, deadlineSlot } = await slotsP;
     const sr: Omit<SignRequest, 'issuedAtMs'> = {
       commandId,
@@ -447,13 +485,13 @@ async function main(): Promise<void> {
       pool: e.pool,
       positionPubkey: posKp.publicKey.toBase58(),
       owner: ownerPk.toBase58(),
-      txBase64: serializeUnsigned(firstTx(built)),
+      txBase64: serializeUnsigned(onlyTx(built, 'open')),
       sizeSol: decision.sizeSol,
-      targetBinRange: { lower: reanchored.lowerBinId, upper: reanchored.upperBinId },
+      targetBinRange: { lower, upper },
       issuedAtSlot,
       deadlineSlot,
     };
-    const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol: decision.sizeSol, lowerBin: reanchored.lowerBinId, upperBin: reanchored.upperBinId, openedAt: Date.now() });
+    const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol: decision.sizeSol, lowerBin: lower, upperBin: upper, openedAt: Date.now() });
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
     await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
   }
@@ -509,6 +547,79 @@ async function main(): Promise<void> {
     log.info({ tokenMint, expectToken: buyQuote.outAmount, spendSol: Number(buyQuote.inAmount) / 1e9, solLamports: sizeLamports.toString(), bins: dist.length }, '🪙 two-sided BUY (ExactIn) published — the open follows once the buy lands');
   }
 
+  /** Publish an open as TX1 createEmptyPosition (kind 'open') → TX2 addLiquidityByWeight2 (kind 'add'), sequenced via
+   *  ev:executed (create lands → publishDepositAfterPositionCreated; deposit lands → finalizeToken2022Open persists the
+   *  mirror). Used for every open that CANNOT be the atomic single-tx by-weight open: a Token-2022 two-sided open (v1
+   *  deposit rejected on-chain) AND any wide open (≥26 bins, where the atomic open chunks and the deposit isn't the
+   *  first tx). The mirror is persisted ONLY after the deposit lands, so a crash between the two leaves an UNTRACKED
+   *  empty position the orphan-sweep auto-closes (no dormant position). Caller guarantees dist.length ≤ the single
+   *  add2 chunk (≤70 bins). One-sided: one of totalX/totalY is 0; two-sided: both legs are funded (token bought first). */
+  async function publishOpenViaCreateDeposit(
+    e: DetectedEvent,
+    pair: Awaited<ReturnType<typeof createDlmmPair>>,
+    args: { dist: WeightBin[]; totalX: bigint; totalY: bigint; lower: number; upper: number; sizeSol: number },
+  ): Promise<void> {
+    const { dist, totalX, totalY, lower, upper, sizeSol } = args;
+    const createEventKey = `${cfg.leader}:${e.pool}:open-create:${e.signature}`;
+    const createCommandId = deriveCommandId(createEventKey);
+    const posKp: Keypair = derivePositionKeypair(createCommandId); // the coffre signs 'open' with derivePositionKeypair(commandId) → MUST match
+    const built = await buildCreateEmptyPosition(conn, new PublicKey(e.pool), ownerPk, posKp.publicKey, lower, upper, pair);
+    const { issuedAtSlot, deadlineSlot } = await slots();
+    pendingToken2022Deposits.set(createCommandId, { e, dist, totalX, totalY, lower, upper, sizeSol });
+    buildingToken2022Positions.set(posKp.publicKey.toBase58(), Date.now()); // orphan-close grace until the deposit lands
+    await publish(
+      {
+        commandId: createCommandId,
+        eventKey: createEventKey,
+        kind: 'open',
+        pool: e.pool,
+        positionPubkey: posKp.publicKey.toBase58(),
+        owner: ownerPk.toBase58(),
+        txBase64: serializeUnsigned(built), // create deploys no SOL → no CU-limit override needed
+        sizeSol: 0, // position creation deploys no SOL; the deposit (TX2) deploys it
+        targetBinRange: { lower, upper },
+        issuedAtSlot,
+        deadlineSlot,
+      },
+      { leaderPosition: e.position, leaderSizeSol: e.depositSol },
+    );
+    log.info({ our: posKp.publicKey.toBase58(), bins: dist.length }, '🔨 open via create+deposit published (deposit follows once the create lands)');
+  }
+
+  /** Publish a WIDE open (≥26 bins) via the SDK's NATIVE multi-tx split. The atomic by-weight open returns
+   *  [pre, main, post]: TX1 = `pre` (create position + bin arrays + wrap SOL, kind 'open', position signer); TX2 =
+   *  `main`+`post` merged (the deposit via the native addLiquidityOneSide / addLiquidityByWeight + unwrap leftover,
+   *  kind 'add'). Sequenced via ev:executed → publishDepositAfterPositionCreated (uses the PREBUILT deposit) →
+   *  finalizeToken2022Open persists the mirror. `main` is the SDK's native one-/two-sided deposit ix → correct bin
+   *  placement (unlike add2, which is two-sided-only and deposits 0 for a one-sided leg on the wrong side of active).
+   *  `commandId` is derived from `eventKey` BY THE CALLER so the create's position keypair matches `createTx`. */
+  async function publishSplitOpen(
+    e: DetectedEvent,
+    args: { createTx: Transaction; depositTx: Transaction; posPubkey: string; commandId: string; eventKey: string; lower: number; upper: number; sizeSol: number },
+  ): Promise<void> {
+    const { createTx, depositTx, posPubkey, commandId, eventKey, lower, upper, sizeSol } = args;
+    const { issuedAtSlot, deadlineSlot } = await slots();
+    pendingToken2022Deposits.set(commandId, { e, lower, upper, sizeSol, prebuiltDeposit: depositTx });
+    buildingToken2022Positions.set(posPubkey, Date.now()); // orphan-close grace until the deposit lands
+    await publish(
+      {
+        commandId,
+        eventKey,
+        kind: 'open',
+        pool: e.pool,
+        positionPubkey: posPubkey,
+        owner: ownerPk.toBase58(),
+        txBase64: serializeUnsigned(withCuLimit(createTx, TWO_SIDED_CU_LIMIT)), // bin-array init can exceed the 200k CU default
+        sizeSol, // `pre` wraps the full SOL → bounded by both the coffre re-clamp AND Wall B's wrap cap
+        targetBinRange: { lower, upper },
+        issuedAtSlot,
+        deadlineSlot,
+      },
+      { leaderPosition: e.position, leaderSizeSol: e.depositSol },
+    );
+    log.info({ our: posPubkey, lower, upper }, '🔨 wide open CREATE published (split — deposit follows once the create lands)');
+  }
+
   /** Build + publish the two-sided OPEN once its BUY has landed (token + ATA now exist → clean SDK build). Keyed
    *  by the buy's commandId; a no-op if there's no pending open (e.g. a reshape buy, which builds its add directly). */
   async function publishTwoSidedOpenAfterBuy(buyCommandId: string): Promise<void> {
@@ -526,49 +637,32 @@ async function main(): Promise<void> {
     const lower = Math.min(...dist.map((d) => d.binId));
     const upper = Math.max(...dist.map((d) => d.binId));
 
-    // TOKEN-2022 leg → the v1 by-weight open is rejected on-chain (token program pinned to classic). Split into
-    // TX1 createEmptyPosition (here, kind 'open') + TX2 addLiquidityByWeight2 (publishDepositAfterPositionCreated,
-    // kind 'add'), sequenced via ev:executed. The mirror is persisted ONLY after the deposit lands → a crash/failure
-    // between the two leaves an UNTRACKED empty position the orphan-sweep auto-closes (no dormant position).
+    // TOKEN-2022 leg → the v1 by-weight open is rejected on-chain (token program pinned to classic). Split into TX1
+    // createEmptyPosition (kind 'open') + TX2 addLiquidityByWeight2 (kind 'add'), sequenced via ev:executed. Both legs
+    // span the active bin so the two-sided add2 deposits correctly. The mirror is persisted ONLY after the deposit
+    // lands → a crash between the two leaves an UNTRACKED empty position the orphan-sweep auto-closes (no dormant).
     if (isToken2022Pool(pair)) {
       if (dist.length > TOKEN2022_MAX_OPEN_BINS) {
-        // Wider than a single create + single deposit chunk → SKIP (never a partial deposit). The bought token is
+        // Wider than a single create + single add2 chunk → SKIP (never a partial deposit). The bought token is
         // recovered by the wallet sweep (sold back to SOL); a >70-bin two-sided memecoin copy is rare.
         events.emit('eligibility.twosided.token2022_too_wide', { stage: 'open', outcome: 'skipped', reason: 'twosided_token2022_too_wide', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), adminDetail: { mint: tokenMint, nonSolSymbol: e.nonSolSymbol, bins: dist.length, max: TOKEN2022_MAX_OPEN_BINS } });
         return;
       }
-      const createEventKey = `${cfg.leader}:${e.pool}:open-create:${e.signature}`;
-      const createCommandId = deriveCommandId(createEventKey);
-      const posKp: Keypair = derivePositionKeypair(createCommandId); // the coffre signs 'open' with derivePositionKeypair(commandId) → MUST match
-      const built = await buildCreateEmptyPosition(conn, poolPk, ownerPk, posKp.publicKey, lower, upper, pair);
-      const { issuedAtSlot, deadlineSlot } = await slots();
-      pendingToken2022Deposits.set(createCommandId, { e, dist, totalX, totalY, lower, upper, sizeSol });
-      buildingToken2022Positions.set(posKp.publicKey.toBase58(), Date.now()); // orphan-close grace until the deposit lands
-      await publish(
-        {
-          commandId: createCommandId,
-          eventKey: createEventKey,
-          kind: 'open',
-          pool: e.pool,
-          positionPubkey: posKp.publicKey.toBase58(),
-          owner: ownerPk.toBase58(),
-          txBase64: serializeUnsigned(built), // create deploys no SOL → no CU-limit override needed
-          sizeSol: 0, // position creation deploys no SOL; the deposit (TX2) deploys it
-          targetBinRange: { lower, upper },
-          issuedAtSlot,
-          deadlineSlot,
-        },
-        { leaderPosition: e.position, leaderSizeSol: e.depositSol },
-      );
-      log.info({ our: posKp.publicKey.toBase58(), bins: dist.length }, '🪙 two-sided Token-2022 CREATE published (deposit follows once it lands)');
-      return;
+      return publishOpenViaCreateDeposit(e, pair, { dist, totalX, totalY, lower, upper, sizeSol });
     }
 
-    // CLASSIC SPL pool → the atomic 1-tx by-weight open (unchanged).
-    const eventKey = `${cfg.leader}:${e.pool}:open:${e.signature}`;
+    // CLASSIC SPL two-sided. WIDE (≥26 bins) → the atomic open chunks into [pre, main(addLiquidityByWeight), post] →
+    // sequence it (publishSplitOpen) so the deposit isn't dropped. NARROW (≤25) → the atomic 1-tx open (token held now
+    // → CU estimation works). v1 addLiquidityByWeight is correct for a CLASSIC two-sided deposit (both legs span active).
+    const wide = isWideOpen(dist.length);
+    const eventKey = wide ? `${cfg.leader}:${e.pool}:open-create:${e.signature}` : `${cfg.leader}:${e.pool}:open:${e.signature}`;
     const commandId = deriveCommandId(eventKey);
     const posKp: Keypair = derivePositionKeypair(commandId);
-    const built = await buildOpenByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair); // token held now → estimation works
+    const built = await buildOpenByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair);
+    if (wide) {
+      const arr = Array.isArray(built) ? built : [built]; // ≥26 bins → [pre, main, post]
+      return publishSplitOpen(e, { createTx: arr[0] as Transaction, depositTx: mergeDeposit(arr.slice(1)), posPubkey: posKp.publicKey.toBase58(), commandId, eventKey, lower, upper, sizeSol });
+    }
     const { issuedAtSlot, deadlineSlot } = await slots();
     const sr: Omit<SignRequest, 'issuedAtMs'> = {
       commandId,
@@ -577,7 +671,7 @@ async function main(): Promise<void> {
       pool: e.pool,
       positionPubkey: posKp.publicKey.toBase58(),
       owner: ownerPk.toBase58(),
-      txBase64: serializeUnsigned(withCuLimit(built, TWO_SIDED_CU_LIMIT)),
+      txBase64: serializeUnsigned(withCuLimit(onlyTx(built, 'two-sided open'), TWO_SIDED_CU_LIMIT)),
       sizeSol,
       targetBinRange: { lower, upper },
       issuedAtSlot,
@@ -596,24 +690,33 @@ async function main(): Promise<void> {
     const ctx = pendingToken2022Deposits.get(createCommandId);
     if (!ctx) return;
     pendingToken2022Deposits.delete(createCommandId);
-    const { e, dist, totalX, totalY, lower, upper, sizeSol } = ctx;
+    const { e, lower, upper, sizeSol } = ctx;
     const poolPk = new PublicKey(e.pool);
     const posKp: Keypair = derivePositionKeypair(createCommandId); // SAME position the create made
-    const pair = await createDlmmPair(conn, poolPk); // fresh: the position now exists on-chain (addLiquidityByWeight2 fetches it)
-    // The position just confirmed; a transient "not yet readable" must not drop the deposit → retry the build.
-    let built: Transaction | Transaction[] | undefined;
-    for (let r = 0; r < OPEN_SHAPE_READ_RETRIES && built === undefined; r++) {
-      try {
-        built = await buildAddByWeight(conn, poolPk, ownerPk, posKp.publicKey, totalX, totalY, dist, pair);
-      } catch (err) {
-        if (r === OPEN_SHAPE_READ_RETRIES - 1) throw err;
-        await sleep(OPEN_SHAPE_READ_DELAY_MS);
+    let depositTx: Transaction;
+    if (ctx.prebuiltDeposit) {
+      // SPLIT path (one-sided wide / classic-wide two-sided): the deposit (native addLiquidityOneSide / by-weight +
+      // unwrap) was built ATOMICALLY with the create, so its accounts are already correct — publish it as-is.
+      depositTx = ctx.prebuiltDeposit;
+    } else {
+      // REBUILD path (Token-2022 two-sided): addLiquidityByWeight2 fetches the positionV2 account → must build AFTER
+      // the create lands. A transient "not yet readable" must not drop the deposit → retry the build.
+      const pair = await createDlmmPair(conn, poolPk); // fresh: the position now exists on-chain
+      let built: Transaction | Transaction[] | undefined;
+      for (let r = 0; r < OPEN_SHAPE_READ_RETRIES && built === undefined; r++) {
+        try {
+          built = await buildAddByWeight(conn, poolPk, ownerPk, posKp.publicKey, ctx.totalX as bigint, ctx.totalY as bigint, ctx.dist as WeightBin[], pair);
+        } catch (err) {
+          if (r === OPEN_SHAPE_READ_RETRIES - 1) throw err;
+          await sleep(OPEN_SHAPE_READ_DELAY_MS);
+        }
       }
+      // addLiquidityByWeight2 returns Transaction[]; ≤70 bins = a single chunk. More than one chunk would be a
+      // PARTIAL deposit (shape mismatch) → abort (the empty position is then orphan-closed).
+      const txs = Array.isArray(built) ? built : [built as Transaction];
+      if (txs.length !== 1) throw new Error(`token2022 deposit chunked into ${txs.length} txs (range too wide) — aborting, no partial deposit`);
+      depositTx = txs[0] as Transaction;
     }
-    // addLiquidityByWeight2 returns Transaction[]; ≤TOKEN2022_MAX_OPEN_BINS bins = a single chunk. More than one
-    // chunk would be a PARTIAL deposit (shape mismatch) → abort (the empty position is then orphan-closed).
-    const txs = Array.isArray(built) ? built : [built!];
-    if (txs.length !== 1) throw new Error(`token2022 deposit chunked into ${txs.length} txs (range too wide) — aborting, no partial deposit`);
     const depositEventKey = `${cfg.leader}:${e.pool}:open-deposit:${e.signature}`;
     const depositCommandId = deriveCommandId(depositEventKey);
     const { issuedAtSlot, deadlineSlot } = await slots();
@@ -626,7 +729,7 @@ async function main(): Promise<void> {
         pool: e.pool,
         positionPubkey: posKp.publicKey.toBase58(),
         owner: ownerPk.toBase58(),
-        txBase64: serializeUnsigned(withCuLimit(txs[0]!, TWO_SIDED_CU_LIMIT)),
+        txBase64: serializeUnsigned(withCuLimit(depositTx, TWO_SIDED_CU_LIMIT)),
         sizeSol,
         targetBinRange: { lower, upper },
         issuedAtSlot,
@@ -634,7 +737,7 @@ async function main(): Promise<void> {
       },
       { leaderPosition: e.position, leaderSizeSol: e.depositSol },
     );
-    log.info({ our: posKp.publicKey.toBase58(), bins: dist.length }, '🪙 two-sided Token-2022 DEPOSIT published (position created → addLiquidityByWeight2)');
+    log.info({ our: posKp.publicKey.toBase58(), prebuilt: ctx.prebuiltDeposit !== undefined, lower, upper }, '🔨 open DEPOSIT published (position created → deposit)');
   }
 
   /** Finalize a Token-2022 two-sided open once its deposit (TX2) has landed: NOW persist the mirror (the position is
@@ -667,7 +770,7 @@ async function main(): Promise<void> {
     const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(ourPosition), solSide === 'X' ? depositToken : addLamports, solSide === 'Y' ? depositToken : addLamports, dist, pair);
     const { issuedAtSlot, deadlineSlot } = await slots();
     const addKey = `${cfg.leader}:${pool}:reshape-add:${signature}`;
-    await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool, positionPubkey: ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(firstTx(built), TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot }, { stage: 'reshape', leaderPosition });
+    await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool, positionPubkey: ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(onlyTx(built, 'reshape add (two-sided)'), TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot }, { stage: 'reshape', leaderPosition });
     log.info({ our: ourPosition, bins: dist.length }, '🪙 two-sided reshape ADD published (after buy landed)');
   }
 
@@ -814,7 +917,7 @@ async function main(): Promise<void> {
       const addLamports = BigInt(Math.round(totalAddSol * 1e9));
       const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? addLamports : 0n, solSide === 'Y' ? addLamports : 0n, dist, pair);
       const eventKey = `${cfg.leader}:${m.pool}:reshape-add:${e.signature}`;
-      await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: totalAddSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
+      await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(onlyTx(built, 'reshape add')), sizeSol: totalAddSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
     }
 
     const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), ec.sizing.maxTradeSizeSol);

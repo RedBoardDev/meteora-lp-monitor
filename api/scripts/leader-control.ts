@@ -63,7 +63,13 @@ async function signLandConfirm(txOrArr: Transaction | Transaction[], extra: Sign
     const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash();
     tx.feePayer = leader.publicKey;
     tx.recentBlockhash = blockhash;
-    tx.sign(leader, ...extra);
+    // Sign each tx with ONLY the signers it actually requires. A WIDE open (≥26 bins) is returned by the SDK as
+    // [pre, main, post]: the ephemeral position is a required signer of the create (pre) ONLY — passing it to main/post
+    // (where it isn't required) makes web3.js throw "unknown signer". Filter [leader, ...extra] to each tx's required
+    // signers (the first numRequiredSignatures account keys) so the multi-tx wide-open path signs correctly.
+    const msg = tx.compileMessage();
+    const required = new Set(msg.accountKeys.slice(0, msg.header.numRequiredSignatures).map((k) => k.toBase58()));
+    tx.sign(...[leader, ...extra].filter((s) => required.has(s.publicKey.toBase58())));
     const sig = await conn.sendRawTransaction(tx.serialize());
     await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, 'confirmed');
     sigs.push(sig);
