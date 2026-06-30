@@ -767,9 +767,15 @@ async function main(): Promise<void> {
     const pair = await createDlmmPair(conn, poolPk);
     const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint)); // ExactIn output is variable → deposit the real balance
     const depositToken = depositableToken(actualToken); // reserve a hair for per-bin bps rounding (else TransferChecked → insufficient funds)
-    // TWO-SIDED add → addLiquidityByWeight2 ALWAYS (both legs held now): correct two-sided placement AND fits ≤70 bins
-    // in one tx (v1 would chunk at 26 → onlyTx throw → the wide two-sided grow would fail). Works classic + Token-2022.
-    const built = await buildAddByWeight2(conn, poolPk, ownerPk, new PublicKey(ourPosition), solSide === 'X' ? depositToken : addLamports, solSide === 'Y' ? depositToken : addLamports, dist, pair);
+    // TWO-SIDED add. WIDE (≥26 bins) → addLiquidityByWeight2 (v1 would chunk at 26 → onlyTx throw → the wide grow would
+    // fail); fits ≤70 bins in one tx, works classic + Token-2022. NARROW (≤25) → keep the PROVEN buildAddByWeight (v1
+    // classic / add2 Token-2022) untouched — exact per-bin placement (changing it perturbs precise spike/refill copies).
+    const totalX = solSide === 'X' ? depositToken : addLamports;
+    const totalY = solSide === 'Y' ? depositToken : addLamports;
+    const built =
+      dist.length >= ATOMIC_BY_WEIGHT_BIN_LIMIT
+        ? await buildAddByWeight2(conn, poolPk, ownerPk, new PublicKey(ourPosition), totalX, totalY, dist, pair)
+        : await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(ourPosition), totalX, totalY, dist, pair);
     const { issuedAtSlot, deadlineSlot } = await slots();
     const addKey = `${cfg.leader}:${pool}:reshape-add:${signature}`;
     await publish({ commandId: deriveCommandId(addKey), eventKey: addKey, kind: 'add', pool, positionPubkey: ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(withCuLimit(onlyTx(built, 'reshape add (two-sided)'), TWO_SIDED_CU_LIMIT)), sizeSol: totalAddSol, targetBinRange: { lower, upper }, issuedAtSlot, deadlineSlot }, { stage: 'reshape', leaderPosition });
