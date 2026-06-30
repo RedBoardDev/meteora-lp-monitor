@@ -74,9 +74,13 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
 
   if (sr.commandId !== deriveCommandId(sr.eventKey)) return { ok: false, reason: 'commandId_mismatch', kind: sr.kind }; // 7
 
-  // 8 idempotency: claim BEFORE signing; only a previously 'failed' command may be re-claimed (retry).
+  // 8 idempotency: claim BEFORE signing; only a previously 'failed' command may be re-claimed (retry). EXCEPTION: a
+  // reconcile-driven failsafe/orphan CLOSE (eventKey action 'failsafe'/'orphan') is emitted only while the position
+  // is PROVABLY still on-chain → it must retry regardless of a stale terminal state, or a phantom is stuck forever.
   const now = Date.now();
-  const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering);
+  const action = sr.eventKey.split(':')[2]; // `${leader}:${pool}:${action}:${id}` — leader/pool are base58 (no ':')
+  const forceReclaim = sr.kind === 'close' && (action === 'failsafe' || action === 'orphan');
+  const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering, forceReclaim);
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
   if (sr.sizeSol > maxTradeSol) {

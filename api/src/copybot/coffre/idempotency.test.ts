@@ -48,4 +48,21 @@ describe('claimExecution — idempotency claim with failed-retry (integration)',
     expect(await claimExecution(db, CID, 'ek', 999, 5)).toBe(false); // normal flow → still a duplicate
     expect(await claimExecution(db, CID, 'ek', 999, 6, true)).toBe(true); // recovering=true → re-claimable
   });
+
+  it('forceReclaim re-claims a stale LANDED close (failsafe/orphan retry) — fixes the stuck-phantom bug', async () => {
+    // WHY: a reconcile failsafe/orphan close is emitted ONLY while the position is PROVABLY still on-chain. A prior
+    // 'landed' that never actually removed it (stranded/ineffective close) must NOT block the retry — else the
+    // phantom position is stuck open forever and the copier wallet never returns to SOL-only. Normal flow still
+    // rejects a landed; forceReclaim (set only for kind:'close' with eventKey action failsafe/orphan) re-claims it.
+    await db.update(executions).set({ state: 'landed' }).where(eq(executions.commandId, CID));
+    expect(await claimExecution(db, CID, 'ek', 999, 7)).toBe(false); // normal flow → still rejects a landed
+    expect(await claimExecution(db, CID, 'ek', 999, 8, false, true)).toBe(true); // forceReclaim → re-claims to retry
+    const row = await db.select().from(executions).where(eq(executions.commandId, CID));
+    expect(row[0]?.state).toBe('claimed');
+  });
+
+  it('forceReclaim also re-claims a SKIPPED close', async () => {
+    await db.update(executions).set({ state: 'skipped' }).where(eq(executions.commandId, CID));
+    expect(await claimExecution(db, CID, 'ek', 999, 9, false, true)).toBe(true);
+  });
 });
