@@ -153,6 +153,11 @@ const buildingToken2022Positions = new Map<string, number>(); // ourPosition →
 // mid-open (it would empty the token leg). Track the mint while the open is in flight; the sweep skips it within a
 // grace, after which a still-present token (the open failed) IS a real stranded residual → swept (cleanup).
 const inFlightBuyMints = new Map<string, number>(); // tokenMint → ms the two-sided buy was published
+// A published residual SELL (close-triggered OR safety-sweep) carries no token identity on its `ev:executed`
+// confirm — only the commandId/pool. Stash the sold token (mint + resolved symbol if known) keyed by the sell's
+// commandId at publish time, so the sell-confirm handler can name the token in the FEED `swap.executed` line
+// ("Swapped X → SOL") WITHOUT an extra RPC. Mirrors the inFlightBuyMints / pendingReshapeAdds stash pattern.
+const pendingSellMints = new Map<string, { tokenMint: string; nonSolSymbol: string | null; pool: string }>();
 // The sweep must not sell the bought token during buy → (create →) deposit (≤ ~20s under load). Kept SHORT so it
 // expires soon after the deposit lands — else it would also block the safety-sweep from selling that same token's
 // CLOSE residual (the close returns it to the wallet) for too long. The close-triggered sell is the primary path;
@@ -998,13 +1003,29 @@ async function main(): Promise<void> {
     events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, eventKey: closeConfirmedKey(m.pool, ourPosition), adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'ev_executed' } });
   }
 
+  // ev:executed(sell) → a residual token→SOL SELL (close-triggered OR safety-sweep) LANDED → emit the FEED
+  // `swap.executed` ("Swapped X → SOL") so the user sees the residual sale. The sold token was stashed by
+  // `publishSell` under this commandId (mint + symbol if known); we read+delete it here to name the token without
+  // an extra RPC. No-op (defensive) if there's no stash (e.g. a sell from a prior process run, or a duplicate
+  // confirm whose stash was already consumed). Correlation = the landed command's commandId. Observability-only;
+  // never throws.
+  function onSellConfirmed(ev: { commandId?: string; pool?: string; sig?: string }): void {
+    if (!ev.commandId) return;
+    const stash = pendingSellMints.get(ev.commandId);
+    if (!stash) return; // unknown / already-confirmed sell → nothing to name
+    pendingSellMints.delete(ev.commandId);
+    events.swapped({ stage: 'sell', outcome: 'confirmed', kind: 'sell', leader: cfg.leader, pool: ev.pool ?? stash.pool, commandId: ev.commandId, signature: ev.sig, adminDetail: { nonSolSymbol: stash.nonSolSymbol, mint: stash.tokenMint, pool: ev.pool ?? stash.pool } });
+  }
+
   // ev:executed feedback → fast residual sell. Once the vault confirms a CLOSE landed, the close returned SOL +
   // a residual non-SOL token; we immediately swap that residual back to SOL (Jupiter, built here → verified by
   // Wall B → signed by the vault). This is the FAST trigger — no waiting for the 30s reconcile.
   /** Build + publish a Jupiter token→SOL sell for `residualRaw` units of `tokenMint` (shared by the close-
-   *  triggered residual sell and the wallet safety sweep). `source` only labels the event/log. Returns whether
-   *  a sell was published (false = quote below the SOL-out floor). */
-  async function publishSell(tokenMint: string, residualRaw: bigint, pool: string, source: 'close' | 'sweep'): Promise<boolean> {
+   *  triggered residual sell and the wallet safety sweep). `source` only labels the event/log. `nonSolSymbol`
+   *  (resolvable only on the close path, via the Mirror) names the token in the sell-confirm FEED line; null on
+   *  the sweep path falls back to the truncated mint. Returns whether a sell was published (false = quote below
+   *  the SOL-out floor). */
+  async function publishSell(tokenMint: string, residualRaw: bigint, pool: string, source: 'close' | 'sweep', nonSolSymbol: string | null = null): Promise<boolean> {
     const t0 = Date.now();
     const ec = eff();
     const eventKey = `${cfg.leader}:${pool}:${source}:${tokenMint}:${residualRaw}`; // hoisted: also keys the below-min-sell-out skip's emit dedup
@@ -1016,9 +1037,14 @@ async function main(): Promise<void> {
     }
     const txBase64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, quote, ownerPk.toBase58());
 
+    const commandId = deriveCommandId(eventKey);
+    // Stash the sold token keyed by the sell's commandId so the `ev:executed{kind:'sell'}` confirm can name it in
+    // the FEED `swap.executed` line without an extra RPC (deleted on confirm; see onSellConfirmed). Set BEFORE the
+    // publish so an instant confirm can never race ahead of the stash.
+    pendingSellMints.set(commandId, { tokenMint, nonSolSymbol, pool });
     const { issuedAtSlot, deadlineSlot } = await slots();
     await publish({
-      commandId: deriveCommandId(eventKey),
+      commandId,
       eventKey,
       kind: 'sell',
       pool,
@@ -1047,7 +1073,10 @@ async function main(): Promise<void> {
       emitFor(decision.reason, { stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, eventKey: `${cfg.leader}:${ev.pool}:close-sell:${ev.positionPubkey ?? tokenMint}`, adminDetail: { mint: tokenMint } });
       return;
     }
-    await publishSell(tokenMint, residual, ev.pool, 'close');
+    // Resolve the token symbol from the (now-closed) Mirror so the sell-confirm FEED line can name it (null → the
+    // renderer truncates the mint). The Mirror still exists at close-confirm time (markClosed flips status, not the row).
+    const closedMirror = ev.positionPubkey ? registry.getByOurPosition(ev.positionPubkey) : undefined;
+    await publishSell(tokenMint, residual, ev.pool, 'close', closedMirror?.nonSolSymbol ?? null);
   }
 
   /** No-miss safety net: enumerate EVERY non-SOL token on the copier wallet (classic SPL + Token-2022) and sell
@@ -1179,7 +1208,7 @@ async function main(): Promise<void> {
       try {
         const msgs = await evBus.consume(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', cfg.hmacKey, 10, 5000);
         for (const msg of msgs) {
-          const ev = msg.payload as { kind?: string; pool?: string; positionPubkey?: string; commandId?: string } | null;
+          const ev = msg.payload as { kind?: string; pool?: string; positionPubkey?: string; commandId?: string; sig?: string } | null;
           if (ev?.kind === 'close' && ev.pool) {
             if (ev.positionPubkey) await onCloseConfirmed(ev.positionPubkey); // prompt DB markClosed — no 30s wait
             await onCloseExecuted({ pool: ev.pool, positionPubkey: ev.positionPubkey }).catch((e) =>
@@ -1218,6 +1247,12 @@ async function main(): Promise<void> {
           } else if (ev?.kind === 'claim' && ev.positionPubkey && ev.commandId) {
             // a fees CLAIM just LANDED → emit the FEED `lifecycle.claim_confirmed`. Observability-only.
             onClaimConfirmed(ev.positionPubkey, ev.commandId);
+          } else if (ev?.kind === 'sell') {
+            // a residual token→SOL SELL just LANDED → emit the FEED `swap.executed` ("Swapped X → SOL") so the
+            // user sees the residual sale (the close-residual sell AND the safety-sweep both reach here). The
+            // earlier close-residual-sell FAILED path still maps to the pinned `swap.failed_after_retries` (above
+            // and in sweepWallet). Observability-only.
+            onSellConfirmed(ev);
           }
           await evBus.ack(EV_EXECUTED_STREAM, 'brain', msg.id);
         }
