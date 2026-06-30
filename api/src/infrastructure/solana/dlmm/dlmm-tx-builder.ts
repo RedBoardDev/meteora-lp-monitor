@@ -94,8 +94,9 @@ export async function buildAddByWeight(
   };
   // Token-2022 leg → the v2 ix `addLiquidityByWeight2` (routes the token program from the mint's real owner + carries
   // transfer-hook accounts), the ONLY by-weight deposit that works for Token-2022. Classic SPL → keep the proven v1
-  // `addLiquidityByWeight` UNCHANGED (incl. its one-sided path; v2's weight math + always-array return differ, so we
-  // don't impose it on the classic path that already works). v1 is classic-pinned on-chain so it can't do Token-2022.
+  // `addLiquidityByWeight` UNCHANGED — CRITICALLY, v1 uses `addLiquidityOneSide` for a one-sided deposit (deposits SOL
+  // into the valid bins regardless of the active-bin side), whereas v2 is two-sided-only and deposits 0 for a one-sided
+  // leg whose range is on the "wrong" side of the active bin. v1 is classic-pinned on-chain so it can't do Token-2022.
   return isToken2022Pool(dlmm) ? dlmm.addLiquidityByWeight2(params) : dlmm.addLiquidityByWeight(params);
 }
 
@@ -260,7 +261,11 @@ export function strategyTypeFromName(name: string): StrategyType {
   return StrategyType.Spot;
 }
 
-/** Builds the CLOSE tx(s): remove 100% + claim fees + close position. Unsigned. */
+/** Builds the CLOSE tx(s): remove 100% + claim fees + close position. Unsigned. An EMPTY position (no liquidity —
+ *  e.g. a leader emptied it via a remove-to-zero, or a create whose deposit never landed) makes `removeLiquidity`
+ *  THROW (it reads bins that don't exist), which would otherwise crash the reconcile and leave the position dormant.
+ *  Fall back to `closePositionIfEmpty` so the no-miss-close pillar holds for empties too. `closePositionIfEmpty` only
+ *  closes a genuinely-empty position on-chain, so the broad catch can never discard a funded position's liquidity. */
 export async function buildCloseTx(
   conn: Connection,
   pool: PublicKey,
@@ -270,14 +275,23 @@ export async function buildCloseTx(
   toBinId: number,
 ): Promise<Transaction[]> {
   const dlmm = await DLMM.create(conn, pool);
-  return dlmm.removeLiquidity({
-    user: owner,
-    position,
-    fromBinId,
-    toBinId,
-    bps: new BN(10_000), // 100%
-    shouldClaimAndClose: true,
-  });
+  try {
+    return await dlmm.removeLiquidity({
+      user: owner,
+      position,
+      fromBinId,
+      toBinId,
+      bps: new BN(10_000), // 100%
+      shouldClaimAndClose: true,
+    });
+  } catch (removeErr) {
+    // EMPTY position → removeLiquidity errored. Close it directly (reclaim rent) via closePositionIfEmpty, which
+    // needs the SDK position object — fetch it. If the position isn't found/closable, surface the original error.
+    const { userPositions } = await dlmm.getPositionsByUserAndLbPair(owner);
+    const p = userPositions.find((x) => x.publicKey.toBase58() === position.toBase58());
+    if (!p) throw removeErr;
+    return [await dlmm.closePositionIfEmpty({ owner, position: p })];
+  }
 }
 
 /** Builds the CLAIM FEES tx(s) (mid-life, without closing) on OUR position. First fetches the owner's

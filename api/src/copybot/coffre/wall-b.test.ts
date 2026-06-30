@@ -147,6 +147,24 @@ describe('Wall B — verifyTx', () => {
     ]);
     expect(verifyTx(t, openIntent({ kind: 'close' }))).toEqual({ ok: true });
   });
+
+  it('empty-position close (references the POSITION but not the pool) → ok', () => {
+    // WHY: closePositionIfEmpty (used to close a leader-emptied position) touches no pool reserves, so the pool
+    // pubkey isn't in the tx — only the position. Binding to our position is safe (closing our own position is
+    // never a drain) and is REQUIRED, else an empty position can't be closed → dormant (violates no-miss-close).
+    const t = buildTx(owner, [
+      ix(DLMM, [
+        { pubkey: owner, isSigner: true, isWritable: true },
+        { pubkey: position, isSigner: false, isWritable: true },
+      ]),
+    ]);
+    expect(verifyTx(t, openIntent({ kind: 'close' }))).toEqual({ ok: true });
+  });
+
+  it('close referencing NEITHER the pool NOR our position → reject pool_not_referenced', () => {
+    const t = buildTx(owner, [ix(DLMM, [{ pubkey: owner, isSigner: true, isWritable: true }, { pubkey: pk(), isSigner: false, isWritable: true }])]);
+    expect(verifyTx(t, openIntent({ kind: 'close' }))).toMatchObject({ ok: false, reason: 'pool_not_referenced' });
+  });
 });
 
 const JUP = new PublicKey('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4');

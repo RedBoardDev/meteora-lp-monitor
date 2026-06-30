@@ -144,6 +144,12 @@ export function verifyTx(tx: Transaction, intent: WallBIntent): WallBVerdict {
     return { ok: true };
   }
 
-  if (!accountKeys.has(intent.pool)) return { ok: false, reason: 'pool_not_referenced' };
+  // Every DLMM op must reference our pool — EXCEPT an empty-position close: `closePositionIfEmpty` (used when a
+  // position has no liquidity, e.g. a leader emptied it) reclaims rent and touches NO pool reserves, so the pool
+  // pubkey isn't in the tx — only our position. Accept the position binding for a CLOSE only (closing our own empty
+  // position is harmless, never a drain); all other kinds stay strictly pool-bound. Without this an emptied position
+  // can't be closed → dormant (violates the no-miss-close pillar).
+  const closeRefsOurPosition = intent.kind === 'close' && accountKeys.has(intent.positionPubkey);
+  if (!accountKeys.has(intent.pool) && !closeRefsOurPosition) return { ok: false, reason: 'pool_not_referenced' };
   return { ok: true };
 }
