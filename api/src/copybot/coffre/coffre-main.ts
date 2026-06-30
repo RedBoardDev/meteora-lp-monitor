@@ -10,8 +10,8 @@
 import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
-import { alert, bindAlertEvents } from '@/copybot/alert';
-import { CopyJournalStore, SYSTEM_USER_ID } from '@/copybot/journal-store';
+import { bindAlertEvents } from '@/copybot/alert';
+import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
 import { EventStore } from '@/copybot/observability/event-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
@@ -58,13 +58,12 @@ async function main(): Promise<void> {
   const copier = loadCopierKeypair(cfg.keypairPath, cfg.owner);
   const conn = new Connection(cfg.httpUrl, 'confirmed');
   const db = openDatabase(cfg.dbUrl);
-  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger, and
-  // the activity journal + alert() shims both route through it so every row back-fills user/wallet/correlation
-  // (SPEC §8 P1). Call sites still use `journal.record()` / `alert()` unchanged until P2.
+  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger. The
+  // vault's call sites (process1 + the loop) now emit TYPED codes through it directly (P2); `bindAlertEvents` keeps
+  // the un-migrated `alert()` shim durable + feed-visible. Every row back-fills user/wallet/correlation.
   const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
   const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
-  bindAlertEvents(events); // alert() now also persists a pinned, feed-visible row through the emitter
-  const journal = CopyJournalStore.withEvents(events, tlog, 'coffre'); // activity journal (fail-safe; never blocks signing)
+  bindAlertEvents(events); // the alert() shim (P1) still persists a pinned, feed-visible row for any non-migrated caller
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
   const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol;
@@ -85,7 +84,7 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const ctxBase = { conn, db, bus, copier, blockhashCache, journal, signingEnabled: cfg.signingEnabled, hmacKey: cfg.hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
+  const ctxBase = { conn, db, bus, copier, blockhashCache, events, signingEnabled: cfg.signingEnabled, hmacKey: cfg.hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
   // Process a batch, ACKing each message ONLY after process1 returned a verdict. If process1 THROWS (transient I/O
   // such as a getSlot RPC blip, BEFORE the idempotency claim), the message is left UNACKED in the PEL — the next
   // pending-drain retries it (a throwing message must never be silently dropped nor strand the rest of the batch).
@@ -97,7 +96,9 @@ async function main(): Promise<void> {
         log.info({ id: msg.id, recovering, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
         await bus.ack(STREAM, GROUP, msg.id); // idempotence guaranteed by the executions table
       } catch (e) {
-        await alert(log, 'process1 threw — message left pending for retry (not dropped)', { id: msg.id, error: (e as Error).message });
+        // process1 threw (transient I/O before the idempotency claim) → the message is left UNACKED for retry. An
+        // internal loop self-failure (NEVER user-notified — loop guard, SPEC §6); the row carries the cause.
+        events.system('system.loop_errored', e, { stage: 'sign', outcome: 'failed', reason: 'loop_errored', adminDetail: { id: msg.id, phase: 'process1' } });
       }
     }
   };
@@ -105,7 +106,7 @@ async function main(): Promise<void> {
     // Crash recovery (recovering=true → a stranded 'claimed' from a CRASHED prior instance is re-claimable).
     await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100), true);
   } catch (e) {
-    await alert(log, 'vault pending-recovery errored on boot', { error: (e as Error).message });
+    events.system('system.recovery_failed', e, { stage: 'recover', outcome: 'failed', reason: 'recovery_failed', adminDetail: { phase: 'boot_pending_recovery' } });
   }
 
   let stopped = false;
@@ -140,8 +141,8 @@ async function main(): Promise<void> {
       await processBatch(await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000));
       backoff = 1000; // success → reset
     } catch (e) {
-      // never crash: alert + exponential backoff + continue (Redis/RPC may recover).
-      await alert(log, 'vault loop errored (Redis/RPC?) — backoff', { error: (e as Error).message, backoff });
+      // never crash: record + exponential backoff + continue (Redis/RPC may recover). Internal loop self-failure.
+      events.system('system.loop_errored', e, { stage: 'sign', outcome: 'failed', reason: 'loop_errored', adminDetail: { loop: 'vault_consume', backoff } });
       await sleep(backoff);
       backoff = Math.min(backoff * 2, 30_000);
     }

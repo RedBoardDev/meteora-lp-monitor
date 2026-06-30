@@ -5,7 +5,7 @@ import { pino } from 'pino';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { deriveCommandId } from '@/copybot/command-id';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
-import type { Journal } from '@/domain/copybot/journal';
+import type { CopyEvents } from '@/copybot/observability/copy-events';
 import type { BlockhashCache } from '@/infrastructure/solana/blockhash-cache';
 import type { RedisBus } from '@/infrastructure/bus/redis-bus';
 import { openDatabase } from '@/infrastructure/persistence/database';
@@ -75,10 +75,12 @@ function fakeConn(status: () => Status): Connection {
   } as unknown as Connection;
 }
 const blockhashCache = { get: () => Keypair.generate().publicKey.toBase58() } as unknown as BlockhashCache;
-const journal = { record: async () => {} } as unknown as Journal;
+// Typed observability emitter (P2): process1 emits codes through `events.emit`. A no-op fake here keeps the test
+// focused on the verdict + the executions idempotency state (the observability rows are covered by their own suites).
+const events = { emit: () => {} } as unknown as CopyEvents;
 
 function ctxFor(conn: Connection, bus: RedisBus): Ctx {
-  return { conn, db, bus, copier, blockhashCache, journal, maxTradeSol: 1.0, signingEnabled: true, hmacKey: 'k', retryMax: 0, retryDelayMs: 0, confirmTimeoutMs: 40, log };
+  return { conn, db, bus, copier, blockhashCache, events, maxTradeSol: 1.0, signingEnabled: true, hmacKey: 'k', retryMax: 0, retryDelayMs: 0, confirmTimeoutMs: 40, log };
 }
 
 describe('process1 — a returned signature is NOT execution (no dormant-position on a silently-failed close)', () => {

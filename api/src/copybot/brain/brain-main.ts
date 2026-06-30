@@ -44,10 +44,12 @@ import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
-import { alert, bindAlertEvents } from '@/copybot/alert';
+import { bindAlertEvents } from '@/copybot/alert';
 import { ConfigStore } from '@/copybot/config-store';
-import { CopyJournalStore, SYSTEM_USER_ID } from '@/copybot/journal-store';
+import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
+import { type CopyCode, FALLBACK_CODE, resolveLegacyReason } from '@/domain/copybot/observability/codes';
+import type { EmitInput } from '@/domain/copybot/observability/input';
 import { EventStore } from '@/copybot/observability/event-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { type BrainStatusDetail, HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
@@ -179,13 +181,26 @@ async function main(): Promise<void> {
   const registry = new MirrorRegistry();
   const db = openDatabase(cfg.dbUrl);
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
-  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger, and
-  // the activity journal + alert() shims both route through it so every row back-fills user/wallet/correlation
-  // (SPEC §8 P1). Call sites still use `journal.record()` / `alert()` unchanged until P2.
+  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger. The
+  // brain's call sites now emit TYPED codes through it directly (P2); `bindAlertEvents` keeps the P1 `alert()` shim
+  // durable + feed-visible for any future/non-migrated caller. Every row back-fills user/wallet/correlation.
   const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
   const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
-  bindAlertEvents(events); // alert() now also persists a pinned, feed-visible row through the emitter
-  const journal = CopyJournalStore.withEvents(events, tlog, 'brain'); // activity journal (fail-safe; never blocks the hot path)
+  bindAlertEvents(events); // the alert() shim (P1) still persists a pinned, feed-visible row for any non-migrated caller
+  // P2: emit a TYPED event for a call site whose `reason` is RUNTIME-DYNAMIC (decision.reason, cap.reason, the
+  // filter verdict, the generic publish marker). The leaf == the verbatim reason (SPEC §2.1 + resolveLegacyReason);
+  // an unmapped/absent reason deterministically falls back to `system.unmapped` (never code-less). The pure
+  // `resolveLegacyReason` is the SAME mapping the P1 shim used, so the persisted `code` column is unchanged — only
+  // the registry severity/category/audience/pinned now become exact (the point of P2). Fire-and-forget; never throws.
+  const emitFor = (reason: string | undefined, fields: EmitInput<CopyCode>): void => {
+    events.emit(resolveLegacyReason(reason) ?? FALLBACK_CODE, fields);
+  };
+  // Per-leg detection correlation keys for the no-copy SKIP events (which carry no commandId/eventKey of their own):
+  // the emit dedup keys on `(correlationId, code)`, so distinct skipped opens/reshapes need a UNIQUE eventKey or
+  // they would collapse into one row under the 120s LRU. WS + cursor-poll re-detect of the SAME leg shares the key
+  // (correctly collapses to one row). The leaf differs per stage so an open-skip and a reshape-skip never alias.
+  const openSkipKey = (e: DetectedEvent): string => `${cfg.leader}:${e.pool}:open-skip:${e.signature}:${e.position}`;
+  const reshapeSkipKey = (e: DetectedEvent, m: Mirror): string => `${cfg.leader}:${m.pool}:reshape-skip:${e.signature}:${m.ourPosition}`;
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // the CopybotConfig blob; polled + ping-reloaded live below
   const reloadConfig = async (): Promise<void> => {
@@ -231,21 +246,28 @@ async function main(): Promise<void> {
     // Machine-readable publish marker: the EXACT copy pubkey + kind we just published (the journal's formatted line
     // carries neither as a field). Ops visibility + lets a consumer track the published copy without RPC enumeration.
     log.info({ kind: full.kind, our: full.positionPubkey, pool: full.pool, streamId: id }, '📤 published');
-    // Activity journal: EVERY published intent is recorded once here (single backstop) → the store emits the clean
-    // log line. Context-specific publishes (a failsafe/orphan re-close, a reshape-funding buy) pass a hint to
-    // override stage/severity/leaderPosition.
-    void journal.record({
-      stage: stageForKind(full.kind),
-      outcome: 'published',
+    // Activity journal: EVERY published intent is recorded once here (single backstop). A context-specific publish
+    // (a failsafe / orphan / rug-SL re-close) passes a `reason` hint that resolves to the pinned `failsafe.*` code
+    // (SPEC §2.1) — every other publish is a plain internal `lifecycle.open_published` trace (the on-chain
+    // confirmation arrives later as `lifecycle.*_confirmed`, never here). The leaf == the verbatim hint reason.
+    // NB: `severity` is denormalized from the resolved code in the typed model (the failsafe codes are already
+    // warn/error), so the legacy `journalHint.severity` is no longer plumbed — the registry now governs it.
+    const reason = journalHint?.reason;
+    const code = reason ? (resolveLegacyReason(reason) ?? FALLBACK_CODE) : 'lifecycle.open_published';
+    events.emit(code, {
+      stage: journalHint?.stage ?? stageForKind(full.kind),
+      outcome: journalHint?.outcome ?? 'published',
       kind: full.kind,
       leader: cfg.leader,
       pool: full.pool,
+      leaderPosition: journalHint?.leaderPosition,
       ourPosition: full.positionPubkey,
       commandId: full.commandId,
       eventKey: full.eventKey,
+      leaderSizeSol: journalHint?.leaderSizeSol,
       ourSizeSol: full.sizeSol,
-      detail: { targetBinRange: full.targetBinRange, streamId: id },
-      ...journalHint,
+      reason,
+      adminDetail: { targetBinRange: full.targetBinRange, streamId: id, ...journalHint?.detail },
     });
   }
 
@@ -308,12 +330,16 @@ async function main(): Promise<void> {
     const ec = eff();
     const decision = decideEntry(e, { ...ec.sizing, skipNonSolPaired: true }, { availableBalanceSol: cfg.balanceSol });
     if (decision.outcome === 'skipped') {
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol });
+      // dynamic reason: below_min_floor (sizing) / insufficient_balance (balance, pinned) / non_sol_paired — resolved to its leaf.
+      // `eventKey` (the per-open detection correlation) keys the emit dedup so distinct opens skipped for the same
+      // reason stay DISTINCT rows (an empty correlation would collapse them); WS+poll re-detect of one leg collapses.
+      emitFor(decision.reason, { stage: 'open', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), leaderSizeSol: e.depositSol, adminDetail: { mint: e.nonSolMint, nonSolSymbol: e.nonSolSymbol, configuredSol: cfg.balanceSol } });
       return;
     }
     const cap = checkCaps(ec.caps, capsState(), decision.sizeSol, Date.now());
     if (cap.action === 'block') {
-      void journal.record({ stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol });
+      // dynamic cap reason: kill_switch_* (internal) / max_open_positions / max_concurrent_per_token / max_opens_per_window / max_total_exposure (feed).
+      emitFor(cap.reason, { stage: 'open', outcome: 'blocked', reason: cap.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), leaderSizeSol: e.depositSol, ourSizeSol: decision.sizeSol, adminDetail: { mint: e.nonSolMint, nonSolSymbol: e.nonSolSymbol } });
       return;
     }
 
@@ -329,7 +355,7 @@ async function main(): Promise<void> {
     const meta = await poolReader.loadPoolMeta(e.pool);
     if (!meta?.solSide) {
       void pairP.catch(() => undefined); // non-SOL skip → discard the in-flight pair read (no unhandled rejection)
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: e.pool, leaderPosition: e.position });
+      events.emit('eligibility.non_sol_paired', { stage: 'open', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), adminDetail: { mint: e.nonSolMint, nonSolSymbol: e.nonSolSymbol } });
       return;
     }
 
@@ -340,7 +366,7 @@ async function main(): Promise<void> {
     const expectTwoSided = (e.depositTokenRaw ?? 0) > ec.execution.dustTokenRaw;
     const shape = await readStableShape(poolPk, leaderPk, e.position, pair, expectTwoSided);
     if (!shape) {
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { afterRetries: OPEN_SHAPE_READ_RETRIES } });
+      events.emit('detect.leader_position_not_found', { stage: 'open', outcome: 'skipped', reason: 'leader_position_not_found', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), adminDetail: { afterRetries: OPEN_SHAPE_READ_RETRIES } });
       return;
     }
 
@@ -369,8 +395,9 @@ async function main(): Promise<void> {
       );
     }
     if (verdict.action === 'skip') {
-      // An enabled filter ENFORCES (no shadow mode): the open is skipped and journaled with the failing filter's reason.
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, leaderSizeSol: e.depositSol, detail: { mint: e.nonSolMint } });
+      // An enabled filter ENFORCES (no shadow mode): the open is skipped with the failing filter's reason → its
+      // `filter.<reason>` leaf (dynamic; 16 verbatim filter leaves, all feed/transparency — resolved per reason).
+      emitFor(verdict.reason, { stage: 'open', outcome: 'skipped', reason: verdict.reason, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), leaderSizeSol: e.depositSol, adminDetail: { mint: e.nonSolMint, nonSolSymbol: e.nonSolSymbol } });
       return;
     }
 
@@ -442,7 +469,7 @@ async function main(): Promise<void> {
     } catch (err) {
       // SAFE: the token leg genuinely can't be acquired (no route EVEN via ExactIn, or a priced-at-0 leg). We do NOT
       // open a HALF (one-sided) position — SKIP entirely (nothing stashed/published yet → clean no-op).
-      void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_unbuyable', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { tokenMint, err: (err as Error).message } });
+      events.emit('eligibility.twosided.unbuyable', { stage: 'open', outcome: 'skipped', reason: 'twosided_unbuyable', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), adminDetail: { mint: tokenMint, nonSolSymbol: e.nonSolSymbol, err: (err as Error).message } });
       return; // SAFE: never a partial/one-sided copy
     }
     const buyKey = `${cfg.leader}:${e.pool}:buy:${e.signature}`;
@@ -495,7 +522,7 @@ async function main(): Promise<void> {
       if (dist.length > TOKEN2022_MAX_OPEN_BINS) {
         // Wider than a single create + single deposit chunk → SKIP (never a partial deposit). The bought token is
         // recovered by the wallet sweep (sold back to SOL); a >70-bin two-sided memecoin copy is rare.
-        void journal.record({ stage: 'open', outcome: 'skipped', reason: 'twosided_token2022_too_wide', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, detail: { bins: dist.length, max: TOKEN2022_MAX_OPEN_BINS } });
+        events.emit('eligibility.twosided.token2022_too_wide', { stage: 'open', outcome: 'skipped', reason: 'twosided_token2022_too_wide', leader: cfg.leader, pool: e.pool, leaderPosition: e.position, eventKey: openSkipKey(e), adminDetail: { mint: tokenMint, nonSolSymbol: e.nonSolSymbol, bins: dist.length, max: TOKEN2022_MAX_OPEN_BINS } });
         return;
       }
       const createEventKey = `${cfg.leader}:${e.pool}:open-create:${e.signature}`;
@@ -659,7 +686,7 @@ async function main(): Promise<void> {
     const poolPk = new PublicKey(m.pool);
     const meta = await poolReader.loadPoolMeta(m.pool);
     if (!meta?.solSide) {
-      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+      events.emit('eligibility.non_sol_paired', { stage: 'reshape', outcome: 'skipped', reason: 'non_sol_pool', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m), adminDetail: { nonSolSymbol: m.nonSolSymbol } });
       return;
     }
     const solSide = meta.solSide;
@@ -681,7 +708,7 @@ async function main(): Promise<void> {
       if (!leaderShape) return; // leader gone → the reconcile closes ours
       const os = await readLeaderPositionShape(conn, poolPk, ownerPk, m.ourPosition, pair);
       if (!os) {
-        void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+        events.emit('detect.not_on_chain_yet', { stage: 'reshape', outcome: 'skipped', reason: 'not_on_chain_yet', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m) });
         return;
       }
       ourShape = os;
@@ -698,7 +725,7 @@ async function main(): Promise<void> {
     const { ops, tokenAddOps } = plan;
     const twoSidedAdd = ec.twoSidedMode === 'on' && tokenAddOps.length > 0;
     if (ops.length === 0 && !twoSidedAdd) {
-      void journal.record({ stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition });
+      events.emit('reshape.noop', { stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m) });
       return;
     }
 
@@ -706,7 +733,7 @@ async function main(): Promise<void> {
     // Our position's bin range is fixed at open; can't add outside it (leader extending its range = v1 limit).
     const adds = calls.adds.filter((a) => a.binId >= ourShape.lowerBinId && a.binId <= ourShape.upperBinId);
     if (adds.length < calls.adds.length) {
-      void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'partial_range', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, detail: { dropped: calls.adds.length - adds.length } });
+      events.emit('reshape.partial_range', { stage: 'reshape', outcome: 'skipped', reason: 'partial_range', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m), adminDetail: { dropped: calls.adds.length - adds.length } });
     }
 
     const { issuedAtSlot, deadlineSlot } = await slots();
@@ -760,7 +787,7 @@ async function main(): Promise<void> {
       } catch (err) {
         // SAFE: can't acquire the token deficit → the SOL-leg removes already published stand; skip the token add (no
         // partial two-sided add). The reconcile self-corrects on the next leader event.
-        void journal.record({ stage: 'reshape', outcome: 'skipped', reason: 'reshape_token_unbuyable', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, detail: { tokenMint, err: (err as Error).message } });
+        events.emit('reshape.token_unbuyable', { stage: 'reshape', outcome: 'skipped', reason: 'reshape_token_unbuyable', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m), adminDetail: { mint: tokenMint, nonSolSymbol: m.nonSolSymbol, err: (err as Error).message } });
       }
     } else if (adds.length > 0) {
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
@@ -833,7 +860,7 @@ async function main(): Promise<void> {
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
       rugSlTracker.forget(our);
-      void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, detail: { via: 'reconcile' } });
+      events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, ourSizeSol: m.sizeSol, adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'reconcile' } });
     }
     for (const rc of plan.reClose) {
       // Grace: skip if we published a close for this position recently (let the in-flight close land first).
@@ -907,9 +934,12 @@ async function main(): Promise<void> {
     const eventKey = `${cfg.leader}:${p.pool}:orphan:${p.position}`;
     const built = await buildCloseTx(conn, new PublicKey(p.pool), ownerPk, new PublicKey(p.position), p.lowerBinId, p.upperBinId);
     const { issuedAtSlot, deadlineSlot } = await slots();
-    await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'close', pool: p.pool, positionPubkey: p.position, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: 0, targetBinRange: { lower: p.lowerBinId, upper: p.upperBinId }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', severity: 'warn', reason: 'orphan' });
+    const commandId = deriveCommandId(eventKey);
+    await publish({ commandId, eventKey, kind: 'close', pool: p.pool, positionPubkey: p.position, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(firstTx(built)), sizeSol: 0, targetBinRange: { lower: p.lowerBinId, upper: p.upperBinId }, issuedAtSlot, deadlineSlot }, { stage: 'failsafe', reason: 'orphan' });
     recentlyPublishedClose.set(p.position, Date.now());
-    await alert(log, 'orphan auto-close: untracked on-chain position force-closed', { position: p.position, pool: p.pool });
+    // Orphan auto-close → the pinned, feed-visible `failsafe.orphan_closed` (was a generic `alert()`). Same
+    // commandId as the publish marker above ⇒ the emit dedup collapses the two into ONE orphan-closed row.
+    events.emit('failsafe.orphan_closed', { stage: 'failsafe', outcome: 'published', reason: 'orphan', leader: cfg.leader, pool: p.pool, ourPosition: p.position, commandId, eventKey, adminDetail: { position: p.position, pool: p.pool } });
   }
 
   // ev:executed(close) → the close LANDED, so our position is gone: mark the mirror closed in the DB NOW (don't
@@ -922,7 +952,7 @@ async function main(): Promise<void> {
     registry.close(m.leaderPosition);
     recentlyPublishedClose.delete(ourPosition);
     rugSlTracker.forget(ourPosition);
-    void journal.record({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, detail: { via: 'ev_executed' } });
+    events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition, ourSizeSol: m.sizeSol, adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'ev_executed' } });
   }
 
   // ev:executed feedback → fast residual sell. Once the vault confirms a CLOSE landed, the close returned SOL +
@@ -934,15 +964,15 @@ async function main(): Promise<void> {
   async function publishSell(tokenMint: string, residualRaw: bigint, pool: string, source: 'close' | 'sweep'): Promise<boolean> {
     const t0 = Date.now();
     const ec = eff();
+    const eventKey = `${cfg.leader}:${pool}:${source}:${tokenMint}:${residualRaw}`; // hoisted: also keys the below-min-sell-out skip's emit dedup
     const quote = await getJupiterQuote(cfg.jupiterBaseUrl, tokenMint, residualRaw, ec.execution.slippageBps);
     const minOut = minOutWithSlippage(BigInt(quote.outAmount), ec.execution.slippageBps);
     if (minOut < BigInt(ec.execution.minSellOutLamports)) {
-      void journal.record({ stage: 'sell', outcome: 'skipped', reason: 'below_min_sell_out', leader: cfg.leader, pool, detail: { tokenMint, outAmount: quote.outAmount, source } });
+      events.emit('swap.below_min_sell_out', { stage: 'sell', outcome: 'skipped', reason: 'below_min_sell_out', leader: cfg.leader, pool, eventKey, adminDetail: { mint: tokenMint, outAmount: quote.outAmount, source } });
       return false;
     }
     const txBase64 = await buildJupiterSwapTx(cfg.jupiterBaseUrl, quote, ownerPk.toBase58());
 
-    const eventKey = `${cfg.leader}:${pool}:${source}:${tokenMint}:${residualRaw}`;
     const { issuedAtSlot, deadlineSlot } = await slots();
     await publish({
       commandId: deriveCommandId(eventKey),
@@ -969,7 +999,9 @@ async function main(): Promise<void> {
     const residual = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint));
     const decision = decideResidualSell(residual, SELL_RESIDUAL_DUST_RAW); // sell ANY residual; minSellOutLamports gates economics post-quote
     if (!decision.sell) {
-      void journal.record({ stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, detail: { tokenMint } });
+      // dynamic reason: `no_residual` → swap.no_residual (internal). (`dust` is unreachable here — the dust threshold
+      // is 0 so a sub-dust balance is already `no_residual`; if it ever fired it would take the deterministic fallback.)
+      emitFor(decision.reason, { stage: 'sell', outcome: 'skipped', reason: decision.reason, leader: cfg.leader, pool: ev.pool, eventKey: `${cfg.leader}:${ev.pool}:close-sell:${ev.positionPubkey ?? tokenMint}`, adminDetail: { mint: tokenMint } });
       return;
     }
     await publishSell(tokenMint, residual, ev.pool, 'close');
@@ -986,11 +1018,14 @@ async function main(): Promise<void> {
     // still-present in-flight token means the open failed → it IS a stranded residual → swept.
     const toSweep = planWalletSweep(balances, WSOL_MINT, SELL_RESIDUAL_DUST_RAW).filter((b) => swNow - (inFlightBuyMints.get(b.mint) ?? 0) >= INFLIGHT_BUY_GRACE_MS);
     if (toSweep.length === 0) return;
-    void journal.record({ stage: 'sweep', outcome: 'detected', leader: cfg.leader, detail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
+    // `eventKey` is the per-cycle correlation (swNow): each periodic sweep that finds a residual is its own row
+    // (the operator must see a still-stranded residual each cycle), while WS/poll have no part here. The per-mint
+    // failure shares the cycle stamp + mint so a retry within the same cycle collapses, distinct cycles don't.
+    events.emit('swap.sweep_detected', { stage: 'sweep', outcome: 'detected', leader: cfg.leader, eventKey: `${cfg.leader}:sweep:${swNow}`, adminDetail: { count: toSweep.length, mints: toSweep.map((b) => b.mint) } });
     for (const b of toSweep) {
       await publishSell(b.mint, b.amountRaw, ownerPk.toBase58(), 'sweep').catch((e) => {
-        void journal.record({ stage: 'sweep', outcome: 'failed', reason: 'build_error', leader: cfg.leader, detail: { mint: b.mint, error: (e as Error).message } });
-        return alert(log, 'wallet sweep sell failed to build/publish', { error: (e as Error).message, mint: b.mint });
+        // A sweep sell that fails to build/publish is the swap-failed path → pinned, feed-visible (SPEC §2.1 swap).
+        events.swapFailed({ stage: 'sweep', outcome: 'failed', reason: 'failed_after_retries', leader: cfg.leader, eventKey: `${cfg.leader}:sweep:${swNow}:${b.mint}`, adminDetail: { mint: b.mint, error: (e as Error).message } });
       });
     }
   }
@@ -1006,7 +1041,10 @@ async function main(): Promise<void> {
     const action = classifyEventAction(e, tracked, { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol }, rugExited.has(e.position)); // pure routing (unit-tested); rug-exited ⇒ no re-open
     log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
     if (action !== 'ignore') {
-      void journal.record({ stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, detail: { action, instruction: e.instruction } });
+      // `eventKey` = the per-leg detection correlation (sig:position) so the emit dedup keys uniquely PER routed
+      // leg — without it every routed event shares an empty correlation and the LRU would collapse them into one
+      // row (a lost-detect regression). WS + cursor-poll re-observations of the SAME leg correctly collapse to one.
+      void events.emit('detect.routed', { stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, eventKey: `${e.signature}:${e.position}`, adminDetail: { action, instruction: e.instruction } });
     }
     const act =
       action === 'open'
@@ -1049,7 +1087,7 @@ async function main(): Promise<void> {
 
   // No-dormant-token: at boot, sweep any non-SOL balance left on the wallet (a prior downtime, a missed/
   // rejected close-sell) back to SOL before resuming — the wallet must never sit on a dormant token.
-  await sweepWallet().catch((e) => alert(log, 'boot wallet sweep failed', { error: (e as Error).message }));
+  await sweepWallet().catch((e) => events.system('system.sweep_failed', e, { stage: 'sweep', outcome: 'failed', reason: 'sweep_failed', leader: cfg.leader, adminDetail: { phase: 'boot' } }));
 
   // No-dormant: reload persisted open mirrors + immediate failsafe (the leader may have closed during a
   // brain downtime → we close right away whatever must be closed before even resuming live).
@@ -1102,33 +1140,35 @@ async function main(): Promise<void> {
           if (ev?.kind === 'close' && ev.pool) {
             if (ev.positionPubkey) await onCloseConfirmed(ev.positionPubkey); // prompt DB markClosed — no 30s wait
             await onCloseExecuted({ pool: ev.pool, positionPubkey: ev.positionPubkey }).catch((e) =>
-              alert(log, 'residual sell failed to build/publish', { error: (e as Error).message, pool: ev.pool }),
+              // close-residual sell build/publish failed → the swap-failed path (pinned, feed "swap manually").
+              events.swapFailed({ stage: 'sell', outcome: 'failed', reason: 'failed_after_retries', leader: cfg.leader, pool: ev.pool, commandId: ev.commandId, adminDetail: { error: (e as Error).message, pool: ev.pool } }),
             );
           } else if (ev?.kind === 'buy' && ev.commandId) {
             // a token BUY just landed → build+publish the OPEN (open buy) or the RESHAPE ADD (reshape buy), reading
             // the actual bought balance. Each helper no-ops if the commandId isn't its pending buy.
             if (pendingReshapeAdds.has(ev.commandId)) {
-              await publishReshapeAddAfterBuy(ev.commandId).catch((e) => alert(log, 'two-sided reshape add failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }));
+              await publishReshapeAddAfterBuy(ev.commandId).catch((e) => events.emit('reshape.add_failed', { stage: 'reshape', outcome: 'failed', reason: 'add_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId } }));
             } else {
-              await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) => alert(log, 'two-sided open failed to build/publish after buy', { error: (e as Error).message, commandId: ev.commandId }));
+              await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) => events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId } }));
             }
           } else if (ev?.kind === 'open' && ev.commandId && pendingToken2022Deposits.has(ev.commandId)) {
             // a Token-2022 open's empty position (TX1) just CONFIRMED → build+publish the deposit (TX2). (Classic
             // 1-tx opens also emit kind 'open' but are not in this map → ignored here.)
             await publishDepositAfterPositionCreated(ev.commandId).catch((e) =>
-              alert(log, 'token2022 deposit failed to build/publish after position created', { error: (e as Error).message, commandId: ev.commandId }),
+              // the deposit leg of a Token-2022 OPEN failed to build/publish → the open did not complete (open_failed).
+              events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_deposit' } }),
             );
           } else if (ev?.kind === 'add' && ev.commandId && pendingToken2022Mirrors.has(ev.commandId)) {
             // a Token-2022 open's deposit (TX2) just landed → persist the mirror (a reshape 'add' is not in this map).
             await finalizeToken2022Open(ev.commandId).catch((e) =>
-              alert(log, 'token2022 open failed to finalize after deposit', { error: (e as Error).message, commandId: ev.commandId }),
+              events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_finalize' } }),
             );
           }
           await evBus.ack(EV_EXECUTED_STREAM, 'brain', msg.id);
         }
         backoff = 1000;
       } catch (e) {
-        await alert(log, 'brain ev:executed loop errored — backoff', { error: (e as Error).message });
+        events.system('system.loop_errored', e, { stage: 'failsafe', outcome: 'failed', reason: 'loop_errored', leader: cfg.leader, adminDetail: { loop: 'ev_executed', backoff } });
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);
       }

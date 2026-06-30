@@ -11,15 +11,15 @@ import { utils } from '@coral-xyz/anchor';
 import { type Connection, type Keypair, Transaction } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import type { Logger } from 'pino';
-import { alert } from '@/copybot/alert';
 import { deriveCommandId } from '@/copybot/command-id';
 import { claimExecution } from '@/copybot/coffre/idempotency';
 import { confirmLanded, land } from '@/copybot/coffre/landing';
 import { landViaJito } from '@/copybot/coffre/jito-landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
+import type { CopyEvents } from '@/copybot/observability/copy-events';
 import { SignRequestSchema } from '@/domain/copybot/contracts';
-import type { Journal } from '@/domain/copybot/journal';
+import { type CopyCode, resolveLegacyReason } from '@/domain/copybot/observability/codes';
 import type { RedisBus } from '@/infrastructure/bus/redis-bus';
 import type { openDatabase } from '@/infrastructure/persistence/database';
 import { executions } from '@/infrastructure/persistence/schema';
@@ -43,7 +43,7 @@ export interface Ctx {
   bus: RedisBus;
   copier: Keypair;
   blockhashCache: BlockhashCache;
-  journal: Journal;
+  events: CopyEvents; // typed observability emitter (replaces the legacy Journal port — P2)
   maxTradeSol: number; // live re-clamp ceiling (DB config, env override) snapshotted per message
   jitoBundleUrl?: string; // when set, land via a Jito bundle (anti-sandwich) with a fallback to plain RPC
   signingEnabled: boolean; // false ⇒ dry-run (log "I would sign")
@@ -54,6 +54,16 @@ export interface Ctx {
   log: Logger;
 }
 
+/**
+ * Resolve a bare Wall B reason leaf (e.g. `signer_not_owner`, `program_not_allowed`) to its `wallb.<leaf>` code.
+ * The legacy journaled reason is `wallb:<leaf>` — `resolveLegacyReason` knows the two aliased forms; the rest are
+ * the unique `wallb.<leaf>` namespace leaf. Falls back to `wallb.program_not_allowed` only for a never-seen leaf
+ * (all Wall B rejects are a program/signer/destination violation of the same FAILSAFE class). Pure.
+ */
+function resolveWallbCode(leaf: string): CopyCode {
+  return resolveLegacyReason(`wallb:${leaf}`) ?? resolveLegacyReason(leaf) ?? 'wallb.program_not_allowed';
+}
+
 /** Persist the terminal state of a command (the idempotency record). */
 export async function finalize<T extends { ok: boolean }>(db: Db, commandId: string, state: string, verdict: T): Promise<T> {
   await db.update(executions).set({ state, updatedAt: Date.now() }).where(eq(executions.commandId, commandId));
@@ -62,7 +72,7 @@ export async function finalize<T extends { ok: boolean }>(db: Db, commandId: str
 
 /** The critical section 5→13 (1-4 done by the bus). Returns a loggable verdict. Effects = DB + log + (when enabled) sign/land. */
 export async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
-  const { conn, db, bus, copier, blockhashCache, journal, maxTradeSol, jitoBundleUrl, log } = ctx;
+  const { conn, db, bus, copier, blockhashCache, events, maxTradeSol, jitoBundleUrl, log } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
   const parsed = SignRequestSchema.safeParse(payload); // 5
@@ -84,7 +94,7 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
   if (sr.sizeSol > maxTradeSol) {
-    void journal.record({ stage: 'sign', outcome: 'rejected', reason: 'over_max_trade', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, ourSizeSol: sr.sizeSol });
+    events.emit('sign.over_max_trade', { stage: 'sign', outcome: 'rejected', reason: 'over_max_trade', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, ourSizeSol: sr.sizeSol });
     return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'over_max_trade', kind: sr.kind }); // 9 re-clamp
   }
 
@@ -99,7 +109,12 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
   // Wall B binds a swap to owner's ATA of its non-SOL token: sell = the token sold, buy = the token bought.
   const wb = verifyTx(tx, { owner: sr.owner, pool: sr.pool, kind: sr.kind, positionPubkey: sr.positionPubkey, inputMint: sr.sell?.inputMint ?? sr.buy?.outputMint, maxLamports: wallBMaxLamports(maxTradeSol) });
   if (!wb.ok) {
-    void journal.record({ stage: 'sign', outcome: 'rejected', reason: `wallb:${wb.reason}`, kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId });
+    // Wall B reject → its precise `wallb.<leaf>` code. The verbatim journaled reason stays `wallb:<wb.reason>`
+    // (a `program_not_allowed:<prog>` carries its dynamic `<prog>` into adminDetail, per SPEC §2.1). The leaf is
+    // resolved from the bare wallb reason (the `:<prog>` suffix stripped) — all wallb leaves are internal.
+    const leaf = wb.reason.split(':')[0] ?? wb.reason; // strip a dynamic `:${prog}` suffix (program_not_allowed)
+    const code = resolveWallbCode(leaf);
+    events.emit(code, { stage: 'sign', outcome: 'rejected', reason: `wallb:${wb.reason}`, kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, adminDetail: wb.reason.includes(':') ? { program: wb.reason.slice(wb.reason.indexOf(':') + 1) } : undefined });
     return finalize(db, sr.commandId, 'failed', { ok: false, reason: `wallb:${wb.reason}`, kind: sr.kind });
   }
 
@@ -140,7 +155,7 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
       }
       // ev:executed carries the pool/position/owner so the brain can trigger the residual sell on a close.
       await bus.publish('copybot:ev:executed', 'ev:executed', ctx.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
-      void journal.record({ stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: sig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, detail: recovering ? { recovering: true } : undefined });
+      events.emit('sign.landed', { stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: sig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, adminDetail: recovering ? { recovering: true } : undefined });
       log.info({ kind: sr.kind, sig, attempt, busMs, signLandMs: Date.now() - tSign, totalMs: Date.now() - sr.issuedAtMs }, '🚀 signed + landed (confirmed)');
       return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
     } catch (e) {
@@ -149,14 +164,14 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
       if (attempt < ctx.retryMax) await sleep(ctx.retryDelayMs);
     }
   }
-  // Definitive failure (land threw after retries, OR landed-but-unconfirmed) → emergency: especially for a CLOSE
-  // (risk of a dormant position), we alert with the link. State 'failed' so the reconcile/orphan backstop re-drives it.
-  await alert(log, `${sr.kind.toUpperCase()} failed/unconfirmed — VERIFY/CLOSE MANUALLY`, {
-    commandId: sr.commandId,
-    position: sr.positionPubkey,
-    link: `https://app.meteora.ag/dlmm/${sr.pool}`,
-    error: lastErr?.message,
-  });
-  void journal.record({ stage: 'sign', outcome: 'failed', reason: 'sign_land_failed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, detail: { error: lastErr?.message } });
+  // Definitive failure (land threw after retries, OR landed-but-unconfirmed) → emergency. Two rows: the INTERNAL
+  // sign trace (`sign.land_failed`) and the FEED-VISIBLE pinned lifecycle/failsafe alert the user must act on
+  // ("VERIFY/CLOSE MANUALLY"). A close/open maps to its precise `lifecycle.*_failed` (risk of a dormant position);
+  // any other kind to the generic pinned `failsafe.failed`. `meteoraUrl` carries the "close manually" link.
+  // State 'failed' so the reconcile/orphan backstop re-drives it.
+  const meteoraUrl = `https://app.meteora.ag/dlmm/${sr.pool}`;
+  events.emit('sign.land_failed', { stage: 'sign', outcome: 'failed', reason: 'sign_land_failed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, adminDetail: { error: lastErr?.message } });
+  const failCode: CopyCode = sr.kind === 'close' ? 'lifecycle.close_failed' : sr.kind === 'open' ? 'lifecycle.open_failed' : 'failsafe.failed';
+  events.emit(failCode, { stage: 'sign', outcome: 'failed', reason: 'sign_land_failed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, adminDetail: { error: lastErr?.message, meteoraUrl, position: sr.positionPubkey } });
   return finalize(db, sr.commandId, 'failed', { ok: false, reason: 'sign_land_failed', kind: sr.kind });
 }
