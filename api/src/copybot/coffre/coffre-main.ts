@@ -10,8 +10,10 @@
 import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
-import { alert } from '@/copybot/alert';
-import { CopyJournalStore } from '@/copybot/journal-store';
+import { alert, bindAlertEvents } from '@/copybot/alert';
+import { CopyJournalStore, SYSTEM_USER_ID } from '@/copybot/journal-store';
+import { CopyEvents } from '@/copybot/observability/copy-events';
+import { EventStore } from '@/copybot/observability/event-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
@@ -56,7 +58,13 @@ async function main(): Promise<void> {
   const copier = loadCopierKeypair(cfg.keypairPath, cfg.owner);
   const conn = new Connection(cfg.httpUrl, 'confirmed');
   const db = openDatabase(cfg.dbUrl);
-  const journal = new CopyJournalStore(db, log, 'coffre'); // activity journal (fail-safe; never blocks signing)
+  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger, and
+  // the activity journal + alert() shims both route through it so every row back-fills user/wallet/correlation
+  // (SPEC §8 P1). Call sites still use `journal.record()` / `alert()` unchanged until P2.
+  const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
+  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
+  bindAlertEvents(events); // alert() now also persists a pinned, feed-visible row through the emitter
+  const journal = CopyJournalStore.withEvents(events, tlog, 'coffre'); // activity journal (fail-safe; never blocks signing)
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
   const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol;

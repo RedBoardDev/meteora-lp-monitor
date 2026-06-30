@@ -62,6 +62,34 @@ describe('CopyJournalStore — persistence (integration)', () => {
     expect(row.severity).toBe('error');
     expect(row.reason).toBe('wall_b_reject'); // producer's code stored verbatim
   });
+
+  it('P1 shim: back-fills the new observability columns (code/wallet/correlation/category/audience) on every row', async () => {
+    // WHY: P1's whole point is that every journaled row becomes attributable (WHERE wallet=$1) and code-tagged
+    // BEFORE any call-site rewrite. A mapped reason resolves to its leaf; the bound wallet/userId back-fill.
+    const store = new CopyJournalStore(db, noopLog, 'brain', 'COPYWALLET', 'tenant-1');
+    await store.record({ stage: 'open', outcome: 'skipped', reason: 'below_min_market_cap', eventKey: MARKER, commandId: 'CMD4', pool: 'POOLx' });
+
+    const row = (await db.select().from(copyJournal).where(eq(copyJournal.commandId, 'CMD4')))[0]!;
+    expect(row.code).toBe('filter.below_min_market_cap'); // reason → leaf (resolveLegacyReason)
+    expect(row.category).toBe('FILTER'); // denormalized from the resolved code
+    expect(row.audience).toBe('feed');
+    expect(row.wallet).toBe('COPYWALLET'); // bound per-instance (the filter key)
+    expect(row.userId).toBe('tenant-1');
+    expect(row.correlationId).toBe('CMD4'); // commandId ?? eventKey
+    expect(row.reason).toBe('below_min_market_cap'); // verbatim reason still preserved
+  });
+
+  it('P1 shim: an unmapped reason back-fills the deterministic FALLBACK code (internal, never a fake feed alert)', async () => {
+    const store = new CopyJournalStore(db, noopLog, 'coffre');
+    await store.record({ stage: 'sweep', outcome: 'failed', reason: 'build_error', eventKey: MARKER, commandId: 'CMD5' });
+
+    const row = (await db.select().from(copyJournal).where(eq(copyJournal.commandId, 'CMD5')))[0]!;
+    expect(row.code).toBe('system.unmapped'); // no leaf → deterministic fallback
+    expect(row.audience).toBe('internal'); // an unmapped reason never surfaces to the user
+    expect(row.pinned).toBe(false);
+    expect(row.severity).toBe('error'); // LEGACY severity governs in P1 (failed → error), NOT the fallback's 'warn'
+    expect(row.reason).toBe('build_error'); // verbatim reason preserved for P2 migration
+  });
 });
 
 describe('CopyJournalStore — clean stdout event line', () => {

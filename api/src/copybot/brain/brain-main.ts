@@ -44,9 +44,11 @@ import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
-import { alert } from '@/copybot/alert';
+import { alert, bindAlertEvents } from '@/copybot/alert';
 import { ConfigStore } from '@/copybot/config-store';
-import { CopyJournalStore } from '@/copybot/journal-store';
+import { CopyJournalStore, SYSTEM_USER_ID } from '@/copybot/journal-store';
+import { CopyEvents } from '@/copybot/observability/copy-events';
+import { EventStore } from '@/copybot/observability/event-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { type BrainStatusDetail, HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
@@ -177,7 +179,13 @@ async function main(): Promise<void> {
   const registry = new MirrorRegistry();
   const db = openDatabase(cfg.dbUrl);
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
-  const journal = new CopyJournalStore(db, log, 'brain'); // activity journal (fail-safe; never blocks the hot path)
+  // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger, and
+  // the activity journal + alert() shims both route through it so every row back-fills user/wallet/correlation
+  // (SPEC §8 P1). Call sites still use `journal.record()` / `alert()` unchanged until P2.
+  const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
+  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
+  bindAlertEvents(events); // alert() now also persists a pinned, feed-visible row through the emitter
+  const journal = CopyJournalStore.withEvents(events, tlog, 'brain'); // activity journal (fail-safe; never blocks the hot path)
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // the CopybotConfig blob; polled + ping-reloaded live below
   const reloadConfig = async (): Promise<void> => {

@@ -197,11 +197,27 @@ export const copyJournal = pgTable(
     signature: text('signature'), // on-chain tx sig (landed) or leader trigger sig (detect)
     latencyMs: integer('latency_ms'), // build+publish (brain) or sign+land (coffre)
     detail: jsonb('detail'), // free-form long tail (bin ranges, fidelity, filter sub-code)
+    // ── observability redesign (SPEC §5) — additive + nullable until the call-site cutover (P2). ──────────────
+    userId: text('user_id'), // tenant FK → users.id; mono-user PoC = SYSTEM_USER_ID
+    wallet: text('wallet'), // the COPY wallet (cfg.ownerPubkey) — THE admin/user filter key
+    correlationId: text('correlation_id'), // = command_id ?? event_key — threads one lifecycle + the dedup key
+    eventTs: ms('event_ts'), // explicit business/observed time (closes the implicit-ts gap)
+    code: text('code'), // canonical `namespace.leaf` CopyCode (back-fills the ad-hoc reason)
+    category: text('category'), // denormalized CopyCategory (LIFECYCLE | DETECT | …)
+    audience: text('audience'), // internal | feed — the user-feed read-model filters on this
+    pinned: boolean('pinned'), // critical-after-retries → surfaced as a feed alert
+    deliveredAt: ms('delivered_at'), // future external-push outbox state; unused while feed-only
   },
   (t) => [
     index('idx_copy_journal_ts').on(t.ts), // feed: ORDER BY ts DESC
     index('idx_copy_journal_leader_ts').on(t.leader, t.ts), // per-leader feed
     index('idx_copy_journal_our_position').on(t.ourPosition), // per-position drill-down
+    index('idx_copy_journal_wallet_ts').on(t.wallet, t.ts), // all logs (+ feed) for one wallet
+    index('idx_copy_journal_user_ts').on(t.userId, t.ts), // admin per-tenant timeline
+    index('idx_copy_journal_code').on(t.code), // filter by code (e.g. code LIKE 'wallb.%')
+    // Durable dedup backstop (SPEC §6): WS + cursor-poll observations of the same (wallet, correlation, code)
+    // collapse to one row even if the in-process LRU was reset (process restart).
+    uniqueIndex('uq_copy_journal_wallet_corr_code').on(t.wallet, t.correlationId, t.code),
   ],
 )
 

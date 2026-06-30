@@ -1,0 +1,171 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > add (intended size, first add, D-6 labelled) 1`] = `
+{
+  "emoji": "🟢",
+  "lineParts": [
+    "WIF/SOL",
+    "0.40 SOL (intended)",
+    "first add",
+  ],
+  "links": [],
+  "titleKey": "lifecycle.add_confirmed",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > add — infinite-add off variant 1`] = `
+{
+  "emoji": "⏭️",
+  "lineParts": [
+    "WIF/SOL",
+    "infinite-add off",
+  ],
+  "links": [],
+  "titleKey": "cap.infinite_add_skipped",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > close (intended size, D-6 labelled) 1`] = `
+{
+  "emoji": "🔴",
+  "lineParts": [
+    "WIF/SOL",
+    "size 0.85 SOL (intended)",
+  ],
+  "links": [
+    {
+      "label": "tx: aaaaaa…zzzzzz",
+      "url": "https://solscan.io/tx/aaaaaaaaaaaa11111111zzzzzzzzzzzz",
+    },
+  ],
+  "titleKey": "lifecycle.close_confirmed",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > failsafe-activated 1`] = `
+{
+  "emoji": "🛟",
+  "lineParts": [
+    "WIF/SOL",
+    "leader_closed",
+  ],
+  "links": [
+    {
+      "label": "tx: cccccc…xxxxxx",
+      "url": "https://solscan.io/tx/cccccccccccc33333333xxxxxxxxxxxx",
+    },
+  ],
+  "titleKey": "failsafe.activated",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > failsafe-failed (close manually link) 1`] = `
+{
+  "emoji": "🚨",
+  "lineParts": [
+    "WIF/SOL",
+    "close manually",
+  ],
+  "links": [
+    {
+      "label": "close manually",
+      "url": "https://app.meteora.ag/dlmm/POOL",
+    },
+  ],
+  "titleKey": "failsafe.failed",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > insufficient-balance (CONFIGURED value, D-2 labelled) 1`] = `
+{
+  "emoji": "⚠️",
+  "lineParts": [
+    "WIF/SOL",
+    "configured 0.42 / required 0.85 SOL — skipped",
+  ],
+  "links": [],
+  "titleKey": "balance.insufficient",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > open 1`] = `
+{
+  "emoji": "🟢",
+  "lineParts": [
+    "WIF/SOL",
+    "target 12.00 SOL",
+    "your 0.85 SOL",
+    "open 3",
+  ],
+  "links": [],
+  "titleKey": "lifecycle.open_confirmed",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > partial-remove 1`] = `
+{
+  "emoji": "🟠",
+  "lineParts": [
+    "WIF/SOL (−35%)",
+  ],
+  "links": [],
+  "titleKey": "lifecycle.remove_partial",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > skipped-cap 1`] = `
+{
+  "emoji": "🚫",
+  "lineParts": [
+    "WIF/SOL",
+    "cap: max_open_positions",
+  ],
+  "links": [],
+  "titleKey": "cap.max_open_positions",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > skipped-filter (transparency) 1`] = `
+{
+  "emoji": "🚫",
+  "lineParts": [
+    "WIF/SOL",
+    "filter: below_min_market_cap",
+  ],
+  "links": [],
+  "titleKey": "filter.below_min_market_cap",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > swap (intended SOL out, D-6 labelled) 1`] = `
+{
+  "emoji": "💱",
+  "lineParts": [
+    "124,500 WIF → 0.31 SOL (intended)",
+  ],
+  "links": [
+    {
+      "label": "tx: bbbbbb…yyyyyy",
+      "url": "https://solscan.io/tx/bbbbbbbbbbbb22222222yyyyyyyyyyyy",
+    },
+  ],
+  "titleKey": "swap.executed",
+}
+`;
+
+exports[`render-user · SOL-only feed templates (SPEC §3.2) > swap-failed (jup manual link) 1`] = `
+{
+  "emoji": "🚨",
+  "lineParts": [
+    "WIF/SOL",
+    "swap failed — swap manually",
+  ],
+  "links": [
+    {
+      "label": "swap manually",
+      "url": "https://jup.ag/swap/WIF-SOL",
+    },
+  ],
+  "titleKey": "swap.failed_after_retries",
+}
+`;
