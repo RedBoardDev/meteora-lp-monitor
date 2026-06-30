@@ -1,5 +1,41 @@
 import { describe, expect, it } from 'vitest';
-import { type BinSol, type ReshapeOp, type WeightBinShape, fillContiguousWeights, lamportsToSol, planReshape, reshapeToCalls } from './position-adjust';
+import { type BinSol, type ReshapeOp, type WeightBinShape, chunkBySpan, fillContiguousWeights, lamportsToSol, planReshape, reshapeToCalls } from './position-adjust';
+
+describe('chunkBySpan — split a wide reshape add into ≤maxSpan-bin chunks (each a single-tx deposit)', () => {
+  const adds = (...binIds: number[]) => binIds.map((binId) => ({ binId, addSol: 0.01 }));
+
+  it('a narrow add (span ≤ maxSpan) → ONE chunk (unchanged single-tx behaviour)', () => {
+    const chunks = chunkBySpan(adds(10, 11, 12, 13, 14), 25);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toHaveLength(5);
+  });
+
+  it('a wide add (span > maxSpan) → split so each chunk spans ≤ maxSpan bins (the SDK 1-tx limit)', () => {
+    // WHY: a ≥26-bin by-weight deposit chunks into [pre, main, post] in the SDK → can't be one published tx. Each
+    // chunk must span ≤25 bins so its addLiquidityOneSide fits a single tx; together they deposit the full deficit.
+    const wide = adds(...Array.from({ length: 40 }, (_, i) => 100 + i)); // 40 contiguous bins (span 40)
+    const chunks = chunkBySpan(wide, 25);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) expect(c.at(-1)!.binId - c[0]!.binId + 1).toBeLessThanOrEqual(25); // every chunk fits one tx
+    expect(chunks.flat()).toHaveLength(40); // no bin dropped
+  });
+
+  it('span boundary: exactly maxSpan stays one chunk, maxSpan+1 splits (the deposit fills the contiguous range)', () => {
+    expect(chunkBySpan(adds(0, 24), 25)).toHaveLength(1); // span 25 = limit → one chunk
+    expect(chunkBySpan(adds(0, 25), 25)).toHaveLength(2); // span 26 > limit → split (no off-by-one → no oversized tx)
+  });
+
+  it('sparse bins are grouped by span, not count (gaps count toward the span the deposit must fill)', () => {
+    // bins 0 and 30 are 31 apart → can't share a ≤25-span chunk even though there are only 2.
+    expect(chunkBySpan(adds(0, 30), 25)).toHaveLength(2);
+  });
+
+  it('sorts by binId before chunking (unordered input is handled)', () => {
+    const chunks = chunkBySpan(adds(30, 0, 10), 25);
+    expect(chunks[0]![0]!.binId).toBe(0); // chunk 1 = {0,10} (span 11), chunk 2 = {30}
+    expect(chunks).toHaveLength(2);
+  });
+});
 
 describe('lamportsToSol', () => {
   it('converts lamports → SOL exactly', () => {

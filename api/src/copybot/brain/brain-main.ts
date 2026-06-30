@@ -24,8 +24,8 @@ import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-to
 import { TtlCache } from '@/domain/copybot/ttl-cache';
 import { type EventSource, LeaderDetector } from '@/domain/copybot/leader-detector';
 import { LeaderPositionTracker } from '@/domain/copybot/leader-position';
-import { isWideOpen } from '@/domain/copybot/open-routing';
-import { fillContiguousWeights, lamportsToSol, reshapeToCalls } from '@/domain/copybot/position-adjust';
+import { ATOMIC_BY_WEIGHT_BIN_LIMIT, isWideOpen } from '@/domain/copybot/open-routing';
+import { chunkBySpan, fillContiguousWeights, lamportsToSol, reshapeToCalls } from '@/domain/copybot/position-adjust';
 import { reanchorShape } from '@/domain/copybot/reanchor';
 import { type TwoSidedPlan, planTwoSided, planTwoSidedReshape, sizeTwoSided } from '@/domain/copybot/two-sided';
 import { planReconcile } from '@/domain/copybot/reconciliation';
@@ -909,15 +909,24 @@ async function main(): Promise<void> {
         events.emit('reshape.token_unbuyable', { stage: 'reshape', outcome: 'skipped', reason: 'reshape_token_unbuyable', leader: cfg.leader, pool: m.pool, leaderPosition: e.position, ourPosition: m.ourPosition, eventKey: reshapeSkipKey(e, m), adminDetail: { mint: tokenMint, nonSolSymbol: m.nonSolSymbol, err: (err as Error).message } });
       }
     } else if (adds.length > 0) {
-      const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
-      const shaped = reanchorShape(0, 0, adds.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))); // delta 0: keep binIds, amounts → BPS
-      // CONTIGUOUS span: a selective/deadband add (or a re-anchor that drops a tiny interior bin) leaves binId gaps;
-      // the SDK by-weight rejects those ("Discontinuous Bin ID"). Fill them with 0/0 — same as the two-sided path.
-      const dist: WeightBin[] = fillContiguousWeights(shaped.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 })));
-      const addLamports = BigInt(Math.round(totalAddSol * 1e9));
-      const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? addLamports : 0n, solSide === 'Y' ? addLamports : 0n, dist, pair);
-      const eventKey = `${cfg.leader}:${m.pool}:reshape-add:${e.signature}`;
-      await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(onlyTx(built, 'reshape add')), sizeSol: totalAddSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
+      // A reshape ADD spanning ≥26 bins would chunk the SDK by-weight deposit into [pre, main, post] (deposit not the
+      // first tx) → can't be one published tx. Split the deficit into ≤25-bin-span CHUNKS, each a self-contained
+      // single-tx addLiquidityOneSide (wrap+deposit+unwrap), published INDEPENDENTLY (idempotent commandId, no
+      // cross-tx dependency → landed in parallel). The copy grows by the FULL deficit. A narrow add = one chunk.
+      const chunks = chunkBySpan(adds, ATOMIC_BY_WEIGHT_BIN_LIMIT - 1); // each chunk's bin span ≤ 25 → one tx
+      let ci = 0;
+      for (const chunk of chunks) {
+        const chunkSol = chunk.reduce((s, a) => s + a.addSol, 0);
+        const shaped = reanchorShape(0, 0, chunk.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))); // delta 0: keep binIds, amounts → BPS (normalized within the chunk)
+        // CONTIGUOUS span: a selective/deadband add (or a re-anchor that drops a tiny interior bin) leaves binId gaps;
+        // the SDK by-weight rejects those ("Discontinuous Bin ID"). Fill them with 0/0 — same as the two-sided path.
+        const dist: WeightBin[] = fillContiguousWeights(shaped.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 })));
+        const chunkLamports = BigInt(Math.round(chunkSol * 1e9));
+        const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? chunkLamports : 0n, solSide === 'Y' ? chunkLamports : 0n, dist, pair);
+        const eventKey = `${cfg.leader}:${m.pool}:reshape-add${ci}:${e.signature}`; // per-chunk key → distinct idempotent commands
+        await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(onlyTx(built, 'reshape add chunk')), sizeSol: chunkSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
+        ci++;
+      }
     }
 
     const newSize = Math.min(copyRatio * leaderBins.reduce((s, b) => s + b.sol, 0), ec.sizing.maxTradeSizeSol);

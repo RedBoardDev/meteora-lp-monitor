@@ -64,6 +64,33 @@ export interface ReshapeCalls {
   adds: Array<{ binId: number; addSol: number }>;
 }
 
+/**
+ * Split reshape adds into CONTIGUOUS-SPAN chunks each ≤ `maxSpan` bins wide, so each chunk's by-weight deposit fits the
+ * SDK's single-tx limit (a ≥26-bin add chunks into [pre, main, post] otherwise → can't be published as one tx). Items
+ * are sorted by binId; a new chunk starts whenever including the next bin would push the chunk's SPAN (maxBin − minBin
+ * + 1) past `maxSpan` (span, not count, because the deposit fills the contiguous range). Each chunk is then a
+ * self-contained single-tx add and they're published independently (no cross-tx dependency) so the copy grows by the
+ * full deficit. A narrow add returns a single chunk (= the original behaviour). Pure.
+ */
+export function chunkBySpan<T extends { binId: number }>(items: T[], maxSpan: number): T[][] {
+  const sorted = [...items].sort((a, b) => a.binId - b.binId);
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let startBin = 0;
+  for (const item of sorted) {
+    if (current.length === 0) {
+      startBin = item.binId;
+    } else if (item.binId - startBin + 1 > maxSpan) {
+      chunks.push(current);
+      current = [];
+      startBin = item.binId;
+    }
+    current.push(item);
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 /** Map per-offset re-shape ops to concrete SDK calls in OUR binId space (`ourBinId = baseBin + offset`, where
  *  `offset` is relative to each position's LOWER bin and `baseBin` = our position's lower — the alignment fixed
  *  at the re-anchored open). Collapses contiguous same-bps removes into ranges to minimize txs. Pure. */

@@ -53,6 +53,19 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · A1′ — WIDE
       await assertWideOpenFaithful(POOL_STABLE, await h.leaderOpen({ pool: POOL_STABLE, dist: flatDist(50), sol: 0.14 }));
     }, 240_000);
 
+    // WIDE reshape GROW ("rajout"): open wide, then the leader ADDS across the full ≥26-bin range → the bot mirrors via
+    // CHUNKED adds (≤25-bin spans, published independently). The copy's size must increase + settle. Before the fix a
+    // ≥26-bin reshape add was safe-skipped (onlyTx throw) → the copy never grew.
+    it('wide open then leader grows the full ≥26-bin range → copy grows via chunked adds (wide rajout)', async () => {
+      const leaderPos = await h.leaderOpen({ pool: POOL_STABLE, dist: flatDist(30), sol: 0.1 });
+      const copyPos = await h.waitForCopy(POOL_STABLE, WAIT_COPY_MS);
+      const before = await h.fidelity(POOL_STABLE, leaderPos, copyPos);
+      await h.leaderAdd({ pool: POOL_STABLE, dist: flatDist(30), sol: 0.06 }); // grow across the same wide range (≥26 bins)
+      const after = await h.waitForCopyResize(POOL_STABLE, leaderPos, copyPos, (copySol) => copySol > before.totalCopySol * 1.25);
+      expect(after.totalCopySol).toBeGreaterThan(before.totalCopySol * 1.25); // the wide add actually deposited (grew)
+      expect(after.maxSolLegDiffPct).toBeLessThan(MAX_SOL_LEG_DIFF_PCT); // …and stayed shape-faithful across the chunks
+    }, 300_000);
+
     // WIDE partial REMOVE ("retrait"): open wide, then the leader trims 50% → the bot mirrors a remove (≤70 bins → 1
     // tx, always safe). The copy's economic size must shrink + settle. Proves a reshape REMOVE on a wide position.
     it('wide open then leader removes 50% → copy shrinks (wide remove)', async () => {
