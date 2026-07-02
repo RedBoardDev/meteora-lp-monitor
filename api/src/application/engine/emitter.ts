@@ -1,4 +1,4 @@
-import type { LiveEvent, OpenPosition, WalletState } from '@binsight/shared';
+import type { Health, LiveEvent, OpenPosition, WalletState } from '@binsight/shared';
 import type { EventBus } from '@/application/event-bus';
 import type { HealthMonitor } from '@/application/health-monitor';
 import { buildWalletState, combineOnchain } from '@/application/wallet-state';
@@ -8,6 +8,14 @@ import type { WalletRuntime } from './runtime';
 
 export class StateEmitter {
   private seq = 0;
+  // Change signature of the last health frame we broadcast (excludes the monotonic uptime). The engine
+  // computes health every 1s tick; the WS layer re-sorts/filters/stringifies it per distinct watched-set
+  // on EVERY emit → O(users × wallets) work. Skipping the emit when nothing a client renders changed
+  // removes that idle-per-second churn while still emitting the instant a real field changes.
+  private lastHealthSig: string | null = null;
+  // Last effectiveRps seen by emitHealth — so a fresh WS client can be handed the CURRENT health on
+  // connect (emit-on-change means it wouldn't otherwise get a frame until the next real change).
+  private lastEffectiveRps = 0;
 
   constructor(
     private readonly wallets: Map<string, WalletRuntime>,
@@ -42,10 +50,12 @@ export class StateEmitter {
     this.bus.emit('state', buildWalletState(address, [...rt.open.values()], rt.onchain));
   }
 
-  emitHealth(effectiveRps: number): void {
+  /** Build the CURRENT health payload without emitting or touching the emit-on-change dedup state — the
+   *  single source of truth for the frame shape. Used by emitHealth and by the WS layer to hand a fresh
+   *  client the live health on connect. Defaults to the last effectiveRps seen by the 1s tick. */
+  snapshotHealth(effectiveRps: number = this.lastEffectiveRps): Health {
     const wsOk = this.subscriber.isConnected();
-    this.health.set('ws', wsOk ? 'ok' : 'down', wsOk ? undefined : 'disconnected');
-    this.bus.emit('health', {
+    return {
       ok: this.health.ok,
       wsConnected: wsOk,
       meteoraOk: this.health.statusOf('meteora') !== 'down',
@@ -54,7 +64,7 @@ export class StateEmitter {
       sources: this.health.list(),
       wallets: [...this.wallets.values()].map((w) => ({
         wallet: w.address,
-        wsConnected: this.subscriber.isConnected(),
+        wsConnected: wsOk,
         lastPollAt: w.lastPollAt || null,
         lastPollOk: w.lastPollOk,
         pollIntervalMs: w.pollIntervalMs,
@@ -62,7 +72,22 @@ export class StateEmitter {
         syncProgress: w.reconciled ? 1 : null,
       })),
       uptimeSeconds: Math.floor(process.uptime()),
-    });
+    };
+  }
+
+  emitHealth(effectiveRps: number): void {
+    this.lastEffectiveRps = effectiveRps;
+    const wsOk = this.subscriber.isConnected();
+    this.health.set('ws', wsOk ? 'ok' : 'down', wsOk ? undefined : 'disconnected');
+    const payload = this.snapshotHealth(effectiveRps);
+    // Emit-on-change: uptimeSeconds ticks every second and would defeat the dedup, so it's excluded from
+    // the change signature (it refreshes on the next real change). Any status / rps / chain-tip / wallet
+    // change still emits immediately — freshness is preserved, only the idle re-broadcast is dropped.
+    const { uptimeSeconds: _uptimeSeconds, ...changing } = payload;
+    const sig = JSON.stringify(changing);
+    if (sig === this.lastHealthSig) return;
+    this.lastHealthSig = sig;
+    this.bus.emit('health', payload);
   }
 
   /** Aggregate state across the given wallet addresses (the caller's watchlist), labelled `scope`. */

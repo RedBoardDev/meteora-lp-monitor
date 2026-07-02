@@ -1,21 +1,21 @@
 /**
- * Copy-bot — import-firewall (machine-checké). Garantit l'isolation de la zone coffre :
- *  F1 : SEUL le coffre importe la clé (`coffre/keypair.ts`) — le brain ne peut pas nommer la clé.
- *  F3 : le coffre n'importe PAS le SDK DLMM (ni les modules qui le chargent) — Wall B re-décode sans le SDK.
- * Lancé depuis api/ :  yarn depcruise src/copybot --config .dependency-cruiser.cjs
+ * Copy-bot — import-firewall (machine-checked). Guarantees isolation of the coffre zone:
+ *  F1: ONLY the coffre imports the key (`coffre/keypair.ts`) — the brain cannot name the key.
+ *  F3: the coffre NEVER loads the DLMM SDK (nor the modules that load it) — Wall B re-decodes without the SDK.
+ * Run from api/:  yarn depcruise src/copybot --config .dependency-cruiser.cjs
  */
 module.exports = {
   forbidden: [
     {
       name: 'F1-only-coffre-imports-keypair',
-      comment: 'La clé privée ne se charge que dans le coffre.',
+      comment: 'The private key is only loaded inside the coffre.',
       severity: 'error',
       from: { pathNot: 'src/copybot/coffre/' },
       to: { path: 'src/copybot/coffre/keypair\\.ts$' },
     },
     {
       name: 'F3-no-dlmm-sdk-in-coffre',
-      comment: 'Le coffre ne charge jamais le SDK DLMM (firewall F3) ; Wall B décode à la main.',
+      comment: 'The coffre never loads the DLMM SDK (firewall F3); Wall B decodes by hand.',
       severity: 'error',
       from: { path: 'src/copybot/coffre/' },
       to: {

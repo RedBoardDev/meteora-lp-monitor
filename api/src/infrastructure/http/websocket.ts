@@ -140,6 +140,14 @@ export function registerWebSocket(
     clients.add(client);
     pushViewers();
     send(socket, { type: 'state', payload: engine.getState([...client.watched], 'all') });
+    // Health is emit-on-change (no longer every 1s), so a client that connects while health is stable
+    // would sit with no status until the next real change. Hand it the CURRENT health immediately,
+    // filtered to its watchlist — mirroring the per-client filtering in the bus.on('health') handler.
+    const health = engine.healthSnapshot();
+    send(socket, {
+      type: 'health',
+      payload: { ...health, wallets: health.wallets.filter((w) => client.watched.has(w.wallet)) },
+    });
 
     socket.on('message', async (raw: Buffer) => {
       const parsed = ClientMessageSchema.safeParse(safeJson(raw.toString()));

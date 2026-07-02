@@ -1,4 +1,5 @@
 import {
+  type Health,
   type OpenPosition,
   type PositionBins,
   type PositionHistory,
@@ -182,6 +183,12 @@ export class Engine {
 
   getState(wallets: string[], scope: string): WalletState {
     return this.emitter.getState(wallets, scope);
+  }
+
+  /** Current health snapshot — lets the WS layer hand a freshly-connected client the live status right
+   *  away (emit-on-change means it wouldn't otherwise receive a frame until the next real change). */
+  healthSnapshot(): Health {
+    return this.emitter.snapshotHealth();
   }
 
   /** Per-bin liquidity of one open position (Price-Bin histogram). Null if closed/missing. */

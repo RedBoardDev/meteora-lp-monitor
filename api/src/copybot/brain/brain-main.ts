@@ -465,7 +465,7 @@ async function main(): Promise<void> {
     // binId gap → "Discontinuous Bin ID". Fill gaps with 0/0 (min/max unchanged, so targetBinRange stays correct).
     const dist: WeightBin[] = fillContiguousWeights(reanchored.weights.map((w) => ({ binId: w.binId, xBps: meta.solSide === 'X' ? w.bps : 0, yBps: meta.solSide === 'Y' ? w.bps : 0 })));
 
-    const sizeLamports = BigInt(Math.round(decision.sizeSol * 1e9));
+    const sizeLamports = BigInt(Math.round(decision.sizeSol * LAMPORTS_PER_SOL));
     const totalX = meta.solSide === 'X' ? sizeLamports : 0n;
     const totalY = meta.solSide === 'Y' ? sizeLamports : 0n;
     const lower = reanchored.lowerBinId;
@@ -509,8 +509,8 @@ async function main(): Promise<void> {
   async function openTwoSided(e: DetectedEvent, tokenMint: string, solSide: 'X' | 'Y', plan: TwoSidedPlan): Promise<void> {
     const ec = eff();
     // Scale BOTH legs by copyRatio of the leader's respective legs (preserves composition), SOL leg capped.
-    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, ec.sizing.tradeRatioPct ?? 100, BigInt(Math.round(ec.sizing.maxTradeSizeSol * 1e9)));
-    const sizeSol = Number(sizeLamports) / 1e9;
+    const { solLamports: sizeLamports, tokenTarget } = sizeTwoSided(plan.leaderSolRaw, plan.leaderTokenRaw, ec.sizing.tradeRatioPct ?? 100, BigInt(Math.round(ec.sizing.maxTradeSizeSol * LAMPORTS_PER_SOL)));
+    const sizeSol = Number(sizeLamports) / LAMPORTS_PER_SOL;
     const dist: WeightBin[] = fillContiguousWeights(plan.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.solBps : w.tokenBps, yBps: solSide === 'Y' ? w.solBps : w.tokenBps }))); // contiguous span (SDK by-weight requirement)
     // ExactIn buy: ExactOut has NO Jupiter route for most memecoins (NO_ROUTES_FOUND). Price the token leg via the
     // SELL direction (ExactIn, fully routed) → its SOL value → spend that to BUY the token (ExactIn). The token
@@ -545,13 +545,13 @@ async function main(): Promise<void> {
       positionPubkey: ownerPk.toBase58(), // n/a for a swap — Wall B binds to owner's ATA of the bought token
       owner: ownerPk.toBase58(),
       txBase64: buyTxB64,
-      sizeSol: Number(buyQuote.inAmount) / 1e9, // the ExactIn SOL input (spend) → re-clamped against maxTradeSol by the coffre
+      sizeSol: Number(buyQuote.inAmount) / LAMPORTS_PER_SOL, // the ExactIn SOL input (spend) → re-clamped against maxTradeSol by the coffre
       targetBinRange: { lower: 0, upper: 0 },
       issuedAtSlot,
       deadlineSlot,
       buy: { outputMint: tokenMint, exactOutAmountRaw: buyQuote.outAmount, maxInLamports: buyQuote.inAmount }, // expected token (informational) + the SOL input (cap)
     });
-    log.info({ tokenMint, expectToken: buyQuote.outAmount, spendSol: Number(buyQuote.inAmount) / 1e9, solLamports: sizeLamports.toString(), bins: dist.length }, '🪙 two-sided BUY (ExactIn) published — the open follows once the buy lands');
+    log.info({ tokenMint, expectToken: buyQuote.outAmount, spendSol: Number(buyQuote.inAmount) / LAMPORTS_PER_SOL, solLamports: sizeLamports.toString(), bins: dist.length }, '🪙 two-sided BUY (ExactIn) published — the open follows once the buy lands');
   }
 
   /** Publish an open as TX1 createEmptyPosition (kind 'open') → TX2 addLiquidityByWeight2 (kind 'add'), sequenced via
@@ -887,7 +887,7 @@ async function main(): Promise<void> {
       const tokenAdds = tokenAddOps
         .map((o) => ({ binId: ourShape.lowerBinId + o.offset, raw: Math.round(o.addSol) }))
         .filter((a) => a.binId >= ourShape.lowerBinId && a.binId <= ourShape.upperBinId && a.raw > 0);
-      const solShaped = adds.length > 0 ? reanchorShape(0, 0, adds.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))) : null;
+      const solShaped = adds.length > 0 ? reanchorShape(0, 0, adds.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * LAMPORTS_PER_SOL)) }))) : null;
       const tokShaped = tokenAdds.length > 0 ? reanchorShape(0, 0, tokenAdds.map((a) => ({ binId: a.binId, amount: BigInt(a.raw) }))) : null;
       const byBin = new Map<number, WeightBin>();
       if (solShaped) for (const w of solShaped.weights) byBin.set(w.binId, { binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 });
@@ -902,7 +902,7 @@ async function main(): Promise<void> {
       // errors "Discontinuous Bin ID"). Fill the [min,max] span with 0/0 entries so the listed bins are contiguous.
       const dist: WeightBin[] = fillContiguousWeights([...byBin.values()]);
       const totalAddSol = adds.reduce((s, a) => s + a.addSol, 0);
-      const addLamports = BigInt(Math.round(totalAddSol * 1e9));
+      const addLamports = BigInt(Math.round(totalAddSol * LAMPORTS_PER_SOL));
       const totalTokenRaw = BigInt(tokenAdds.reduce((s, a) => s + a.raw, 0));
       // Price the token target (sell direction, fully routed) → spend that SOL via ExactIn (output variable → the add
       // is built after the buy lands, reading the real balance). Skip cleanly if the token can't be priced/bought.
@@ -916,7 +916,7 @@ async function main(): Promise<void> {
         const buyCommandId = deriveCommandId(buyKey);
         pendingReshapeAdds.set(buyCommandId, { dist, addLamports, solSide, tokenMint, lower: dist[0]!.binId, upper: dist.at(-1)!.binId, totalAddSol, ourPosition: m.ourPosition, pool: m.pool, leaderPosition: m.leaderPosition, signature: e.signature });
         inFlightBuyMints.set(tokenMint, Date.now()); // protect the bought token from the sweep until the reshape add deposits it
-        await publish({ commandId: buyCommandId, eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / 1e9, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: buyQuote.outAmount, maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
+        await publish({ commandId: buyCommandId, eventKey: buyKey, kind: 'buy', pool: m.pool, positionPubkey: ownerPk.toBase58(), owner: ownerPk.toBase58(), txBase64: buyTxB64, sizeSol: Number(buyQuote.inAmount) / LAMPORTS_PER_SOL, targetBinRange: { lower: 0, upper: 0 }, issuedAtSlot, deadlineSlot, buy: { outputMint: tokenMint, exactOutAmountRaw: buyQuote.outAmount, maxInLamports: buyQuote.inAmount } }, { stage: 'reshape', leaderPosition: m.leaderPosition });
         log.info({ our: m.ourPosition, tokenMint, bins: dist.length }, '🪙 two-sided reshape BUY (ExactIn) published — the add follows once the buy lands');
       } catch (err) {
         // SAFE: can't acquire the token deficit → the SOL-leg removes already published stand; skip the token add (no
@@ -932,11 +932,11 @@ async function main(): Promise<void> {
       let ci = 0;
       for (const chunk of chunks) {
         const chunkSol = chunk.reduce((s, a) => s + a.addSol, 0);
-        const shaped = reanchorShape(0, 0, chunk.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * 1e9)) }))); // delta 0: keep binIds, amounts → BPS (normalized within the chunk)
+        const shaped = reanchorShape(0, 0, chunk.map((a) => ({ binId: a.binId, amount: BigInt(Math.round(a.addSol * LAMPORTS_PER_SOL)) }))); // delta 0: keep binIds, amounts → BPS (normalized within the chunk)
         // CONTIGUOUS span: a selective/deadband add (or a re-anchor that drops a tiny interior bin) leaves binId gaps;
         // the SDK by-weight rejects those ("Discontinuous Bin ID"). Fill them with 0/0 — same as the two-sided path.
         const dist: WeightBin[] = fillContiguousWeights(shaped.weights.map((w) => ({ binId: w.binId, xBps: solSide === 'X' ? w.bps : 0, yBps: solSide === 'Y' ? w.bps : 0 })));
-        const chunkLamports = BigInt(Math.round(chunkSol * 1e9));
+        const chunkLamports = BigInt(Math.round(chunkSol * LAMPORTS_PER_SOL));
         const built = await buildAddByWeight(conn, poolPk, ownerPk, new PublicKey(m.ourPosition), solSide === 'X' ? chunkLamports : 0n, solSide === 'Y' ? chunkLamports : 0n, dist, pair);
         const eventKey = `${cfg.leader}:${m.pool}:reshape-add${ci}:${e.signature}`; // per-chunk key → distinct idempotent commands
         await publish({ commandId: deriveCommandId(eventKey), eventKey, kind: 'add', pool: m.pool, positionPubkey: m.ourPosition, owner: ownerPk.toBase58(), txBase64: serializeUnsigned(onlyTx(built, 'reshape add chunk')), sizeSol: chunkSol, targetBinRange: { lower: dist[0]!.binId, upper: dist.at(-1)!.binId }, issuedAtSlot, deadlineSlot });
