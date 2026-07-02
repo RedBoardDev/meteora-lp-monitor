@@ -95,18 +95,3 @@ export interface EffectiveConfig extends Overridable {
   /** This leader's own switch. */
   leaderEnabled: boolean;
 }
-
-/** A last-layer override (env / bench) applied AFTER `effectiveFor`. Migration bridge — removed once the bench
- *  drives the config directly. */
-export type EffectiveOverride = {
-  sizing?: Partial<SizingConfig>;
-  caps?: Partial<CapsConfig>;
-  twoSidedMode?: TwoSidedMode;
-  filters?: Partial<FilterConfig>;
-  execution?: Partial<ExecutionConfig>;
-  priorityFee?: Partial<PriorityFeeConfig>;
-  rugSl?: Partial<RugSlConfig>;
-  infiniteAdd?: boolean;
-  claimFloorSol?: number;
-  userEnabled?: boolean;
-};

@@ -6,11 +6,22 @@
  */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
+import { pino } from 'pino';
+import type { CapsConfig } from '@/domain/copybot/caps';
+import { openDatabase } from '@/infrastructure/persistence/database';
+import { seedBenchConfig } from './bench-config';
 import { LEADER_TEST } from './env';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 let coffre: ChildProcess | undefined;
 let brain: ChildProcess | undefined;
+
+// The bench seeds the bot's runtime config directly into the DB (see bench-config.ts) — same DB the brain reads
+// (Postgres :5435). Lazy so merely importing this module (base vitest collects the onchain files) opens no pool.
+const DB_URL = process.env.DATABASE_URL ?? 'postgres://meteora:meteora@localhost:5435/meteora';
+const benchLog = pino({ level: 'warn' }); // quiet — config-store info logs would spam the bench output
+let benchDb: ReturnType<typeof openDatabase> | undefined;
+const db = (): ReturnType<typeof openDatabase> => (benchDb ??= openDatabase(DB_URL));
 
 function spawnUntil(label: string, args: string[], env: NodeJS.ProcessEnv, ready: string, timeoutMs: number): Promise<ChildProcess> {
   const logFile = createWriteStream(`/tmp/bench-${label}.log`, { flags: 'w' });
@@ -30,16 +41,12 @@ function spawnUntil(label: string, args: string[], env: NodeJS.ProcessEnv, ready
   });
 }
 
-// DUST_TOKEN_RAW=1e6 (≈1 USDC, 6-dec): the two-sided CLASSIFICATION cutoff only — a fresh "spot" open picks up a
-// sub-1-USDC token leg from active-bin arb, NOT worth a two-sided buy (wasteful + flaky). Above this → genuine
-// two-sided. NB: it no longer gates SELLING — the close-sell + safety-sweep sell ANY non-SOL residual (gated by the
-// SOL-value floor minSellOutLamports), so the copier wallet always returns to SOL-only.
-// COPYBOT_INFINITE_ADD=true: the bench tests the RESIZE/GROW capability (follow the leader's adds); the product
-// default is false (Valhalla first-deposit-only), but the grow/lifecycle/two-sided tests need adds followed.
+// Bootstrap env ONLY (infra/secrets — NOT tunables; sizing/caps/two-sided/dust/infiniteAdd now live in the DB config
+// seeded by seedBenchConfig). COPYBOT_LEADER = the leader to follow (brain reads it directly for `cfg.leader`).
 // COPYBOT_DEV_BUS_KEY=true: the boot bus-key guard is fail-closed (rejects a missing/default BUS_HMAC_KEY); the bench
 // runs locally without a real key, so it opts into the public dev default explicitly. A real BUS_HMAC_KEY in the env
 // still takes precedence — this only unblocks the no-key local case.
-const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_DEV_BUS_KEY: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58(), COPYBOT_TWO_SIDED: 'on', COPYBOT_MIN_POSITION_SOL: '0.02', COPYBOT_TRADE_RATIO_PCT: '50', COPYBOT_INFINITE_ADD: 'true', DUST_TOKEN_RAW: '1000000' });
+const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_DEV_BUS_KEY: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58() });
 
 export async function startCoffre(): Promise<void> {
   if (coffre && coffre.exitCode === null) return;
@@ -56,15 +63,17 @@ export async function restartCoffre(): Promise<void> {
   await killCoffre();
   await startCoffre();
 }
-export async function startBrain(extraEnv: NodeJS.ProcessEnv = {}): Promise<void> {
+export async function startBrain(capsPatch: Partial<CapsConfig> = {}): Promise<void> {
   if (brain && brain.exitCode === null) return;
-  brain = await spawnUntil('brain', ['dist/copybot/src/copybot/brain/brain-main.cjs'], { ...brainEnv(), ...extraEnv }, 'replay done', 40_000);
+  await seedBenchConfig(db(), benchLog, capsPatch); // seed the DB config BEFORE boot so seedIfAbsent/load pick it up
+  brain = await spawnUntil('brain', ['dist/copybot/src/copybot/brain/brain-main.cjs'], brainEnv(), 'replay done', 40_000);
 }
-/** Restart the brain with EXTRA env (e.g. COPYBOT_KILL_SWITCH=true) to exercise a runtime config. The caller is
- *  responsible for restoring the default brain (restartBrain) afterwards — the test's afterEach does this. */
-export async function restartBrainWithEnv(extraEnv: NodeJS.ProcessEnv): Promise<void> {
+/** Restart the brain after patching the account-wide caps in the DB config (e.g. { killSwitchGlobal: true } or
+ *  { maxOpenPositions: 1 }) to exercise a runtime config. The caller is responsible for restoring the default brain
+ *  (restartBrain re-seeds the base bench config) afterwards — the test's afterEach does this. */
+export async function restartBrainWithConfig(capsPatch: Partial<CapsConfig>): Promise<void> {
   await killBrain();
-  await startBrain(extraEnv);
+  await startBrain(capsPatch);
 }
 /** Idempotent: start both if not already running. */
 export async function ensureBotStarted(): Promise<void> {
@@ -77,7 +86,7 @@ export async function killBrain(): Promise<void> {
   brain = undefined;
   await sleep(800);
 }
-/** Restart the brain (it re-runs replay + reconcile on boot). */
+/** Restart the brain (re-seeds the BASE bench config — clearing any prior caps patch — then re-runs replay + reconcile on boot). */
 export async function restartBrain(): Promise<void> {
   await killBrain();
   await startBrain();

@@ -10,7 +10,7 @@ import type { FilterConfig } from '../filters';
 import type { PriorityFeeConfig } from '../priority-fee';
 import type { RugSlConfig } from '../rug-sl';
 import type { SizingConfig } from '../sizing';
-import type { CopybotConfig, EffectiveConfig, EffectiveOverride, ExecutionConfig } from './types';
+import type { CopybotConfig, EffectiveConfig, ExecutionConfig } from './types';
 
 /** Merge a sparse leader sizing override onto the user sizing. `maxTradeSizeSol` is lower-only (tighten, never raise). */
 function mergeSizing(base: SizingConfig, ov?: Partial<SizingConfig>): SizingConfig {
@@ -63,25 +63,5 @@ export function effectiveFor(cfg: CopybotConfig, address: string): EffectiveConf
     caps,
     userEnabled: user.enabled,
     leaderEnabled,
-  };
-}
-
-/**
- * Apply a last-layer override (env / bench) AFTER `effectiveFor`. Migration bridge ONLY — the bench drives the bot
- * via env today; removed once it drives the config directly. An undefined field leaves the resolved value intact.
- */
-export function withEnvOverride(eff: EffectiveConfig, ov: EffectiveOverride): EffectiveConfig {
-  return {
-    ...eff,
-    sizing: ov.sizing ? { ...eff.sizing, ...ov.sizing } : eff.sizing,
-    caps: ov.caps ? { ...eff.caps, ...ov.caps } : eff.caps,
-    twoSidedMode: ov.twoSidedMode ?? eff.twoSidedMode,
-    filters: mergeFilters(eff.filters, ov.filters),
-    execution: mergeExecution(eff.execution, ov.execution),
-    priorityFee: mergePriorityFee(eff.priorityFee, ov.priorityFee),
-    rugSl: mergeRugSl(eff.rugSl, ov.rugSl),
-    infiniteAdd: ov.infiniteAdd ?? eff.infiniteAdd,
-    claimFloorSol: ov.claimFloorSol ?? eff.claimFloorSol,
-    userEnabled: ov.userEnabled ?? eff.userEnabled,
   };
 }

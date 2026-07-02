@@ -17,7 +17,7 @@ import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
 import { RugSlTracker } from '@/domain/copybot/rug-sl';
 import { jitoTipFor } from '@/domain/copybot/jito-tip';
-import { type EffectiveConfig, effectiveFor, withEnvOverride } from '@/domain/copybot/config';
+import { type EffectiveConfig, effectiveFor } from '@/domain/copybot/config';
 
 import { type FilterContext, filtersActive, neededSources, rangeCoveragePercent, resolveFilterContext, runFilters, type TokenSnapshot } from '@/domain/copybot/filters';
 import { JupiterTokenGateway } from '@/domain/copybot/filters/sources/jupiter-token/jupiter-token-gateway';
@@ -59,7 +59,6 @@ import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { LOG_MARKER_EVENT_ROUTED } from '@/copybot/log-markers';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
-import { envEffectiveOverride } from './env-overrides';
 import { applyPriorityFee, withCuLimit } from './compute-budget';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
@@ -128,10 +127,7 @@ const cfg = {
   priorityFeeOracleEnv: process.env.COPYBOT_PRIORITY_FEE_ORACLE !== undefined ? process.env.COPYBOT_PRIORITY_FEE_ORACLE === 'true' : undefined, // env override of the DB priorityFeeOracle
 };
 // Sizing/caps/two-sided/filters all come from the DB-backed config (config-store), resolved per leader via eff().
-// The env override (migration bridge) is SPARSE: a var, WHEN SET, takes precedence (preserves the on-chain bench);
-// an UNSET var falls through to the DB config so it stays authoritative in production.
-const ENV_EFFECTIVE_OVERRIDE = envEffectiveOverride(process.env);
-
+// The DB config is the SINGLE source of truth (the on-chain bench seeds it directly — see test-onchain/bench-config).
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 const firstTx = (t: Transaction | Transaction[]): Transaction => (Array.isArray(t) ? (t[0] as Transaction) : t);
 // A by-weight OPEN/ADD build must be a SINGLE tx — if the SDK chunked it (range too wide for one tx), publishing only
@@ -283,9 +279,9 @@ async function main(): Promise<void> {
   const reloadConfig = async (): Promise<void> => {
     runtimeConfig = await configStore.load();
   };
-  // Resolve the EFFECTIVE config for our (single) leader, then apply the env/bench override (migration bridge).
+  // Resolve the EFFECTIVE config for our (single) leader from the DB-backed config.
   // Pure + cheap → recomputed at each point of use so a live reload always takes effect on the next event.
-  const eff = (): EffectiveConfig => withEnvOverride(effectiveFor(runtimeConfig, cfg.leader), ENV_EFFECTIVE_OVERRIDE);
+  const eff = (): EffectiveConfig => effectiveFor(runtimeConfig, cfg.leader);
   const rugSlTracker = new RugSlTracker(RUG_SL_RETAIN_MS); // per-position price windows for the rug-SL crash check
   const rugExitStore = new RugExitStore(db, log); // durable set of LEADER positions we rug-exited (suppress re-open)
   const rugExited = await rugExitStore.load(); // seed across restart so a leader add can't re-enter a rug-exited position

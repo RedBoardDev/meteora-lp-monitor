@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { ensureBotStarted, restartBrain, restartBrainWithEnv } from './bot-controller';
+import { ensureBotStarted, restartBrain, restartBrainWithConfig } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
 import { sleep } from './util';
@@ -22,7 +22,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · safety envelop
   });
 
   it('kill-switch ON → leader opens → the bot does NOT copy (entry blocked, seen + refused)', async () => {
-    await restartBrainWithEnv({ COPYBOT_KILL_SWITCH: 'true' });
+    await restartBrainWithConfig({ killSwitchGlobal: true });
     await h.leaderOpen({ pool: POOL_STABLE, strategy: 'spot', sol: 0.1 });
     await sleep(NO_COPY_WINDOW_MS);
 
@@ -39,7 +39,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · safety envelop
     expect(await h.accountExists(copy)).toBe(true);
 
     // Flip the kill-switch ON, then close the leader → the EXIT must still fire (exits are not gated by caps).
-    await restartBrainWithEnv({ COPYBOT_KILL_SWITCH: 'true' });
+    await restartBrainWithConfig({ killSwitchGlobal: true });
     await h.leaderClose(POOL_STABLE);
     await h.waitForCopyClosed(copy); // throws if the kill-switch wrongly trapped us in the position
     expect(await h.accountExists(copy), 'kill-switch trapped us — the copy could not be closed').toBe(false);
@@ -48,7 +48,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · safety envelop
   it('maxOpenPositions cap → an open BEYOND the cap is NOT copied', async () => {
     // Small sizes (0.05 → copy 0.025 ≥ the 0.02 min): the leader holds TWO concurrent positions here, which must
     // both fit in the leader-test wallet's ~0.3 SOL (deposit + ~0.057 rent each).
-    await restartBrainWithEnv({ COPYBOT_MAX_OPEN_POSITIONS: '1' });
+    await restartBrainWithConfig({ maxOpenPositions: 1 });
     await h.leaderOpen({ pool: POOL_STABLE, strategy: 'spot', sol: 0.05 });
     const copy1 = await h.waitForCopy(POOL_STABLE); // within the cap → copied
     expect(await h.accountExists(copy1)).toBe(true);

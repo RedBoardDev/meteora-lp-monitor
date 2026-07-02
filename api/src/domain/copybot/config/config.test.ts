@@ -7,7 +7,6 @@ import {
   effectiveFor,
   isValidConfigBlob,
   parseConfig,
-  withEnvOverride,
 } from './index';
 
 const LEADER = DEFAULT_LEADER_ADDRESS;
@@ -203,21 +202,5 @@ describe('config · execution group', () => {
     const cfg = parseConfig(JSON.stringify({ user: { execution: { minSellOutLamports: 1 } } }));
     expect(cfg.user.execution.minSellOutLamports).toBe(1);
     expect(cfg.user.execution.slippageBps).toBe(CONFIG_DEFAULTS.user.execution.slippageBps);
-  });
-});
-
-describe('config · withEnvOverride (migration bridge)', () => {
-  it('applies only the provided fields, leaving the rest of the resolved config intact', () => {
-    const eff = effectiveFor(CONFIG_DEFAULTS, LEADER);
-    const out = withEnvOverride(eff, { caps: { killSwitchGlobal: true, maxOpenPositions: 2 }, twoSidedMode: 'on' });
-    expect(out.caps.killSwitchGlobal).toBe(true);
-    expect(out.caps.maxOpenPositions).toBe(2);
-    expect(out.twoSidedMode).toBe('on');
-    expect(out.sizing).toEqual(eff.sizing); // untouched
-  });
-
-  it('an empty override is a no-op', () => {
-    const eff = effectiveFor(CONFIG_DEFAULTS, LEADER);
-    expect(withEnvOverride(eff, {})).toEqual(eff);
   });
 });
