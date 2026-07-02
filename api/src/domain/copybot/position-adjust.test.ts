@@ -122,6 +122,16 @@ describe('planReshape — SHAPE-EXACT per-bin re-sync (the fix for selective per
     expect(planReshape(bins([-1, 0.1], [0, 0.1]), bins([-1, 0.05], [0, 0.05]), RATIO, MAX, DEAD)).toEqual([]);
   });
 
+  it('a trim that passes the deadband but rounds to 0 bps → NO remove op (a bps-0 removeLiquidity is a wasted no-op tx)', () => {
+    // WHY: on the two-sided TOKEN leg `cur` is huge, so a delta above the deadband can still be a negligible fraction:
+    // round((-delta/cur)×10000) = 0. Pushing that bin emits an on-chain removeLiquidity(_, _, 0) — a no-op that burns a
+    // fee + priority fee + head-of-line-blocks the serial coffre, while the reshape converges without it. Meanwhile a
+    // genuine trim on another bin must still produce its op. Here offset 0: target 1000, cur 1000.01 → delta −0.01
+    // (> deadband) but (0.01/1000.01)×10000 ≈ 0.1 → rounds to 0. offset 1 is a real 50% trim.
+    const ops = planReshape(bins([0, 1000], [1, 0.1]), bins([0, 1000.01], [1, 0.2]), 1, 2000, DEAD);
+    expect(ops).toEqual([{ offset: 1, action: 'remove', bps: 5000 }]);
+  });
+
   it('ratio 0 or leader empty → no ops', () => {
     expect(planReshape(bins([0, 0.1]), [], 0, MAX, DEAD)).toEqual([]);
     expect(planReshape([], bins([0, 0.05]), RATIO, MAX, DEAD)).toEqual([]);

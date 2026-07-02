@@ -51,7 +51,10 @@ export function planReshape(leaderBins: BinSol[], ourBins: BinSol[], ratio: numb
     const delta = target - cur;
     if (Math.abs(delta) <= deadbandSol) continue;
     if (delta > 0) ops.push({ offset, action: 'add', addSol: delta });
-    else if (cur > 0) ops.push({ offset, action: 'remove', bps: Math.min(BPS_TOTAL, Math.round((-delta / cur) * BPS_TOTAL)) });
+    else if (cur > 0) {
+      const bps = Math.min(BPS_TOTAL, Math.round((-delta / cur) * BPS_TOTAL));
+      if (bps > 0) ops.push({ offset, action: 'remove', bps }); // a bps that rounds to 0 is a no-op removeLiquidity tx — skip (deadband spirit)
+    }
   }
   return ops.sort((a, b) => a.offset - b.offset);
 }

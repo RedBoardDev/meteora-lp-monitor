@@ -9,7 +9,7 @@
  * pool is referenced, so instead we bind the swap to owner's ATA of the residual token being sold.
  * (Fine-grained bin intent-bind + Jupiter route decode + INV-6 rate-limit = later hardening.)
  */
-import { DLMM_PROGRAM_ID } from '@binsight/shared';
+import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
 import { PublicKey, type Transaction } from '@solana/web3.js';
 import { JITO_TIP_ACCOUNTS } from '@/domain/copybot/jito-tip';
 
@@ -19,7 +19,7 @@ const TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const TOKEN_PROGRAM = new PublicKey(TOKEN);
 const TOKEN_2022_PROGRAM = new PublicKey(TOKEN_2022);
-const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+const WSOL = new PublicKey(SOL_MINT);
 /** The two canonical token programs an owner's ATA can be derived under (classic SPL + Token-2022). A residual
  *  leg is often a Token-2022 mint (pump.fun), so a sell must be allowed to touch its Token-2022 ATA too. */
 const TOKEN_PROGRAMS = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM];

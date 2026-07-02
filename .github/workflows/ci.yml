@@ -37,6 +37,17 @@ jobs:
       - uses: ./.github/actions/setup
       - run: yarn check
 
+  firewall:
+    name: Firewall (copy-bot key isolation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: ./.github/actions/setup
+      - run: yarn workspace @binsight/api bot:firewall
+
   typecheck:
     name: Typecheck
     runs-on: ubuntu-latest
@@ -107,12 +118,13 @@ jobs:
     name: CI Status
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [check, typecheck, test, build, migrations]
+    needs: [check, firewall, typecheck, test, build, migrations]
     if: always()
     steps:
       - name: Verify all jobs passed
         run: |
           if [[ "${{ needs.check.result }}" != "success" || \
+                "${{ needs.firewall.result }}" != "success" || \
                 "${{ needs.typecheck.result }}" != "success" || \
                 "${{ needs.test.result }}" != "success" || \
                 "${{ needs.build.result }}" != "success" || \

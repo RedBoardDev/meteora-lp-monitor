@@ -6,10 +6,11 @@
  * Both share `buildJupiterSwapTx`. `asLegacyTransaction:true` keeps it on the vault's legacy sign path; Wall B
  * re-verifies; the vault signs+lands. External responses are validated (zod) — never trust a remote shape blindly.
  */
+import { SOL_MINT } from '@binsight/shared';
 import { z } from 'zod';
 
 /** Wrapped SOL — the swap output mint (we always sell the residual token back to SOL). */
-export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+export const WSOL_MINT = SOL_MINT;
 /** Default Jupiter swap API base (free "lite" tier; the old quote-api.jup.ag/v6 host is decommissioned).
  *  Endpoints used: `${base}/quote` (GET) + `${base}/swap` (POST). Override via JUPITER_BASE_URL. */
 export const DEFAULT_JUPITER_BASE_URL = 'https://lite-api.jup.ag/swap/v1';

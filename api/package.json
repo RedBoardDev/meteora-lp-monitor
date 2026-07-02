@@ -8,7 +8,7 @@
     "watch:leader": "tsx --env-file=../.env scripts/watch-leader.ts",
     "build": "tsup",
     "start": "node --env-file=../.env dist/main.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.onchain.json --noEmit",
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "test:onchain": "RUN_ONCHAIN=true node --env-file=../.env ../node_modules/vitest/vitest.mjs run --config vitest.onchain.config.ts",

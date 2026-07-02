@@ -11,11 +11,18 @@ describe('maxPriceChangePercent — anti-chase / stale-entry guard (per-leader, 
     expect(maxPriceChangePercent.enabled(FILTERS_ALL_OFF)).toBe(false);
     expect(maxPriceChangePercent.enabled(on(40))).toBe(true);
   });
-  it('move above threshold → skip above_max_price_change', () => {
+  it('big pump above threshold → skip above_max_price_change', () => {
     expect(maxPriceChangePercent.evaluate(on(40), c, ctx(60))).toEqual({ action: 'skip', reason: 'above_max_price_change' });
   });
-  it('move ≤ threshold → pass', () => {
+  it('big DUMP below −threshold → skip above_max_price_change (abs catches dumps, not just pumps)', () => {
+    // Old signed behavior let −80% pass (−80 > 40 is false); abs makes |−80| = 80 > 40 → skip.
+    expect(maxPriceChangePercent.evaluate(on(40), c, ctx(-80))).toEqual({ action: 'skip', reason: 'above_max_price_change' });
+  });
+  it('small positive move ≤ threshold → pass', () => {
     expect(maxPriceChangePercent.evaluate(on(40), c, ctx(5))).toEqual({ action: 'pass' });
+  });
+  it('small negative move within threshold → pass (|−5| ≤ 40)', () => {
+    expect(maxPriceChangePercent.evaluate(on(40), c, ctx(-5))).toEqual({ action: 'pass' });
   });
   it('unknown change → skip max_price_change_unavailable', () => {
     expect(maxPriceChangePercent.evaluate(on(40), c, ctx())).toEqual({ action: 'skip', reason: 'max_price_change_unavailable' });

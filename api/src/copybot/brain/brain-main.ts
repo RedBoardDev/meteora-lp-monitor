@@ -46,6 +46,7 @@ import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
 import { bindAlertEvents } from '@/copybot/alert';
+import { assertBusKey } from '@/copybot/bus-key-guard';
 import { ConfigStore } from '@/copybot/config-store';
 import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
@@ -108,7 +109,6 @@ const cfg = {
   wsUrl: process.env.SOLANA_WS_URL,
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6385',
   dbUrl: process.env.DATABASE_URL ?? 'postgres://meteora:meteora@localhost:5435/meteora',
-  hmacKey: process.env.BUS_HMAC_KEY ?? 'dev-k-sign-CHANGE-ME',
   leader: process.env.COPYBOT_LEADER ?? '8ryctvNwpJTuuap3wuNTfcyEx4DjSuXvhGXSDHNaU8sQ',
   ownerPubkey: process.env.COPIER_OWNER ?? 'Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrvDh9zz',
   balanceSol: Number(process.env.COPIER_BALANCE_SOL ?? '10'),
@@ -195,6 +195,13 @@ async function main(): Promise<void> {
     log.error('SOLANA_HTTP_URL missing');
     process.exit(1);
   }
+  // Fail-closed on the bus HMAC (forging cmd:sign would make the vault sign): refuse to boot with a missing/insecure key.
+  const busKey = assertBusKey(process.env);
+  if ('error' in busKey) {
+    log.error(busKey.error);
+    process.exit(1);
+  }
+  const hmacKey = busKey.key;
   const args = process.argv.slice(2);
   const once = args.includes('--once');
   const secondsArg = args.find((a) => a.startsWith('--seconds='));
@@ -278,7 +285,7 @@ async function main(): Promise<void> {
   async function publish(sr: Omit<SignRequest, 'issuedAtMs'>, journalHint?: Partial<JournalEntry>): Promise<void> {
     const full: SignRequest = { ...sr, issuedAtMs: Date.now() }; // timestamp at publish time (latency)
     SignRequestSchema.parse(full); // local guardrail: we only publish a valid contract
-    const id = await bus.publish(STREAM, HOP, cfg.hmacKey, full);
+    const id = await bus.publish(STREAM, HOP, hmacKey, full);
     // Machine-readable publish marker: the EXACT copy pubkey + kind we just published (the journal's formatted line
     // carries neither as a field). Ops visibility + lets a consumer track the published copy without RPC enumeration.
     log.info({ kind: full.kind, our: full.positionPubkey, pool: full.pool, streamId: id }, '📤 published');
@@ -1268,7 +1275,7 @@ async function main(): Promise<void> {
 
   // --once: validates the pipeline by forcing ONE open on a live leader position (deterministic), then exits.
   if (once) {
-    await onceValidate(conn, leaderPk, poolReader, handleOpen, bus, log);
+    await onceValidate(conn, leaderPk, poolReader, handleOpen, bus, hmacKey, log);
     await Promise.all([bus.quit(), control.quit()]);
     process.exit(0);
   }
@@ -1326,7 +1333,7 @@ async function main(): Promise<void> {
     let backoff = 1000;
     while (!stopped) {
       try {
-        const msgs = await evBus.consume(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', cfg.hmacKey, 10, 5000);
+        const msgs = await evBus.consume(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', hmacKey, 10, 5000);
         for (const msg of msgs) {
           const ev = msg.payload as { kind?: string; pool?: string; positionPubkey?: string; commandId?: string; sig?: string } | null;
           if (ev?.kind === 'close' && ev.pool) {
@@ -1410,6 +1417,7 @@ async function onceValidate(
   poolReader: OnchainPoolMetaReader,
   handleOpen: (e: DetectedEvent) => Promise<void>,
   bus: RedisBus,
+  hmacKey: string,
   logger: typeof log,
 ): Promise<void> {
   const sigs = (await conn.getSignaturesForAddress(leaderPk, { limit: 14 })).filter((s) => !s.err).map((s) => s.signature);
@@ -1421,11 +1429,11 @@ async function onceValidate(
       if (!meta?.solSide || !leg.position) continue;
       const shape = await readLeaderPositionShape(conn, new PublicKey(leg.lbPair), leaderPk, leg.position);
       if (!shape) continue;
-      const sym = meta.mintX === 'So11111111111111111111111111111111111111112' ? meta.mintY : meta.mintX;
+      const sym = meta.mintX === WSOL_MINT ? meta.mintY : meta.mintX;
       logger.info({ pool: leg.lbPair, position: leg.position }, '--once: forced open on live position');
       await handleOpen({ signature: `once-${leg.position}`, blockTime: 1, instruction: 'AddLiquidityByStrategy2', depositSol: 0.5, withdrawSol: 0, claimSol: 0, pool: leg.lbPair, position: leg.position, nonSolMint: sym, nonSolSymbol: null });
       // re-read the stream to prove the publication
-      const msgs = await bus.consume('copybot:cmd:sign', 'validate', 'v1', 'cmd:sign', cfg.hmacKey, 5, 2000).catch(() => []);
+      const msgs = await bus.consume('copybot:cmd:sign', 'validate', 'v1', 'cmd:sign', hmacKey, 5, 2000).catch(() => []);
       logger.info({ consumed: msgs.length, ok: msgs[0]?.payload != null }, '--once: re-read from the bus');
       return;
     }

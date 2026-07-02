@@ -11,6 +11,7 @@ import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
 import { bindAlertEvents } from '@/copybot/alert';
+import { assertBusKey } from '@/copybot/bus-key-guard';
 import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
 import { EventStore } from '@/copybot/observability/event-store';
@@ -34,7 +35,6 @@ const cfg = {
   httpUrl: process.env.SOLANA_HTTP_URL ?? '',
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6385',
   dbUrl: process.env.DATABASE_URL ?? 'postgres://meteora:meteora@localhost:5435/meteora',
-  hmacKey: process.env.BUS_HMAC_KEY ?? 'dev-k-sign-CHANGE-ME',
   keypairPath: process.env.COPIER_KEYPAIR_PATH ?? '.wallets/copier-test.json',
   owner: process.env.COPIER_OWNER ?? 'Ybbt2Td4TjxwpzvuicbP9ANizBwAJzqjuRmRrvDh9zz',
   maxTradeSolEnv: process.env.MAX_TRADE_SOL !== undefined ? Number(process.env.MAX_TRADE_SOL) : undefined, // env override; else the DB config's maxTradeSizeSol
@@ -54,6 +54,13 @@ async function main(): Promise<void> {
     log.error('SOLANA_HTTP_URL missing');
     process.exit(1);
   }
+  // Fail-closed on the bus HMAC (the vault's only transport auth): refuse to boot with a missing/insecure key.
+  const busKey = assertBusKey(process.env);
+  if ('error' in busKey) {
+    log.error(busKey.error);
+    process.exit(1);
+  }
+  const hmacKey = busKey.key;
   // THE-TRAP: the loaded key MUST be the expected copier wallet (fail-closed otherwise).
   const copier = loadCopierKeypair(cfg.keypairPath, cfg.owner);
   const conn = new Connection(cfg.httpUrl, 'confirmed');
@@ -84,7 +91,7 @@ async function main(): Promise<void> {
   // re-read with XREADGROUP id '0'. Exactly-once is guaranteed by the executions table (a landed command is a
   // duplicate; a stranded 'claimed' one is re-claimable). Without this, a vault crash mid-sign would STRAND an
   // in-flight open/close forever (XREADGROUP '>' never re-delivers it) → a missed copy.
-  const ctxBase = { conn, db, bus, copier, blockhashCache, events, signingEnabled: cfg.signingEnabled, hmacKey: cfg.hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
+  const ctxBase = { conn, db, bus, copier, blockhashCache, events, signingEnabled: cfg.signingEnabled, hmacKey, retryMax: cfg.retryMax, retryDelayMs: cfg.retryDelayMs, confirmTimeoutMs: cfg.confirmTimeoutMs, log };
   // Process a batch, ACKing each message ONLY after process1 returned a verdict. If process1 THROWS (transient I/O
   // such as a getSlot RPC blip, BEFORE the idempotency claim), the message is left UNACKED in the PEL — the next
   // pending-drain retries it (a throwing message must never be silently dropped nor strand the rest of the batch).
@@ -104,7 +111,7 @@ async function main(): Promise<void> {
   };
   try {
     // Crash recovery (recovering=true → a stranded 'claimed' from a CRASHED prior instance is re-claimable).
-    await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100), true);
+    await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, hmacKey, 100), true);
   } catch (e) {
     events.system('system.recovery_failed', e, { stage: 'recover', outcome: 'failed', reason: 'recovery_failed', adminDetail: { phase: 'boot_pending_recovery' } });
   }
@@ -137,8 +144,8 @@ async function main(): Promise<void> {
     try {
       // Re-drain the PEL FIRST: any message a prior iteration left pending (a process1 throw) is retried here
       // without waiting for a restart (consumePending at boot alone would strand it until then).
-      await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 100));
-      await processBatch(await bus.consume(STREAM, GROUP, CONSUMER, HOP, cfg.hmacKey, 10, drain ? 3000 : 5000));
+      await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, hmacKey, 100));
+      await processBatch(await bus.consume(STREAM, GROUP, CONSUMER, HOP, hmacKey, 10, drain ? 3000 : 5000));
       backoff = 1000; // success → reset
     } catch (e) {
       // never crash: record + exponential backoff + continue (Redis/RPC may recover). Internal loop self-failure.

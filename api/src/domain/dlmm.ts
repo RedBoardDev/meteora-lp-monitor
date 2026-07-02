@@ -181,7 +181,9 @@ export function classifyInstruction(
   if (i.startsWith('initializeposition') || i.startsWith('openposition')) return 'open';
   if (i.startsWith('closeposition')) return 'close';
   if (i.startsWith('addliquidity')) return 'add';
-  if (i.startsWith('removeliquidity')) return 'remove';
+  // `RemoveAllLiquidity` (full-close withdraw) normalizes to `removeallliquidity`, which does NOT start
+  // with `removeliquidity` — cover it explicitly so no remove variant is missed.
+  if (i.startsWith('removeliquidity') || i.startsWith('removeall')) return 'remove';
   if (i.startsWith('claimfee') || i.startsWith('claimreward')) return 'claim';
   return null;
 }

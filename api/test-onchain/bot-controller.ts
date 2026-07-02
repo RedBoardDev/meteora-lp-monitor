@@ -36,11 +36,14 @@ function spawnUntil(label: string, args: string[], env: NodeJS.ProcessEnv, ready
 // SOL-value floor minSellOutLamports), so the copier wallet always returns to SOL-only.
 // COPYBOT_INFINITE_ADD=true: the bench tests the RESIZE/GROW capability (follow the leader's adds); the product
 // default is false (Valhalla first-deposit-only), but the grow/lifecycle/two-sided tests need adds followed.
-const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58(), COPYBOT_TWO_SIDED: 'on', COPYBOT_MIN_POSITION_SOL: '0.02', COPYBOT_TRADE_RATIO_PCT: '50', COPYBOT_INFINITE_ADD: 'true', DUST_TOKEN_RAW: '1000000' });
+// COPYBOT_DEV_BUS_KEY=true: the boot bus-key guard is fail-closed (rejects a missing/default BUS_HMAC_KEY); the bench
+// runs locally without a real key, so it opts into the public dev default explicitly. A real BUS_HMAC_KEY in the env
+// still takes precedence — this only unblocks the no-key local case.
+const brainEnv = (): NodeJS.ProcessEnv => ({ ...process.env, SIGNING_ENABLED: 'true', COPYBOT_DEV_BUS_KEY: 'true', COPYBOT_LEADER: LEADER_TEST.toBase58(), COPYBOT_TWO_SIDED: 'on', COPYBOT_MIN_POSITION_SOL: '0.02', COPYBOT_TRADE_RATIO_PCT: '50', COPYBOT_INFINITE_ADD: 'true', DUST_TOKEN_RAW: '1000000' });
 
 export async function startCoffre(): Promise<void> {
   if (coffre && coffre.exitCode === null) return;
-  coffre = await spawnUntil('coffre', ['--import', 'tsx', 'src/copybot/coffre/coffre-main.ts'], { ...process.env, SIGNING_ENABLED: 'true' }, '🔐 vault started', 30_000);
+  coffre = await spawnUntil('coffre', ['--import', 'tsx', 'src/copybot/coffre/coffre-main.ts'], { ...process.env, SIGNING_ENABLED: 'true', COPYBOT_DEV_BUS_KEY: 'true' }, '🔐 vault started', 30_000);
 }
 /** Kill ONLY the coffre (the brain keeps running + publishing). Simulates a vault crash. */
 export async function killCoffre(): Promise<void> {

@@ -10,15 +10,13 @@
  * stays `null` here. The byte decoding itself remains the binsight engine (`decodeDlmmLegs`, tested against
  * the real Event-CPI layout in `dlmm-event-decoder.test.ts`).
  */
-import { DLMM_PROGRAM_ID } from '@binsight/shared';
+import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
 import type { ParsedTransactionWithMeta } from '@solana/web3.js';
 import type { DetectedEvent } from './events';
 import type { LoadedPoolMeta } from '../dlmm';
 import { legValueSol } from '../dlmm-pnl';
 import { decodeDlmmLegs } from '../../infrastructure/solana/dlmm/dlmm-event-decoder';
 import { parseInstruction } from '../../infrastructure/solana/helius-subscriber';
-
-const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
 /** Synchronous pool→meta lookup (already loaded). `null` = unknown pool or not valuable in SOL. */
 export type PoolMetaLookup = (lbPair: string) => LoadedPoolMeta | null;

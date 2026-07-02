@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyInstruction } from '@/domain/dlmm';
+import dlmmIdl from './dlmm/dlmm-idl.json';
 import { parseInstruction } from './helius-subscriber';
 
 const DLMM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo';
@@ -63,5 +64,36 @@ describe('classifyInstruction', () => {
     expect(classifyInstruction('ClosePositionIfEmpty')).toBe('close');
     expect(classifyInstruction('InitializePosition')).toBe('open');
     expect(classifyInstruction('TransferChecked')).toBeNull();
+  });
+
+  // A full close withdraws via RemoveAllLiquidity; its normalized name (`removeallliquidity`) does not
+  // start with `removeliquidity`, so it used to return null and a leader remove could be missed.
+  it('classifies RemoveAllLiquidity (full-close withdraw) as remove', () => {
+    expect(classifyInstruction('RemoveAllLiquidity')).toBe('remove');
+  });
+});
+
+// Drift guard: the classifier only ever sees the Anchor instruction name from the on-chain log
+// (`Program log: Instruction: <PascalCase>`), whose lowercase form equals the IDL snake_case name with
+// underscores stripped. Simulate that transform over the REAL IDL so a new remove-liquidity variant
+// (or a prefix that over-matches) fails here instead of silently dropping a leader event.
+describe('classifyInstruction vs the real DLMM IDL instruction set', () => {
+  const onchainName = (idlName: string) => idlName.replaceAll('_', '');
+  const instructions = (dlmmIdl.instructions as { name: string }[]).map((i) => i.name);
+  const isRemoveLiquidity = (name: string) => /remove.*liquidity/i.test(name);
+
+  it('classifies every remove-liquidity IDL instruction as remove', () => {
+    const removeVariants = instructions.filter(isRemoveLiquidity);
+    // sanity: the IDL still carries the known remove variants we rely on
+    expect(removeVariants).toContain('remove_all_liquidity');
+    for (const name of removeVariants) {
+      expect(classifyInstruction(onchainName(name)), name).toBe('remove');
+    }
+  });
+
+  it('never misclassifies a non-remove-liquidity IDL instruction as remove', () => {
+    for (const name of instructions.filter((n) => !isRemoveLiquidity(n))) {
+      expect(classifyInstruction(onchainName(name)), name).not.toBe('remove');
+    }
   });
 });

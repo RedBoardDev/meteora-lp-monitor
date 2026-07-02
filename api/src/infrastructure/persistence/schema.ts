@@ -119,24 +119,24 @@ export const leaderActivity = pgTable(
   ],
 );
 
-// Copy-bot · P2 paper shadow-log : ce qu'on AURAIT fait pour chaque entrée leader (aucune signature, aucun
-// fonds). Table paper dédiée, volontairement minimale — pas de champs multi-tenant tant que les utilisateurs
-// (J2-web) n'existent pas ; convergera vers `copies`/`activity_log` (spec 11 §2.3-2.4) à ce moment-là.
+// Copy-bot · P2 paper shadow-log: what we WOULD have done for each leader entry (no signature, no
+// funds). Dedicated paper table, deliberately minimal — no multi-tenant fields until users
+// (J2-web) exist; will converge toward `copies`/`activity_log` (spec 11 §2.3-2.4) at that point.
 export const copyDecisions = pgTable(
   'copy_decisions',
   {
     id: serial('id').primaryKey(),
-    signature: text('signature').notNull(), // tx leader qui a déclenché la décision
+    signature: text('signature').notNull(), // leader tx that triggered the decision
     leader: text('leader').notNull(),
     pool: text('pool'),
-    position: text('position'), // pubkey de la position DLMM
-    eventKind: text('event_kind').notNull(), // 'open' (entrée) — étendu plus tard (add/close/claim)
+    position: text('position'), // DLMM position pubkey
+    eventKind: text('event_kind').notNull(), // 'open' (entry) — extended later (add/close/claim)
     outcome: text('outcome').notNull(), // mirrored | reduced | skipped
-    skipReason: text('skip_reason'), // non_sol_paired | below_min_floor | insufficient_balance (si skipped)
-    leaderSizeSol: doublePrecision('leader_size_sol').notNull().default(0), // taille de l'open leader
-    ourSizeSol: doublePrecision('our_size_sol'), // taille qu'on aurait ouverte (null si skipped)
+    skipReason: text('skip_reason'), // non_sol_paired | below_min_floor | insufficient_balance (if skipped)
+    leaderSizeSol: doublePrecision('leader_size_sol').notNull().default(0), // leader open size
+    ourSizeSol: doublePrecision('our_size_sol'), // size we would have opened (null if skipped)
     blockTime: bigint('block_time', { mode: 'number' }), // unix seconds (tx.blockTime)
-    decidedAt: ms('decided_at').notNull(), // quand NOUS avons décidé (Date.now)
+    decidedAt: ms('decided_at').notNull(), // when WE decided (Date.now)
   },
   (t) => [
     uniqueIndex('uq_copy_decisions_signature').on(t.signature),
@@ -144,8 +144,8 @@ export const copyDecisions = pgTable(
   ],
 );
 
-// Copy-bot · coffre — registre d'idempotence des exécutions. Le coffre claim `command_id` via INSERT ON
-// CONFLICT DO NOTHING AVANT de signer → un re-jeu (crash/redelivery) ne double-signe jamais (spec 10 §3.3).
+// Copy-bot · coffre — execution idempotency registry. The coffre claims `command_id` via INSERT ON
+// CONFLICT DO NOTHING BEFORE signing → a replay (crash/redelivery) never double-signs (spec 10 §3.3).
 export const executions = pgTable('executions', {
   commandId: text('command_id').primaryKey(),
   eventKey: text('event_key').notNull(),
@@ -155,9 +155,9 @@ export const executions = pgTable('executions', {
   updatedAt: ms('updated_at').notNull(),
 });
 
-// Copy-bot · brain — positions qu'on COPIE (source de vérité PERSISTANTE, survit aux redémarrages). Sans ça
-// le registre en mémoire serait perdu au restart → positions DORMANTES (ouvertes chez nous alors que le leader
-// a fermé). Le failsafe reconcilie ces lignes (status='open') vs l'état on-chain du leader.
+// Copy-bot · brain — positions we COPY (PERSISTENT source of truth, survives restarts). Without it
+// the in-memory registry would be lost on restart → DORMANT positions (open on our side while the leader
+// has closed). The failsafe reconciles these rows (status='open') against the leader's on-chain state.
 export const copyPositions = pgTable('copy_positions', {
   leaderPosition: text('leader_position').primaryKey(),
   ourPosition: text('our_position').notNull(),
