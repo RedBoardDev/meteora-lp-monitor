@@ -6,9 +6,10 @@
  * STATIC imports: this module ONLY runs built (tsup `tsup.copybot.config.ts`, CJS) — the bundle resolves the
  * ESM/CJS interop of the SDK + anchor. NEVER import it from a path launched by tsx/vitest (it would break).
  */
-import DLMM, { StrategyType } from '@meteora-ag/dlmm';
+import DLMM, { DEFAULT_BIN_PER_POSITION, MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX, StrategyType } from '@meteora-ag/dlmm';
 import BN from 'bn.js';
 import type { Connection, PublicKey, Transaction } from '@solana/web3.js';
+import { ATOMIC_BY_WEIGHT_BIN_LIMIT, MAX_SINGLE_POSITION_BINS } from '@/domain/copybot/open-routing';
 
 // STATIC imports: these modules ONLY run built (tsup/esbuild) — the bundle resolves the ESM/CJS interop
 // of the SDK + anchor. Do not import them from a path launched by tsx (it would break).
@@ -339,3 +340,39 @@ export async function buildClaimTx(
   if (!position) throw new Error(`claim: position ${positionPubkey} not found for ${owner.toBase58()}`);
   return dlmm.claimSwapFee({ owner, position });
 }
+
+/**
+ * SDK-DRIFT GUARD (FAIL LOUD, no algo/decision change). Our OPEN routing hardcodes two `@meteora-ag/dlmm`
+ * limits — the 26-bin atomic single-tx by-weight chunk limit and the 70-bin single-position span — duplicated
+ * as constants in `open-routing.ts` (mirrored here by `MAX_BINS_SINGLE_EMPTY_POSITION`). A future SDK/program
+ * upgrade could silently change either (a Q1-2026 program upgrade already reshaped a struct), which would make
+ * our chunking/routing mis-behave with NO signal. This asserts our constants still equal the SDK's exported
+ * constants and THROWS on any divergence. It only reads constants — it never changes a value or a routing
+ * decision. It CANNOT be unit-tested (the SDK is import-only in the bundled context); the IDL side (70) is
+ * locked by `open-routing.test.ts`, and this SDK side is exercised whenever the bundle loads / by the on-chain
+ * bench.
+ */
+export function assertSdkConstants(): void {
+  if (MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX !== ATOMIC_BY_WEIGHT_BIN_LIMIT) {
+    throw new Error(
+      `SDK drift: @meteora-ag/dlmm MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX=${MAX_BIN_LENGTH_ALLOWED_IN_ONE_TX} but open-routing expects ATOMIC_BY_WEIGHT_BIN_LIMIT=${ATOMIC_BY_WEIGHT_BIN_LIMIT} — review OPEN chunking/routing before upgrading the SDK.`,
+    );
+  }
+  const sdkBinsPerPosition = DEFAULT_BIN_PER_POSITION.toNumber();
+  if (sdkBinsPerPosition !== MAX_SINGLE_POSITION_BINS) {
+    throw new Error(
+      `SDK drift: @meteora-ag/dlmm DEFAULT_BIN_PER_POSITION=${sdkBinsPerPosition} but open-routing expects MAX_SINGLE_POSITION_BINS=${MAX_SINGLE_POSITION_BINS} — review OPEN chunking/routing before upgrading the SDK.`,
+    );
+  }
+  // Internal-duplication guard: the local empty-position span must stay pinned to the same source-of-truth.
+  if (MAX_BINS_SINGLE_EMPTY_POSITION !== MAX_SINGLE_POSITION_BINS) {
+    throw new Error(
+      `SDK drift: dlmm-tx-builder MAX_BINS_SINGLE_EMPTY_POSITION=${MAX_BINS_SINGLE_EMPTY_POSITION} diverged from open-routing MAX_SINGLE_POSITION_BINS=${MAX_SINGLE_POSITION_BINS}.`,
+    );
+  }
+}
+
+// Module-load self-check: this builder is imported by the bundled brain/coffre, so drift THROWS at boot (fail
+// loud) with NO extra wiring — no need to touch coffre-main.ts. `assertSdkConstants` is also exported so a boot
+// path may call it explicitly if a more central boot assertion is ever desired.
+assertSdkConstants();
