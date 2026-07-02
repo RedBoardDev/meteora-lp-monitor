@@ -16,6 +16,7 @@ import { type Connection, PublicKey } from '@solana/web3.js';
 import Redis from 'ioredis';
 import type { UserPosition } from '@/infrastructure/solana/dlmm/leader-position-reader';
 import type { FidelityResult } from '@/infrastructure/solana/dlmm/shape-fidelity';
+import { LOG_MARKER_EVENT_ROUTED, LOG_MARKER_SUBMITTED } from '@/copybot/log-markers';
 import { readAllOwnerTokenBalances } from '@/infrastructure/solana/token-balance-reader';
 import { COPIER_TEST, LEADER_TEST } from './env';
 
@@ -109,6 +110,9 @@ export class Harness {
   leaderShape(pos: string, pool: string): ReturnType<Harness['shape']> {
     return this.shape(LEADER_TEST, pos, pool);
   }
+  copierShape(pos: string, pool: string): ReturnType<Harness['shape']> {
+    return this.shape(COPIER_TEST, pos, pool);
+  }
   /** Bot REACTION latency (ms): from when the brain SAW the leader event ("👁️ event routed") to when the coffre
    *  LANDED our copy ("🚀 signed + landed"), correlated by kind. This is the controllable end-to-end SLA — the RPC
    *  WS-propagation BEFORE "event routed" is infra latency, not the bot. Returns null if a marker is missing. */
@@ -124,10 +128,10 @@ export class Harness {
       const m = line?.match(/"time":(\d+)/);
       return m ? Number(m[1]) : null;
     };
-    const routed = stamp('/tmp/bench-brain.log', '👁️ event routed');
+    const routed = stamp('/tmp/bench-brain.log', LOG_MARKER_EVENT_ROUTED);
     // Measure to SUBMISSION (tx on the wire) — the bot's CONTROLLABLE latency. On-chain CONFIRMATION ("🚀 signed +
     // landed (confirmed)") is chain-bound (~1-2s) and a separate concern; the SLA is about the bot's reaction speed.
-    const landed = stamp('/tmp/bench-coffre.log', '🚀 submitted');
+    const landed = stamp('/tmp/bench-coffre.log', LOG_MARKER_SUBMITTED);
     return routed != null && landed != null ? landed - routed : null;
   }
   /** Compare on-chain fidelity. Retries on a transient "missing" (the SDK position enumerator can lag a freshly

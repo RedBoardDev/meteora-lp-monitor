@@ -57,6 +57,7 @@ import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { type BrainStatusDetail, DETECTION_STALE_FAILURES, HEARTBEAT_INTERVAL_MS, detectionHealthy, shouldAlertDetectionStale } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
+import { LOG_MARKER_EVENT_ROUTED } from '@/copybot/log-markers';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import { envEffectiveOverride } from './env-overrides';
 import { applyPriorityFee, withCuLimit } from './compute-budget';
@@ -1421,7 +1422,7 @@ async function main(): Promise<void> {
         cfg: { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol },
         rugExited: rugExited.has(e.position),
       });
-      log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
+      log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, LOG_MARKER_EVENT_ROUTED);
       if (action !== 'ignore') {
         // `eventKey` = the per-leg detection correlation (sig:position) so the emit dedup keys uniquely PER routed
         // leg — without it every routed event shares an empty correlation and the LRU would collapse them into one

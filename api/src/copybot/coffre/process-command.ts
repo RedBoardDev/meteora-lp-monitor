@@ -16,6 +16,7 @@ import { claimExecution } from '@/copybot/coffre/idempotency';
 import { confirmLanded, land } from '@/copybot/coffre/landing';
 import { landViaJito } from '@/copybot/coffre/jito-landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
+import { LOG_MARKER_SUBMITTED } from '@/copybot/log-markers';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import type { CopyEvents } from '@/copybot/observability/copy-events';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
@@ -228,7 +229,7 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
       else await land(conn, raw);
       // Tx ON THE WIRE — this is the CONTROLLABLE latency endpoint (event → submitted), the price-relevant moment.
       // Logged BEFORE the confirmation wait so latency tracking reflects submission speed, not chain-confirm time.
-      log.info({ kind: sr.kind, sig, busMs, submitMs: Date.now() - tSign }, '🚀 submitted');
+      log.info({ kind: sr.kind, sig, busMs, submitMs: Date.now() - tSign }, LOG_MARKER_SUBMITTED);
       // CONFIRM before declaring success: land()/landViaJito() return a SIGNATURE before the chain applies the tx
       // (sendRawTransaction skipPreflight / sendBundle). A close that drops or errors on-chain must NOT be recorded
       // 'landed' (only 'failed' is re-claimable, and a premature ev:executed makes the brain markClosed) — else it
