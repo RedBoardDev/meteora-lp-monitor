@@ -190,6 +190,10 @@ const RAW_CODE_REGISTRY = {
   'system.mirror_error': { category: 'SYSTEM', severity: 'error', audience: 'internal' },
   'system.config_invalid_fallback': { category: 'SYSTEM', severity: 'warn', audience: 'internal' },
   'system.fatal': { category: 'SYSTEM', severity: 'error', audience: 'feed', pinned: true, coalesceMs: PINNED_COALESCE_MS, title: 'Bot Stopped — Fatal Error', render: 'system-fatal' },
+  // The cursor poll / reconcile sweep have failed CONSECUTIVELY (a revoked RPC key, an auth outage) → the detector
+  // may be BLIND to leader events (including closes) while the heartbeat still reads online. Pinned so the operator
+  // is alerted out-of-band ("check RPC/key"); reuses the system-fatal render (🚨 + the registry title).
+  'system.detection_stale': { category: 'SYSTEM', severity: 'error', audience: 'feed', pinned: true, coalesceMs: PINNED_COALESCE_MS, title: 'Detection Stale — bot may be blind (check RPC/key)', render: 'system-fatal' },
   // Observability self-failures (D-7): audience:'internal' so they NEVER user-notify through the broken path.
   'system.journal_write_failed': { category: 'SYSTEM', severity: 'warn', audience: 'internal' },
   'system.notify_delivery_failed': { category: 'SYSTEM', severity: 'warn', audience: 'internal' },

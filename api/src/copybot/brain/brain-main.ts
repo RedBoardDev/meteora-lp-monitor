@@ -54,7 +54,7 @@ import { type CopyCode, FALLBACK_CODE, resolveLegacyReason } from '@/domain/copy
 import type { EmitInput } from '@/domain/copybot/observability/input';
 import { EventStore } from '@/copybot/observability/event-store';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
-import { type BrainStatusDetail, HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
+import { type BrainStatusDetail, DETECTION_STALE_FAILURES, HEARTBEAT_INTERVAL_MS, detectionHealthy, shouldAlertDetectionStale } from '@/domain/copybot/status';
 import { deriveCommandId } from '@/copybot/command-id';
 import { makeDetectionDeps } from '@/copybot/detection';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
@@ -293,9 +293,48 @@ async function main(): Promise<void> {
   const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
   let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
   let lastLatencyMs: number | null = null; // brainMs of that last action
+  // Detection-liveness (observability). The poll/reconcile timers below run with LOG-ONLY `.catch` handlers; if
+  // they throw forever the bot is silently BLIND to leader events while the heartbeat stays GREEN. These stamps +
+  // consecutive-failure counters feed the status snapshot AND the watchdog alert. wsConnected is mirrored from the
+  // WS subscriber's connection-change callback (set once `sub` exists, below).
+  let wsConnected = false; // last-known WS trigger connectivity
+  let lastPollAt: number | null = null; // ms of the last SUCCESSFUL cursor poll
+  let lastReconcileAt: number | null = null; // ms of the last SUCCESSFUL reconcile sweep
+  let pollFailures = 0; // CONSECUTIVE poll failures (reset on a success)
+  let reconcileFailures = 0; // CONSECUTIVE reconcile failures (reset on a success)
+  let detectionStaleAlerted = false; // once-per-episode gate; re-armed when BOTH counters are back to 0
   const brainStatus = (): BrainStatusDetail => {
     const open = registry.openPositions();
-    return { leader: cfg.leader, openPositions: open.length, exposureSol: open.reduce((s, m) => s + m.sizeSol, 0), lastActionAt, lastLatencyMs };
+    return { leader: cfg.leader, openPositions: open.length, exposureSol: open.reduce((s, m) => s + m.sizeSol, 0), lastActionAt, lastLatencyMs, wsConnected, lastPollAt, lastReconcileAt, pollFailures, reconcileFailures };
+  };
+  // A detector loop (poll or reconcile) succeeded: stamp its time, zero its consecutive-failure counter, and re-arm
+  // the stale alert once detection is FULLY healthy again (both counters at 0). Observability only.
+  const onDetectionSuccess = (which: 'poll' | 'reconcile'): void => {
+    if (which === 'poll') {
+      lastPollAt = Date.now();
+      pollFailures = 0;
+    } else {
+      lastReconcileAt = Date.now();
+      reconcileFailures = 0;
+    }
+    if (detectionHealthy(pollFailures, reconcileFailures)) detectionStaleAlerted = false;
+  };
+  // A detector loop failed: bump its consecutive-failure counter and — after DETECTION_STALE_FAILURES in a row —
+  // emit the pinned "bot may be blind" alert ONCE per stale episode (the flag suppresses repeats until a recovery
+  // re-arms it). The existing per-loop `log.error` is kept at the call site. Observability only.
+  const onDetectionFailure = (which: 'poll' | 'reconcile'): void => {
+    if (which === 'poll') pollFailures += 1;
+    else reconcileFailures += 1;
+    if (shouldAlertDetectionStale(pollFailures, reconcileFailures, detectionStaleAlerted)) {
+      detectionStaleAlerted = true;
+      events.emit('system.detection_stale', {
+        stage: 'failsafe',
+        outcome: 'failed',
+        leader: cfg.leader,
+        eventKey: `detection-stale:${Date.now()}`, // fresh per episode so a later episode isn't dedup-suppressed
+        adminDetail: { pollFailures, reconcileFailures, threshold: DETECTION_STALE_FAILURES },
+      });
+    }
   };
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
   const blockhashCache = new BlockhashCache(async () => {
@@ -1458,6 +1497,10 @@ async function main(): Promise<void> {
     return;
   }
   const sub = new HeliusTxSubscriber(cfg.wsUrl, log);
+  wsConnected = sub.isConnected(); // seed; the callback keeps it live (observability — status only)
+  sub.onConnectionChange((c) => {
+    wsConnected = c;
+  });
   sub.onReconnect(() => detector.poll().catch((e) => log.error({ e: (e as Error).message }, 'catch-up poll')));
   sub.watch(cfg.leader, (sig, logs) => {
     const hasDlmm = logs.some((l) => l.includes(DLMM_PROGRAM_ID));
@@ -1465,8 +1508,27 @@ async function main(): Promise<void> {
     if (hasDlmm) detector.onWsSignature(sig).catch((e) => log.error({ e: (e as Error).message }, 'ws'));
   });
   sub.start();
-  const timer = setInterval(() => detector.poll().catch((e) => log.error({ e: (e as Error).message }, 'poll')), POLL_MS);
-  const reconTimer = setInterval(() => reconcileSweep().catch((e) => log.error({ e: (e as Error).message }, 'reconcile')), RECON_MS);
+  const timer = setInterval(
+    () =>
+      detector
+        .poll()
+        .then(() => onDetectionSuccess('poll'))
+        .catch((e) => {
+          log.error({ e: (e as Error).message }, 'poll');
+          onDetectionFailure('poll');
+        }),
+    POLL_MS,
+  );
+  const reconTimer = setInterval(
+    () =>
+      reconcileSweep()
+        .then(() => onDetectionSuccess('reconcile'))
+        .catch((e) => {
+          log.error({ e: (e as Error).message }, 'reconcile');
+          onDetectionFailure('reconcile');
+        }),
+    RECON_MS,
+  );
   const sweepTimer = setInterval(() => sweepWallet().catch((e) => log.error({ e: (e as Error).message }, 'sweep')), SWEEP_MS);
   const rugSlTimer = setInterval(() => rugSlSweep().catch((e) => log.error({ e: (e as Error).message }, 'rug-sl')), RUG_SL_POLL_MS);
   // Live config reload. A web config edit publishes a control ping → reload from the DB NOW (kill-switch in <100ms);
