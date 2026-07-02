@@ -264,7 +264,10 @@ async function main(): Promise<void> {
     return { leader: cfg.leader, openPositions: open.length, exposureSol: open.reduce((s, m) => s + m.sizeSol, 0), lastActionAt, lastLatencyMs };
   };
   const recentlyPublishedClose = new Map<string, number>(); // ourPosition → ms a close was last published (reClose grace)
-  const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
+  const blockhashCache = new BlockhashCache(async () => {
+    const b = await conn.getLatestBlockhash();
+    return { blockhash: b.blockhash, lastValidBlockHeight: b.lastValidBlockHeight };
+  });
   // Live priority-fee oracle (opt-in): scoped to DLMM-program activity, background-refreshed so serializeUnsigned
   // reads it instantly. Off ⇒ never started, never queried → the static tier stands (zero extra RPC).
   const priorityFeeOracle = new PriorityFeeOracle(cfg.httpUrl, DLMM_PROGRAM_ID);
@@ -321,7 +324,7 @@ async function main(): Promise<void> {
 
   function serializeUnsigned(tx: Transaction): string {
     tx.feePayer = ownerPk;
-    tx.recentBlockhash = blockhashCache.get(); // cached: the vault re-sets a fresh one before signing → no hot-path RTT
+    tx.recentBlockhash = blockhashCache.get().blockhash; // cached: the vault re-sets a fresh one before signing → no hot-path RTT
     const pf = eff().priorityFee;
     const live = oracleOn() ? priorityFeeOracle.get(pf.tier) : null; // live floor in congestion; null ⇒ static tier
     const prioritySpent = applyPriorityFee(tx, pf, live); // capped priority fee on every DLMM tx (Wall B allows ComputeBudget)

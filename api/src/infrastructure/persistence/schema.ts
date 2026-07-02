@@ -149,8 +149,12 @@ export const copyDecisions = pgTable(
 export const executions = pgTable('executions', {
   commandId: text('command_id').primaryKey(),
   eventKey: text('event_key').notNull(),
-  state: text('state').notNull(), // claimed | signed | landed | failed | skipped
+  state: text('state').notNull(), // claimed | submitted | landed | failed | skipped
   deadlineSlot: bigint('deadline_slot', { mode: 'number' }),
+  // Exactly-once money path (#7): persisted BEFORE broadcast so boot recovery can check the chain and only
+  // re-sign a PROVABLY-dead tx. `signature` = the broadcast tx sig; `lastValidBlockHeight` = its blockhash expiry.
+  signature: text('signature'),
+  lastValidBlockHeight: bigint('last_valid_block_height', { mode: 'number' }),
   createdAt: ms('created_at').notNull(),
   updatedAt: ms('updated_at').notNull(),
 });

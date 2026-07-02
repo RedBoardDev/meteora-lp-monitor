@@ -83,7 +83,10 @@ async function main(): Promise<void> {
   const heartbeat = new HeartbeatStore(db, log, 'coffre'); // process status the web reads (vault online + signing state)
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
-  const blockhashCache = new BlockhashCache(async () => (await conn.getLatestBlockhash()).blockhash);
+  const blockhashCache = new BlockhashCache(async () => {
+    const b = await conn.getLatestBlockhash();
+    return { blockhash: b.blockhash, lastValidBlockHeight: b.lastValidBlockHeight };
+  });
   await blockhashCache.start(); // first sign attempt reads it instantly (no getLatestBlockhash RTT)
   log.info({ owner: copier.publicKey.toBase58(), signing: cfg.signingEnabled }, '🔐 vault started (pull-only)');
 
@@ -101,7 +104,10 @@ async function main(): Promise<void> {
         const ctx: Ctx = { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
         const verdict = await process1(msg.payload, ctx, recovering);
         log.info({ id: msg.id, recovering, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
-        await bus.ack(STREAM, GROUP, msg.id); // idempotence guaranteed by the executions table
+        // retryLater (#7 recovery in-flight): a prior broadcast's tx may still land under a live blockhash → leave
+        // the message UNACKED so a later recovery pass re-checks the chain; ACKing now would strand it (never
+        // re-signed nor finalized). Every other verdict is terminal → ACK (idempotence guarded by executions).
+        if (!verdict.retryLater) await bus.ack(STREAM, GROUP, msg.id);
       } catch (e) {
         // process1 threw (transient I/O before the idempotency claim) → the message is left UNACKED for retry. An
         // internal loop self-failure (NEVER user-notified — loop guard, SPEC §6); the row carries the cause.
@@ -142,9 +148,12 @@ async function main(): Promise<void> {
   let backoff = 1000;
   do {
     try {
-      // Re-drain the PEL FIRST: any message a prior iteration left pending (a process1 throw) is retried here
-      // without waiting for a restart (consumePending at boot alone would strand it until then).
-      await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, hmacKey, 100));
+      // Re-drain the PEL FIRST: any message a prior iteration left pending is retried here without waiting for a
+      // restart (consumePending at boot alone would strand it until then). recovering=true — a pending message is
+      // ALWAYS a prior read that never finalized (a process1 throw, OR a #7 in-flight left unACKed), so it must get
+      // the exactly-once recovery pre-check (a landed tx is finalized, a still-in-flight one is left, only a dead
+      // one is re-signed). Harmless for a pre-claim throw (no 'submitted' row ⇒ the pre-check is a no-op).
+      await processBatch(await bus.consumePending(STREAM, GROUP, CONSUMER, HOP, hmacKey, 100), true);
       await processBatch(await bus.consume(STREAM, GROUP, CONSUMER, HOP, hmacKey, 10, drain ? 3000 : 5000));
       backoff = 1000; // success → reset
     } catch (e) {

@@ -134,6 +134,13 @@
       "when": 1782813820242,
       "tag": "0018_many_rocket_raccoon",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1782999964915,
+      "tag": "0019_acoustic_infant_terrible",
+      "breakpoints": true
     }
   ]
 }

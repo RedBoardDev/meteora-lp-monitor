@@ -32,14 +32,16 @@ export async function claimExecution(
   recovering = false,
   forceReclaim = false,
 ): Promise<boolean> {
-  // Normal flow: re-claim ONLY a terminal 'failed' command (a reconcile re-publish retry); a 'claimed'/'landed'/
-  // 'skipped' one is a duplicate → reject (no double-sign on a re-delivered in-flight command).
-  // recovering=true (vault boot PENDING-recovery only): ALSO re-claim a stranded 'claimed' — a PRIOR instance
-  // claimed it then CRASHED before landing, and the single-consumer is provably dead now (no live claimant), so
-  // re-processing is safe. A re-claimed open re-signs its DETERMINISTIC position keypair → if it had already
-  // landed, the account exists and the re-attempt fails harmlessly (no double position).
+  // Normal flow: re-claim ONLY a terminal 'failed' command (a reconcile re-publish retry); a 'claimed'/'submitted'/
+  // 'landed'/'skipped' one is a duplicate → reject (no double-sign on a re-delivered in-flight command).
+  // recovering=true (vault boot PENDING-recovery only): ALSO re-claim a stranded 'claimed'/'submitted' — a PRIOR
+  // instance claimed/broadcast it then CRASHED before finalizing, and the single-consumer is provably dead now (no
+  // live claimant). For a 'submitted' row (a signature already went on the wire) the caller MUST have run the #7
+  // recoveryPreCheck first, so this only re-claims a PROVABLY-DEAD tx — never a landed/in-flight one. A re-claimed
+  // open re-signs its DETERMINISTIC keypair → if it had already landed, the account exists and the re-attempt fails
+  // harmlessly (no double position).
   const set = { state: 'claimed' as const, updatedAt: nowMs };
-  const reclaimable = recovering ? inArray(executions.state, ['failed', 'claimed']) : eq(executions.state, 'failed');
+  const reclaimable = recovering ? inArray(executions.state, ['failed', 'claimed', 'submitted']) : eq(executions.state, 'failed');
   const claimed = await db
     .insert(executions)
     .values({ commandId, eventKey, state: 'claimed', deadlineSlot, createdAt: nowMs, updatedAt: nowMs })

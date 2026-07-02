@@ -69,12 +69,13 @@ type Status = { value: { err?: unknown; confirmationStatus?: string } | null };
 function fakeConn(status: () => Status): Connection {
   return {
     getSlot: async () => 200,
-    getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58() }),
+    getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 1_000 }),
+    getBlockHeight: async () => 500,
     sendRawTransaction: async () => `SIG_${Math.floor(Math.random() * 1e9)}`,
     getSignatureStatus: async () => status(),
   } as unknown as Connection;
 }
-const blockhashCache = { get: () => Keypair.generate().publicKey.toBase58() } as unknown as BlockhashCache;
+const blockhashCache = { get: () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 1_000 }) } as unknown as BlockhashCache;
 // Typed observability emitter (P2): process1 emits codes through `events.emit`. A no-op fake here keeps the test
 // focused on the verdict + the executions idempotency state (the observability rows are covered by their own suites).
 const events = { emit: () => {} } as unknown as CopyEvents;
@@ -289,5 +290,122 @@ describe('process1 — BUY confirm gate (#4: a non-confirmed buy never publishes
     const verdict = await process1(sr, ctxFor(conn, bus));
     expect(verdict.ok).toBe(false);
     expect(bus.publish).not.toHaveBeenCalled();
+  });
+});
+
+// --- #7 EXACTLY-ONCE money-path: persist the signature + blockhash expiry BEFORE broadcast, then on recovery only
+// re-sign a PROVABLY-dead tx. Without this, a vault crash after land() but before finalize('landed') re-signs on boot
+// → the first tx AND the recovery tx both confirm → a real-money DOUBLE add/buy/sell/remove (no on-chain idempotency).
+const PRIOR_SIG = 'PriorBroadcastSignature111111111111111111111';
+const LVBH = 1_000; // lastValidBlockHeight stored with the submitted tx
+
+/** Seed an already-broadcast executions row (state 'submitted' with a signature+expiry) as a crashed prior attempt. */
+async function seedSubmitted(sr: Record<string, unknown>, signature: string | null, lastValidBlockHeight: number): Promise<void> {
+  await db.insert(executions).values({ commandId: sr.commandId as string, eventKey: sr.eventKey as string, state: signature ? 'submitted' : 'claimed', deadlineSlot: 1_000_000, signature, lastValidBlockHeight, createdAt: Date.now(), updatedAt: Date.now() });
+}
+
+/** A conn whose getSignatureStatus/getBlockHeight are stubbed to drive the recovery pre-check outcome. */
+function recoveryConn(opts: { priorStatus: Status; blockHeight: number; land: (raw: unknown) => Promise<string> }): Connection {
+  return {
+    getSlot: async () => 200,
+    getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: LVBH }),
+    getBlockHeight: async () => opts.blockHeight,
+    // The seeded PRIOR_SIG is classified per opts.priorStatus; any OTHER (freshly re-signed) sig confirms so a
+    // legitimately-dead retry can complete.
+    getSignatureStatus: async (s: string) => (s === PRIOR_SIG ? opts.priorStatus : ({ value: { confirmationStatus: 'confirmed' } } as Status)),
+    sendRawTransaction: opts.land,
+  } as unknown as Connection;
+}
+
+describe('process1 — #7: markSubmitted persists sig+expiry BEFORE the tx hits the wire', () => {
+  it('the executions row is already "submitted" with signature+lastValidBlockHeight when land() is called', async () => {
+    // WHY (the money-path bug): the crash-recoverable state (signature + blockhash expiry) MUST exist on-chain-side
+    // BEFORE the tx is broadcast — otherwise a crash between land() and finalize() leaves recovery blind and it
+    // re-broadcasts. We observe the DB row at the exact moment sendRawTransaction fires.
+    const sr = closeReq();
+    let stateAtLand: string | undefined;
+    let sigAtLand: string | null | undefined;
+    let lvbhAtLand: number | null | undefined;
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const conn = {
+      getSlot: async () => 200,
+      getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: LVBH }),
+      getBlockHeight: async () => 500,
+      getSignatureStatus: async () => ({ value: { confirmationStatus: 'confirmed' } }),
+      sendRawTransaction: async () => {
+        const row = (await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string)))[0];
+        stateAtLand = row?.state;
+        sigAtLand = row?.signature;
+        lvbhAtLand = row?.lastValidBlockHeight;
+        return `SIG_${Math.floor(Math.random() * 1e9)}`;
+      },
+    } as unknown as Connection;
+    const verdict = await process1(sr, ctxFor(conn, bus));
+    expect(verdict.ok).toBe(true);
+    expect(stateAtLand).toBe('submitted'); // markSubmitted ran BEFORE land
+    expect(sigAtLand).toBeTruthy();
+    expect(lvbhAtLand).toBe(LVBH);
+  });
+});
+
+describe('process1 — #7: recovery pre-check re-signs ONLY a provably-dead tx (exactly-once)', () => {
+  it('case 1 (LANDED): a submitted row whose sig is confirmed → finalize landed + publish, NEVER re-signs', async () => {
+    // WHY: this is the double-execution guard. The prior tx already confirmed (money moved). Boot recovery MUST NOT
+    // re-broadcast. Against the pre-#7 code (recovering re-claims a stranded row and re-signs) `land` is called → a
+    // double add/buy. With the fix the on-chain check sees 'confirmed' and finalizes without signing.
+    const sr = closeReq();
+    await seedSubmitted(sr, PRIOR_SIG, LVBH);
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const land = vi.fn(async () => 'SHOULD_NOT_BE_CALLED');
+    const conn = recoveryConn({ priorStatus: { value: { confirmationStatus: 'confirmed' } }, blockHeight: 500, land });
+    const verdict = await process1(sr, ctxFor(conn, bus), true); // recovering
+    expect(land).not.toHaveBeenCalled(); // ← FAILS on the pre-#7 code (it re-signs the landed tx)
+    expect(verdict).toEqual({ ok: true, kind: 'close' });
+    expect(bus.publish).toHaveBeenCalledTimes(1); // ev:executed re-published (idempotent downstream)
+    const row = await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string));
+    expect(row[0]?.state).toBe('landed');
+  });
+
+  it('case 2 (DEAD): sig not found + blockhash expired (getBlockHeight > lastValidBlockHeight) → re-signs exactly once', async () => {
+    // WHY: a tx whose blockhash has expired and that the chain has never seen is provably dead — the copy would be
+    // MISSED if we did not re-drive it. The recovery re-signs and lands EXACTLY one new tx.
+    const sr = closeReq();
+    await seedSubmitted(sr, PRIOR_SIG, LVBH);
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const land = vi.fn(async () => `SIG_${Math.floor(Math.random() * 1e9)}`);
+    const conn = recoveryConn({ priorStatus: { value: null }, blockHeight: LVBH + 1_000, land }); // not found + expired
+    const verdict = await process1(sr, ctxFor(conn, bus), true);
+    expect(land).toHaveBeenCalledTimes(1); // one — and only one — new land
+    expect(verdict).toEqual({ ok: true, kind: 'close' });
+    const row = await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string));
+    expect(row[0]?.state).toBe('landed');
+  });
+
+  it('case 3 (IN-FLIGHT): sig not found but blockhash still valid → does NOT re-sign this pass (retryLater, unACKed)', async () => {
+    // WHY: the tx may still land under a live blockhash. Re-signing now risks a double execution; ACKing now would
+    // strand it. We leave it for a later recovery pass (retryLater → the loop does not ACK).
+    const sr = closeReq();
+    await seedSubmitted(sr, PRIOR_SIG, LVBH);
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const land = vi.fn(async () => 'SHOULD_NOT_BE_CALLED');
+    const conn = recoveryConn({ priorStatus: { value: null }, blockHeight: LVBH - 100, land }); // not found + still valid
+    const verdict = await process1(sr, ctxFor(conn, bus), true);
+    expect(land).not.toHaveBeenCalled(); // no re-sign while the blockhash lives
+    expect(verdict).toMatchObject({ ok: false, reason: 'recover_in_flight', retryLater: true });
+    expect(bus.publish).not.toHaveBeenCalled();
+    const row = await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string));
+    expect(row[0]?.state).toBe('submitted'); // untouched — awaits a later pass
+  });
+
+  it("a 'claimed' row with NO signature (crashed BEFORE broadcast) → nothing landed → re-signs safely", async () => {
+    // WHY: markSubmitted had not run, so no tx ever hit the wire. Re-signing cannot double-execute.
+    const sr = closeReq();
+    await seedSubmitted(sr, null, 0); // signature null → state 'claimed'
+    const bus = { publish: vi.fn(async () => 'sid') } as unknown as RedisBus;
+    const land = vi.fn(async () => `SIG_${Math.floor(Math.random() * 1e9)}`);
+    const conn = recoveryConn({ priorStatus: { value: null }, blockHeight: 500, land });
+    const verdict = await process1(sr, ctxFor(conn, bus), true);
+    expect(land).toHaveBeenCalledTimes(1); // safe re-sign (nothing was broadcast)
+    expect(verdict).toEqual({ ok: true, kind: 'close' });
   });
 });

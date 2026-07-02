@@ -18,7 +18,7 @@ import { landViaJito } from '@/copybot/coffre/jito-landing';
 import { verifyTx } from '@/copybot/coffre/wall-b';
 import { derivePositionKeypair } from '@/copybot/ephemeral-position';
 import type { CopyEvents } from '@/copybot/observability/copy-events';
-import { SignRequestSchema } from '@/domain/copybot/contracts';
+import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
 import { type CopyCode, resolveLegacyReason } from '@/domain/copybot/observability/codes';
 import type { RedisBus } from '@/infrastructure/bus/redis-bus';
 import type { openDatabase } from '@/infrastructure/persistence/database';
@@ -70,14 +70,90 @@ export async function finalize<T extends { ok: boolean }>(db: Db, commandId: str
   return verdict;
 }
 
+/**
+ * EXACTLY-ONCE (#7): persist the broadcast signature + its blockhash expiry to state 'submitted' BEFORE the tx goes
+ * on the wire. If the vault crashes AFTER land() but BEFORE finalize('landed'), boot recovery reads this row and
+ * checks the chain — re-signing only when the prior tx is PROVABLY dead (never double-broadcasting an add/buy/sell).
+ */
+export async function markSubmitted(db: Db, commandId: string, signature: string, lastValidBlockHeight: number, nowMs: number): Promise<void> {
+  await db.update(executions).set({ state: 'submitted', signature, lastValidBlockHeight, updatedAt: nowMs }).where(eq(executions.commandId, commandId));
+}
+
+/** The fate of a previously-broadcast tx, decided from the chain (exactly-once recovery pre-check). */
+type PriorTxFate = 'landed' | 'dead' | 'in-flight';
+
+/**
+ * Classify a previously-broadcast signature from the chain (exactly-once recovery):
+ *  - a confirmed/finalized success → 'landed' (the money already moved; NEVER re-sign);
+ *  - an on-chain error → 'dead' (Solana txs are atomic → the tx fully reverted, nothing applied → safe to re-sign);
+ *  - not found (dropped or too-fresh-to-index) → 'dead' only once the blockhash is PROVABLY expired
+ *    (`getBlockHeight > lastValidBlockHeight`), else 'in-flight' (it may still land → do NOT re-sign this pass);
+ *  - found but only 'processed' (not yet durable) → 'in-flight'.
+ */
+export async function classifyPriorTx(conn: Connection, signature: string, lastValidBlockHeight: number): Promise<PriorTxFate> {
+  const { value } = await conn.getSignatureStatus(signature);
+  if (value) {
+    if (value.err) return 'dead'; // atomically reverted → nothing applied
+    if (value.confirmationStatus === 'confirmed' || value.confirmationStatus === 'finalized') return 'landed';
+    return 'in-flight'; // 'processed' only → not durable yet
+  }
+  // Not found: dropped (dead) vs. not-yet-indexed (in-flight) is disambiguated by the blockhash's expiry.
+  const height = await conn.getBlockHeight('confirmed');
+  return height > lastValidBlockHeight ? 'dead' : 'in-flight';
+}
+
+/**
+ * Recovery pre-check (money-path exactly-once): for a command whose executions row already carries a BROADCAST
+ * signature ('submitted', or a legacy 'claimed' that reached the wire), decide from the chain BEFORE re-signing:
+ *  - 'landed' → finalize 'landed', re-publish ev:executed (idempotent downstream), and SKIP signing;
+ *  - 'in-flight' → leave the message for a later recovery pass (retryLater: no ACK), do NOT re-sign;
+ *  - 'dead' (or no stored signature) → return null → the caller proceeds to re-claim + re-sign normally.
+ * Runs only on the vault boot/PEL recovery path. Not applied to forceReclaim (failsafe/orphan) closes, which keep
+ * their existing always-retry semantics (a close re-sign is harmless — the account is either gone or gets re-closed).
+ */
+export async function recoveryPreCheck(ctx: Ctx, sr: SignRequest): Promise<{ ok: boolean; reason?: string; kind?: string; retryLater?: boolean } | null> {
+  const { conn, db, bus, events, log } = ctx;
+  const rows = await db
+    .select({ state: executions.state, signature: executions.signature, lastValidBlockHeight: executions.lastValidBlockHeight })
+    .from(executions)
+    .where(eq(executions.commandId, sr.commandId));
+  const prior = rows[0];
+  // Nothing was broadcast (no row, no stored signature, or a terminal state) → safe to (re-)claim + sign normally.
+  if (!prior?.signature || (prior.state !== 'submitted' && prior.state !== 'claimed')) return null;
+  const fate = await classifyPriorTx(conn, prior.signature, prior.lastValidBlockHeight ?? 0);
+  if (fate === 'in-flight') return { ok: false, reason: 'recover_in_flight', kind: sr.kind, retryLater: true };
+  if (fate === 'dead') return null; // provably dead → fall through to re-claim + re-sign
+  // 'landed': the money already moved. Re-publish ev:executed (idempotent downstream) and finalize — never re-sign.
+  try {
+    await bus.publish('copybot:ev:executed', 'ev:executed', ctx.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig: prior.signature, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
+  } catch (e) {
+    log.error({ kind: sr.kind, sig: prior.signature, error: (e as Error).message }, 'ev:executed re-publish failed during recovery — brain will backstop via reconcile/PEL');
+  }
+  events.emit('sign.landed', { stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: prior.signature, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, adminDetail: { recovering: true, recovered: true } });
+  log.info({ kind: sr.kind, sig: prior.signature }, '🔁 recovery: prior tx already landed — finalized without re-signing');
+  return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
+}
+
 /** The critical section 5→13 (1-4 done by the bus). Returns a loggable verdict. Effects = DB + log + (when enabled) sign/land. */
-export async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string }> {
+export async function process1(payload: unknown | null, ctx: Ctx, recovering = false): Promise<{ ok: boolean; reason?: string; kind?: string; retryLater?: boolean }> {
   const { conn, db, bus, copier, blockhashCache, events, maxTradeSol, jitoBundleUrl, log } = ctx;
   const ourOwner = copier.publicKey.toBase58();
   if (payload == null) return { ok: false, reason: 'bad_hmac_or_hop' }; // 1-4 failed (bus)
   const parsed = SignRequestSchema.safeParse(payload); // 5
   if (!parsed.success) return { ok: false, reason: 'bad_schema' };
   const sr = parsed.data;
+
+  const action = sr.eventKey.split(':')[2]; // `${leader}:${pool}:${action}:${id}` — leader/pool are base58 (no ':')
+  const forceReclaim = sr.kind === 'close' && (action === 'failsafe' || action === 'orphan');
+
+  // EXACTLY-ONCE recovery pre-check (#7) — BEFORE staleness/claim: a prior instance may have crashed after putting
+  // the tx on the wire (state 'submitted') but before finalize('landed'). We check the chain FIRST (a landed tx is
+  // landed regardless of the deadline) and re-sign ONLY a provably-dead tx. Skipped for forceReclaim closes (keep
+  // their always-retry semantics — a close re-sign is harmless). null ⇒ nothing broadcast / dead → proceed normally.
+  if (recovering && !forceReclaim) {
+    const pre = await recoveryPreCheck(ctx, sr);
+    if (pre) return pre;
+  }
 
   const slot = await conn.getSlot(); // 6 staleness
   if (slot > sr.deadlineSlot) return { ok: false, reason: 'stale', kind: sr.kind };
@@ -88,8 +164,6 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
   // reconcile-driven failsafe/orphan CLOSE (eventKey action 'failsafe'/'orphan') is emitted only while the position
   // is PROVABLY still on-chain → it must retry regardless of a stale terminal state, or a phantom is stuck forever.
   const now = Date.now();
-  const action = sr.eventKey.split(':')[2]; // `${leader}:${pool}:${action}:${id}` — leader/pool are base58 (no ':')
-  const forceReclaim = sr.kind === 'close' && (action === 'failsafe' || action === 'orphan');
   const owned = await claimExecution(db, sr.commandId, sr.eventKey, sr.deadlineSlot, now, recovering, forceReclaim);
   if (!owned) return { ok: false, reason: 'duplicate', kind: sr.kind };
 
@@ -138,15 +212,20 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
     try {
       const tSign = Date.now();
       const fresh = Transaction.from(Buffer.from(sr.txBase64, 'base64')); // fresh tx per attempt
-      // First attempt: cached blockhash (no RTT). Retries: fetch fresh in case the cached one went stale.
-      const blockhash = attempt === 0 ? blockhashCache.get() : (await conn.getLatestBlockhash()).blockhash;
+      // First attempt: cached blockhash + expiry (no RTT). Retries: fetch fresh in case the cached one went stale.
+      const bh = attempt === 0 ? blockhashCache.get() : await conn.getLatestBlockhash();
       fresh.feePayer = copier.publicKey;
-      fresh.recentBlockhash = blockhash;
+      fresh.recentBlockhash = bh.blockhash;
       const signers: Keypair[] = sr.kind === 'open' ? [copier, derivePositionKeypair(sr.commandId)] : [copier];
       fresh.sign(...signers);
+      const sig = utils.bytes.bs58.encode(fresh.signature as Buffer); // deterministic once signed (== land()'s return)
+      // EXACTLY-ONCE (#7): persist signature + blockhash expiry to 'submitted' BEFORE broadcasting. A crash after
+      // land() but before finalize('landed') is then recoverable — boot recovery re-signs ONLY a provably-dead tx.
+      await markSubmitted(db, sr.commandId, sig, bh.lastValidBlockHeight, Date.now());
       const raw = fresh.serialize();
       // Land via a Jito bundle when configured (anti-sandwich; falls back to plain RPC internally), else plain RPC.
-      const sig = jitoBundleUrl ? await landViaJito(conn, jitoBundleUrl, raw, utils.bytes.bs58.encode(fresh.signature as Buffer)) : await land(conn, raw);
+      if (jitoBundleUrl) await landViaJito(conn, jitoBundleUrl, raw, sig);
+      else await land(conn, raw);
       // Tx ON THE WIRE — this is the CONTROLLABLE latency endpoint (event → submitted), the price-relevant moment.
       // Logged BEFORE the confirmation wait so latency tracking reflects submission speed, not chain-confirm time.
       log.info({ kind: sr.kind, sig, busMs, submitMs: Date.now() - tSign }, '🚀 submitted');
