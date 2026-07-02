@@ -65,6 +65,7 @@ import { MirrorStore } from './mirror-store';
 import { type ExecutedBatchDeps, processExecutedBatch } from './dispatch-executed';
 import { createPositionQueue } from './position-queue';
 import { createPendingOpenReservations } from './pending-open-reservations';
+import { type PendingOpenMaps, type PendingStashKeys, pendingOpenLeaders, pendingStashesFor, stashCount } from './pending-open-cancel';
 import { RugExitStore } from '@/copybot/rug-exit-store';
 
 const STREAM = 'copybot:cmd:sign';
@@ -195,6 +196,15 @@ const buildingToken2022Positions = new Map<string, number>(); // ourPosition →
 // open-in-flight route to resync/ignore instead of a duplicate real-money open.
 const positionQueue = createPositionQueue();
 const pendingOpens = createPendingOpenReservations(OPEN_PENDING_TTL_MS);
+// A leader position whose IN-FLIGHT multi-tx open (two-sided buy→open, Token-2022 create→deposit, wide split) must
+// NOT complete because the leader CLOSED before the open landed. The open handler returned before `registry.open`
+// (which runs in a later ev:executed continuation), so `handleClose` finds no mirror — without this signal a queued
+// continuation would deploy capital into the pool the leader just EXITED (a fast scalp / rug exit). The continuations
+// run from the ev:executed loop — a DIFFERENT execution path than the position-queue — so we need this cross-path
+// cancellation marker. `cancelPendingOpen` sets it; each continuation clears it via `consumeOpenCancellation` before
+// publishing on-chain. KNOWN LIMIT (like the pending maps above): in-memory only — a FULL process crash loses it, but
+// the mirror was never registered so nothing is stuck, and the periodic sweep clears any token already bought.
+const cancelledOpens = new Set<string>();
 // A two-sided open's BOUGHT token sits on the wallet between the buy landing and the deposit landing. Since the
 // safety-sweep now sells ANY non-SOL residual (SELL_RESIDUAL_DUST_RAW=0), it must NOT sell that in-flight token
 // mid-open (it would empty the token leg). Track the mint while the open is in flight; the sweep skips it within a
@@ -662,6 +672,7 @@ async function main(): Promise<void> {
     if (!ctx) return;
     pendingTwoSidedOpens.delete(buyCommandId);
     const { e, dist, sizeLamports, solSide, tokenMint, sizeSol } = ctx;
+    if (consumeOpenCancellation(e.position, e.pool)) return; // leader closed before the buy landed → don't open into an exited pool
     const poolPk = new PublicKey(e.pool);
     const pair = await createDlmmPair(conn, poolPk);
     // Deposit the token we ACTUALLY bought (ExactIn output is variable) — read the settled balance, don't assume an
@@ -712,6 +723,7 @@ async function main(): Promise<void> {
       issuedAtSlot,
       deadlineSlot,
     };
+    if (consumeOpenCancellation(e.position, e.pool)) return; // a close arrived DURING the build → abort before the on-chain publish
     const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol, lowerBin: lower, upperBin: upper, openedAt: Date.now() });
     pendingOpens.clear(e.position); // now tracked → lift the duplicate-open reservation for this leader position
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
@@ -727,6 +739,7 @@ async function main(): Promise<void> {
     if (!ctx) return;
     pendingToken2022Deposits.delete(createCommandId);
     const { e, lower, upper, sizeSol } = ctx;
+    if (consumeOpenCancellation(e.position, e.pool)) return; // leader closed before the create landed → don't fund an exited pool (the empty position is orphan-closed)
     const poolPk = new PublicKey(e.pool);
     const posKp: Keypair = derivePositionKeypair(createCommandId); // SAME position the create made
     let depositTx: Transaction;
@@ -753,6 +766,7 @@ async function main(): Promise<void> {
       if (txs.length !== 1) throw new Error(`token2022 deposit chunked into ${txs.length} txs (range too wide) — aborting, no partial deposit`);
       depositTx = txs[0] as Transaction;
     }
+    if (consumeOpenCancellation(e.position, e.pool)) return; // a close arrived DURING the deposit build → abort before the on-chain deposit
     const depositEventKey = `${cfg.leader}:${e.pool}:open-deposit:${e.signature}`;
     const depositCommandId = deriveCommandId(depositEventKey);
     const { issuedAtSlot, deadlineSlot } = await slots();
@@ -782,6 +796,13 @@ async function main(): Promise<void> {
     const pend = pendingToken2022Mirrors.get(depositCommandId);
     if (!pend) return;
     pendingToken2022Mirrors.delete(depositCommandId);
+    if (consumeOpenCancellation(pend.leaderPosition, pend.pool)) {
+      // Leader closed while the deposit was in flight. The deposit already landed (this is its confirm) → capital is
+      // in the pool, but we do NOT register the mirror: lift the orphan-close grace so the reconcile/orphan sweep
+      // closes the now-funded, untracked position and pulls the capital back out.
+      buildingToken2022Positions.delete(pend.ourPosition);
+      return;
+    }
     const mirror = registry.open({ leaderPosition: pend.leaderPosition, ourPosition: pend.ourPosition, pool: pend.pool, nonSolSymbol: pend.nonSolSymbol, sizeSol: pend.sizeSol, lowerBin: pend.lower, upperBin: pend.upper, openedAt: Date.now() });
     pendingOpens.clear(pend.leaderPosition); // now tracked → lift the duplicate-open reservation for this leader position
     await store.saveOpen(mirror); // tracked only NOW — a funded, deposited position
@@ -800,6 +821,13 @@ async function main(): Promise<void> {
     if (!ctx) return;
     pendingReshapeAdds.delete(buyCommandId);
     const { dist, addLamports, solSide, tokenMint, lower, upper, totalAddSol, ourPosition, pool, leaderPosition, signature } = ctx;
+    // A reshape ADD is on an EXISTING (registered) mirror — NOT an open, so a leader close finds the mirror and runs
+    // the normal close path. But that close may land WHILE this add's buy was in flight: don't ADD liquidity to a
+    // position the leader closed (registry.close flips its status). The bought token is recovered by the sweep.
+    if (!registry.hasOpen(leaderPosition)) {
+      events.emit('reshape.noop', { stage: 'reshape', outcome: 'noop', leader: cfg.leader, pool, leaderPosition, ourPosition, eventKey: `${cfg.leader}:${pool}:reshape-add-cancelled:${signature}`, adminDetail: { phase: 'mirror_closed_before_reshape_add' } });
+      return;
+    }
     const poolPk = new PublicKey(pool);
     const pair = await createDlmmPair(conn, poolPk);
     const actualToken = await readOwnerTokenBalance(conn, ownerPk, new PublicKey(tokenMint)); // ExactIn output is variable → deposit the real balance
@@ -819,9 +847,60 @@ async function main(): Promise<void> {
     log.info({ our: ourPosition, bins: dist.length }, '🪙 two-sided reshape ADD published (after buy landed)');
   }
 
+  // A cancelled multi-tx open surfaces as the leader-closed FAILSAFE (SAME semantics as the reClose alias
+  // `leader_closed` → `failsafe.activated`): the leader closed and we protected capital by NOT completing the open.
+  // Feed-visible + deduped per leader position (distinct cancels stay distinct; a cross-path double-emit collapses).
+  const openCancelledKey = (pool: string, leaderPosition: string): string => `${cfg.leader}:${pool}:open-cancelled:${leaderPosition}`;
+  const emitOpenCancelled = (leaderPosition: string, pool: string, dropped: number): void => {
+    events.emit('failsafe.activated', { stage: 'open', outcome: 'skipped', reason: 'leader_closed', leader: cfg.leader, pool, leaderPosition, eventKey: openCancelledKey(pool, leaderPosition), adminDetail: { phase: 'multi_tx_open_cancelled', dropped } });
+  };
+  const pendingOpenMapsView = (): PendingOpenMaps => ({ twoSidedOpens: pendingTwoSidedOpens, token2022Deposits: pendingToken2022Deposits, token2022Mirrors: pendingToken2022Mirrors, reshapeAdds: pendingReshapeAdds });
+  // Does this leader position have any in-flight multi-tx open stash? (Belt-and-suspenders behind pendingOpens: a
+  // stash can outlive the reservation's TTL if a buy/create never lands.)
+  const hasPendingOpenStash = (leaderPosition: string): boolean => stashCount(pendingStashesFor(leaderPosition, pendingOpenMapsView())) > 0;
+
+  // Cancel an IN-FLIGHT multi-tx open because the leader closed before it completed. Drops every pending-open stash
+  // for this leader position across the 4 continuation maps, clears the duplicate-open reservation, and marks it in
+  // `cancelledOpens` so a continuation ALREADY running (cross-path race: it resolved its stash before this ran)
+  // aborts before publishing on-chain (see consumeOpenCancellation). There is nothing on-chain to close (the open
+  // never landed); any token already bought is left to the periodic sweep (residual → sold back to SOL).
+  function cancelPendingOpen(leaderPosition: string, pool: string): void {
+    cancelledOpens.add(leaderPosition); // ALWAYS mark (also covers the race where a continuation already deleted its stash)
+    const keys: PendingStashKeys = pendingStashesFor(leaderPosition, pendingOpenMapsView());
+    for (const k of keys.twoSidedOpens) pendingTwoSidedOpens.delete(k);
+    for (const k of keys.token2022Deposits) pendingToken2022Deposits.delete(k);
+    for (const k of keys.token2022Mirrors) pendingToken2022Mirrors.delete(k);
+    for (const k of keys.reshapeAdds) pendingReshapeAdds.delete(k);
+    pendingOpens.clear(leaderPosition);
+    // Emit ONLY when a real in-flight open was dropped. A stashCount of 0 with a reservation means either (a) a
+    // SKIPPED open's leaked reservation (nothing was in flight → a "leader closed" alert would be misleading) or
+    // (b) the RACE where a continuation already grabbed+deleted its stash — in that case the continuation's
+    // `consumeOpenCancellation` emits instead (it always emits), so we still get exactly one row.
+    const dropped = stashCount(keys);
+    if (dropped > 0) emitOpenCancelled(leaderPosition, pool, dropped);
+  }
+
+  // Cross-path guard called INSIDE each multi-tx open continuation: if the leader closed (cancelPendingOpen marked
+  // this leader position) WHILE the continuation was in flight, clear the reservation, forget the marker, emit, and
+  // tell the caller to abort BEFORE publishing on-chain. Returns true iff the open was cancelled.
+  function consumeOpenCancellation(leaderPosition: string, pool: string): boolean {
+    if (!cancelledOpens.has(leaderPosition)) return false;
+    cancelledOpens.delete(leaderPosition);
+    pendingOpens.clear(leaderPosition);
+    emitOpenCancelled(leaderPosition, pool, 0);
+    return true;
+  }
+
   async function handleClose(e: DetectedEvent): Promise<void> {
     const m = registry.get(e.position);
-    if (!m) return;
+    if (!m) {
+      // The mirror isn't registered → either an untracked position (ignore) OR a MULTI-TX open still IN FLIGHT
+      // (buy→open / create→deposit / wide split) whose `registry.open` runs in a later ev:executed continuation. If
+      // the leader CLOSED during that gap the in-flight open must be CANCELLED — else the continuation deploys
+      // capital into the pool the leader just EXITED. Nothing is on-chain to close (the open never landed).
+      if (pendingOpens.isPending(e.position) || hasPendingOpenStash(e.position)) cancelPendingOpen(e.position, e.pool);
+      return;
+    }
     const eventKey = `${cfg.leader}:${m.pool}:close:${e.signature}`;
     const built = await buildCloseTx(conn, new PublicKey(m.pool), ownerPk, new PublicKey(m.ourPosition), m.lowerBin, m.upperBin);
     const { issuedAtSlot, deadlineSlot } = await slots();
@@ -1058,6 +1137,20 @@ async function main(): Promise<void> {
       // avoids re-publishing while a previous orphan-close is still landing.
       const p = held.find((h) => h.position === orphan);
       if (p && now - (recentlyPublishedClose.get(orphan) ?? 0) >= RECLOSE_GRACE_MS) await publishOrphanClose(p);
+    }
+
+    // Belt-and-suspenders (backstop behind the close-event-driven handleClose path): a leader that closed a position
+    // whose MULTI-TX open is still IN FLIGHT is never in `tracked` (the mirror isn't registered yet), so the loops
+    // above can't catch it. Cancel any pending open whose leader account is confirmably GONE so the continuation
+    // never funds an exited pool — only when it's a CLEAN addition (leader account read as null; else rely on handleClose).
+    const pendingLeaders = [...pendingOpenLeaders(pendingOpenMapsView())].filter(([lp]) => !registry.hasOpen(lp));
+    if (pendingLeaders.length > 0) {
+      await Promise.all(
+        pendingLeaders.map(async ([lp, pool]) => {
+          const info = await conn.getAccountInfo(new PublicKey(lp)).catch(() => undefined);
+          if (info === null) cancelPendingOpen(lp, pool); // leader account gone → the pending open must not complete
+        }),
+      );
     }
   }
 
