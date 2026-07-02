@@ -62,6 +62,7 @@ import { envEffectiveOverride } from './env-overrides';
 import { applyPriorityFee, withCuLimit } from './compute-budget';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
+import { type ExecutedBatchDeps, processExecutedBatch } from './dispatch-executed';
 import { RugExitStore } from '@/copybot/rug-exit-store';
 
 const STREAM = 'copybot:cmd:sign';
@@ -151,6 +152,11 @@ const TWO_SIDED_CU_LIMIT = 1_400_000; // max CU cap (free — only used CU is me
 // even exist yet, so the SDK build produces a tx that fails on-chain. We publish the BUY, stash the open context
 // here keyed by the buy's commandId, and build+publish the open only when the buy's ev:executed arrives (token +
 // ATA now present → clean build). (A two-sided reshape ADD does NOT need this — its position's ATA already exists.)
+// KNOWN LIMIT — these in-memory pending maps (pendingTwoSidedOpens / pendingReshapeAdds / pendingToken2022Deposits /
+// pendingToken2022Mirrors) are NOT persisted, so a FULL process crash loses them: a buy/create confirm replayed after
+// restart whose pending entry is gone will no-op (the deferred open/deposit is dropped, recovered only by the
+// orphan-sweep / reconcile backstops). The ev:executed PEL drain below covers the close path + transient errors within
+// a LIVE process; persisting these maps to survive a crash is a separate follow-up (not in this fix).
 const pendingTwoSidedOpens = new Map<string, { e: DetectedEvent; dist: WeightBin[]; sizeLamports: bigint; solSide: 'X' | 'Y'; tokenMint: string; sizeSol: number }>();
 
 // TOKEN-2022 2-TX OPEN: a Token-2022 leg can't be deposited by the v1 by-weight ix (on-chain it pins the token
@@ -1337,62 +1343,54 @@ async function main(): Promise<void> {
   let stopped = false;
   const evBus = RedisBus.connect(cfg.redisUrl);
   await evBus.ensureGroup(EV_EXECUTED_STREAM, 'brain');
+  // Per-message dispatch deps: each deferred-publish handler keeps its OWN domain-specific failure emit (open_failed /
+  // add_failed / swap.failed) via an inline `.catch()` — those are terminal (the pending-map entry is already
+  // consumed → a retry no-ops) so the message is still acked. `onCloseConfirmed` is passed WITHOUT a catch: a DB blip
+  // in markClosed must REJECT so the batch guard leaves the close UNACKED for an idempotent PEL-drain retry (never
+  // silently drop a close). See dispatch-executed.ts.
+  const executedDeps: ExecutedBatchDeps = {
+    onCloseConfirmed,
+    onCloseExecuted: (ev) =>
+      onCloseExecuted(ev).catch((e) =>
+        // close-residual sell build/publish failed → the swap-failed path (pinned, feed "swap manually").
+        events.swapFailed({ stage: 'sell', outcome: 'failed', reason: 'failed_after_retries', leader: cfg.leader, pool: ev.pool, commandId: ev.commandId, adminDetail: { error: (e as Error).message, pool: ev.pool } }),
+      ),
+    hasPendingReshapeAdd: (commandId) => pendingReshapeAdds.has(commandId),
+    publishReshapeAddAfterBuy: (commandId) =>
+      publishReshapeAddAfterBuy(commandId).catch((e) => events.emit('reshape.add_failed', { stage: 'reshape', outcome: 'failed', reason: 'add_failed', leader: cfg.leader, commandId, adminDetail: { error: (e as Error).message, commandId } })),
+    publishTwoSidedOpenAfterBuy: (commandId) =>
+      publishTwoSidedOpenAfterBuy(commandId).catch((e) => events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId, adminDetail: { error: (e as Error).message, commandId } })),
+    hasPendingToken2022Deposit: (commandId) => pendingToken2022Deposits.has(commandId),
+    publishDepositAfterPositionCreated: (commandId) =>
+      publishDepositAfterPositionCreated(commandId).catch((e) =>
+        // the deposit leg of a Token-2022 OPEN failed to build/publish → the open did not complete (open_failed).
+        events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId, adminDetail: { error: (e as Error).message, commandId, leg: 'token2022_deposit' } }),
+      ),
+    onOpenConfirmed,
+    hasPendingToken2022Mirror: (commandId) => pendingToken2022Mirrors.has(commandId),
+    finalizeToken2022Open: (commandId) =>
+      finalizeToken2022Open(commandId).catch((e) => events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId, adminDetail: { error: (e as Error).message, commandId, leg: 'token2022_finalize' } })),
+    onAddConfirmed,
+    onClaimConfirmed,
+    onSellConfirmed,
+    ack: (id) => evBus.ack(EV_EXECUTED_STREAM, 'brain', id),
+    onLoopError: (err, id) =>
+      events.system('system.loop_errored', err, { stage: 'failsafe', outcome: 'failed', reason: 'loop_errored', leader: cfg.leader, adminDetail: { loop: 'ev_executed', id } }),
+  };
   const consumeExecuted = async (): Promise<void> => {
     let backoff = 1000;
     while (!stopped) {
       try {
-        const msgs = await evBus.consume(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', hmacKey, 10, 5000);
-        for (const msg of msgs) {
-          const ev = msg.payload as { kind?: string; pool?: string; positionPubkey?: string; commandId?: string; sig?: string } | null;
-          if (ev?.kind === 'close' && ev.pool) {
-            if (ev.positionPubkey) await onCloseConfirmed(ev.positionPubkey); // prompt DB markClosed — no 30s wait
-            await onCloseExecuted({ pool: ev.pool, positionPubkey: ev.positionPubkey }).catch((e) =>
-              // close-residual sell build/publish failed → the swap-failed path (pinned, feed "swap manually").
-              events.swapFailed({ stage: 'sell', outcome: 'failed', reason: 'failed_after_retries', leader: cfg.leader, pool: ev.pool, commandId: ev.commandId, adminDetail: { error: (e as Error).message, pool: ev.pool } }),
-            );
-          } else if (ev?.kind === 'buy' && ev.commandId) {
-            // a token BUY just landed → build+publish the OPEN (open buy) or the RESHAPE ADD (reshape buy), reading
-            // the actual bought balance. Each helper no-ops if the commandId isn't its pending buy.
-            if (pendingReshapeAdds.has(ev.commandId)) {
-              await publishReshapeAddAfterBuy(ev.commandId).catch((e) => events.emit('reshape.add_failed', { stage: 'reshape', outcome: 'failed', reason: 'add_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId } }));
-            } else {
-              await publishTwoSidedOpenAfterBuy(ev.commandId).catch((e) => events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId } }));
-            }
-          } else if (ev?.kind === 'open' && ev.commandId && pendingToken2022Deposits.has(ev.commandId)) {
-            // a Token-2022 open's empty position (TX1) just CONFIRMED → build+publish the deposit (TX2). (Classic
-            // 1-tx opens also emit kind 'open' but are not in this map → ignored here, handled by the next branch.)
-            await publishDepositAfterPositionCreated(ev.commandId).catch((e) =>
-              // the deposit leg of a Token-2022 OPEN failed to build/publish → the open did not complete (open_failed).
-              events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_deposit' } }),
-            );
-          } else if (ev?.kind === 'open' && ev.positionPubkey && !(ev.commandId !== undefined && pendingToken2022Deposits.has(ev.commandId))) {
-            // a CLASSIC 1-tx open just LANDED on-chain → emit the FEED `lifecycle.open_confirmed` (the user sees the
-            // open, not just the close). Token-2022 creates take the branch above (their deposit lands as kind 'add'
-            // → finalizeToken2022Open emits the same confirm). Observability-only.
-            onOpenConfirmed(ev.positionPubkey);
-          } else if (ev?.kind === 'add' && ev.commandId && pendingToken2022Mirrors.has(ev.commandId)) {
-            // a Token-2022 open's deposit (TX2) just landed → persist the mirror (a reshape 'add' is not in this map).
-            await finalizeToken2022Open(ev.commandId).catch((e) =>
-              events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', reason: 'open_failed', leader: cfg.leader, commandId: ev.commandId, adminDetail: { error: (e as Error).message, commandId: ev.commandId, leg: 'token2022_finalize' } }),
-            );
-          } else if (ev?.kind === 'add' && ev.positionPubkey && ev.commandId) {
-            // a CLASSIC reshape ADD leg just LANDED → emit the FEED `lifecycle.add_confirmed` (the Token-2022 deposit
-            // 'add' took the branch above; this is a reshape add on an existing mirror). Observability-only.
-            onAddConfirmed(ev.positionPubkey, ev.commandId);
-          } else if (ev?.kind === 'claim' && ev.positionPubkey && ev.commandId) {
-            // a fees CLAIM just LANDED → emit the FEED `lifecycle.claim_confirmed`. Observability-only.
-            onClaimConfirmed(ev.positionPubkey, ev.commandId);
-          } else if (ev?.kind === 'sell') {
-            // a residual token→SOL SELL just LANDED → emit the FEED `swap.executed` ("Swapped X → SOL") so the
-            // user sees the residual sale (the close-residual sell AND the safety-sweep both reach here). The
-            // earlier close-residual-sell FAILED path still maps to the pinned `swap.failed_after_retries` (above
-            // and in sweepWallet). Observability-only.
-            onSellConfirmed(ev);
-          }
-          await evBus.ack(EV_EXECUTED_STREAM, 'brain', msg.id);
-        }
+        // No-miss (mirrors coffre-main): drain the PEL FIRST — any message a prior iteration left delivered-but-
+        // unACKed (a transient handler/ack throw, or a same-process restart) is re-processed here so a confirmation
+        // (ESPECIALLY a close) is never stranded by `'>'` (which only returns NEW messages). On the first iteration
+        // this also recovers a boot-time PEL. Then read new messages. Both go through the SAME per-message guard.
+        await processExecutedBatch(await evBus.consumePending(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', hmacKey, 100), executedDeps);
+        await processExecutedBatch(await evBus.consume(EV_EXECUTED_STREAM, 'brain', 'brain-1', 'ev:executed', hmacKey, 10, 5000), executedDeps);
         backoff = 1000;
       } catch (e) {
+        // CONNECTION-level failure only (a Redis-down consume/consumePending) — per-message errors are already
+        // isolated inside processExecutedBatch. Record + exponential backoff + continue (Redis may recover).
         events.system('system.loop_errored', e, { stage: 'failsafe', outcome: 'failed', reason: 'loop_errored', leader: cfg.leader, adminDetail: { loop: 'ev_executed', backoff } });
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);
