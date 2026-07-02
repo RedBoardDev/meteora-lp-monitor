@@ -9,6 +9,7 @@ const ev = (over: Partial<DetectedEvent>): DetectedEvent => ({
   depositSol: 0,
   withdrawSol: 0,
   claimSol: 0,
+  closed: false,
   pool: 'POOL',
   position: 'POS',
   nonSolMint: null,
@@ -60,6 +61,41 @@ describe('classifyEventAction — event routing (robustness)', () => {
 
   it('a no-op event on a tracked position (no deposit/withdraw/claim, unknown instruction) → ignore', () => {
     expect(route({ instruction: 'Unknown' }, true)).toBe('ignore');
+  });
+});
+
+describe('classifyEventAction — close routing keys off `e.closed`, not the log label (10KB truncation)', () => {
+  // NO-MISS PILLAR: under log truncation the DLMM instruction name is lost → `instruction` degrades to
+  // '(DLMM)' and `classifyInstruction` yields null. A close (which the decoder still sees via inner CPI, so
+  // `e.closed === true`) MUST still route to 'close'. Relying on the label alone (the OLD code) would
+  // mis-route these: a standalone close (0 amounts) → 'ignore', a Remove+Close → 'resync'. Both are forbidden.
+  const UNCLASSIFIABLE = '(DLMM)'; // classifyInstruction('(DLMM)') === null (matches no known instruction)
+
+  it('★ standalone close (closed:true, 0 amounts, unclassifiable label) on a TRACKED position → close (was ignore)', () => {
+    // OLD kind-only code: kind=null, no deposit/withdraw/claim → falls through to 'ignore' → the close is MISSED.
+    expect(route({ instruction: UNCLASSIFIABLE, closed: true }, true)).toBe('close');
+  });
+
+  it('★ close+withdraw (closed:true, withdrawSol>0, unclassifiable label) on a TRACKED position → close (was resync)', () => {
+    // OLD kind-only code: kind=null → the withdraw branch wins → 'resync' → treated as a shrink, not a close.
+    expect(route({ instruction: UNCLASSIFIABLE, closed: true, withdrawSol: 0.1 }, true)).toBe('close');
+  });
+
+  it('a partial remove (closed:false, withdrawSol>0, unclassifiable label) on a TRACKED position → resync (unchanged)', () => {
+    // Not a close → the `e.closed` branch must NOT fire; a genuine withdraw still routes to resync.
+    expect(route({ instruction: UNCLASSIFIABLE, closed: false, withdrawSol: 0.1 }, true)).toBe('resync');
+  });
+
+  it('a first deposit (closed:false, depositSol>0, unclassifiable label) on an UNTRACKED position → open (unchanged)', () => {
+    expect(route({ instruction: UNCLASSIFIABLE, closed: false, depositSol: 0.1 }, false)).toBe('open');
+  });
+
+  it('a claim (positive claimSol) still routes to claim, never close (closed:false)', () => {
+    expect(route({ instruction: UNCLASSIFIABLE, closed: false, claimSol: 0.01 }, true)).toBe('claim');
+  });
+
+  it('close-by-label still works when NOT truncated (kind==="close" path, closed defaulting) — no regression', () => {
+    expect(route({ instruction: 'ClosePosition', withdrawSol: 0.1, closed: false }, true)).toBe('close');
   });
 });
 

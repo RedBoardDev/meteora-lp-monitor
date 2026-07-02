@@ -14,6 +14,7 @@ function fakeEvent(signature: string, blockTime: number | null = null): Detected
     depositSol: 1,
     withdrawSol: 0,
     claimSol: 0,
+    closed: false,
     pool: 'pool1',
     position: 'pos1',
     nonSolMint: 'mintNonSol',

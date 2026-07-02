@@ -10,12 +10,12 @@
  * stays `null` here. The byte decoding itself remains the binsight engine (`decodeDlmmLegs`, tested against
  * the real Event-CPI layout in `dlmm-event-decoder.test.ts`).
  */
-import { DLMM_PROGRAM_ID, SOL_MINT } from '@binsight/shared';
+import { SOL_MINT } from '@binsight/shared';
 import type { ParsedTransactionWithMeta } from '@solana/web3.js';
 import type { DetectedEvent } from './events';
 import type { LoadedPoolMeta } from '../dlmm';
 import { legValueSol } from '../dlmm-pnl';
-import { decodeDlmmLegs } from '../../infrastructure/solana/dlmm/dlmm-event-decoder';
+import { decodeDlmmLegs, hasDlmmEvents } from '../../infrastructure/solana/dlmm/dlmm-event-decoder';
 import { parseInstruction } from '../../infrastructure/solana/helius-subscriber';
 
 /** Synchronous pool→meta lookup (already loaded). `null` = unknown pool or not valuable in SOL. */
@@ -28,27 +28,33 @@ export function poolsOf(tx: ParsedTransactionWithMeta | null): string[] {
 }
 
 /**
- * Builds the `DetectedEvent` of ONE tx. `null` if it isn't a DLMM tx (no tx, or no log from the
- * DLMM program). A pool that is present but not valuable in SOL (`solSide === null` / meta absent) keeps
- * the action with amounts at 0 and `nonSolMint = null` — we never lose the event, we only lose the amount.
+ * Builds the `DetectedEvent` of ONE tx. `null` if it isn't a DLMM tx (no tx, or no DLMM Event-CPI). A pool
+ * that is present but not valuable in SOL (`solSide === null` / meta absent) keeps the action with amounts at
+ * 0 and `nonSolMint = null` — we never lose the event, we only lose the amount.
+ *
+ * DLMM-ness is gated on the decoded events (`hasDlmmEvents`), NOT on `logMessages`: Solana truncates logs at
+ * 10KB, so a DLMM instruction that runs after a big bundle (e.g. a Jupiter zap) has no DLMM string in the
+ * truncated logs — gating on logs would return null and PERMANENTLY MISS that leader open/close. `instruction`
+ * stays a best-effort LABEL from the logs (`'(DLMM)'` when truncated); routing keys off `closed`, not the label.
  */
 export function buildDetectedEvent(
   signature: string,
   tx: ParsedTransactionWithMeta | null,
   poolMeta: PoolMetaLookup,
 ): DetectedEvent | null {
-  const logs = tx?.meta?.logMessages ?? [];
-  if (!tx || !logs.some((l) => l.includes(DLMM_PROGRAM_ID))) return null;
+  if (!tx || !hasDlmmEvents(tx)) return null;
 
-  const instruction = parseInstruction(logs) ?? '(DLMM)';
+  const instruction = parseInstruction(tx.meta?.logMessages ?? []) ?? '(DLMM)';
   let depositSol = 0;
   let depositTokenRaw = 0; // raw NON-SOL units deposited — authoritative two-sided signal (decode, not the shape read)
   let withdrawSol = 0;
   let claimSol = 0;
+  let closed = false; // a decoded 'close' leg (PositionClose) → robust close signal, independent of the log label
   let pool = '';
   let position = '';
   let nonSolMint: string | null = null;
   for (const leg of decodeDlmmLegs(tx)) {
+    if (leg.kind === 'close') closed = true; // PositionClose leg → the leader closed the position
     if (leg.lbPair) pool = leg.lbPair; // a zero-amount close marker carries no pool → don't clobber the real one
     if (leg.position) position = leg.position; // P2 tracker key; legs of the same tx share the position
     const meta = poolMeta(leg.lbPair);
@@ -70,6 +76,7 @@ export function buildDetectedEvent(
     depositTokenRaw,
     withdrawSol,
     claimSol,
+    closed,
     pool,
     position,
     nonSolMint,

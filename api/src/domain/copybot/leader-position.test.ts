@@ -22,6 +22,7 @@ function ev(p: {
     depositSol: p.deposit ?? 0,
     withdrawSol: p.withdraw ?? 0,
     claimSol: p.claim ?? 0,
+    closed: false,
     pool: p.pool ?? 'POOL',
     position: p.position ?? 'POS',
     nonSolMint: p.mint === undefined ? 'MINT' : p.mint,

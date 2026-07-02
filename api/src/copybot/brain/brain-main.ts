@@ -1431,7 +1431,7 @@ async function onceValidate(
       if (!shape) continue;
       const sym = meta.mintX === WSOL_MINT ? meta.mintY : meta.mintX;
       logger.info({ pool: leg.lbPair, position: leg.position }, '--once: forced open on live position');
-      await handleOpen({ signature: `once-${leg.position}`, blockTime: 1, instruction: 'AddLiquidityByStrategy2', depositSol: 0.5, withdrawSol: 0, claimSol: 0, pool: leg.lbPair, position: leg.position, nonSolMint: sym, nonSolSymbol: null });
+      await handleOpen({ signature: `once-${leg.position}`, blockTime: 1, instruction: 'AddLiquidityByStrategy2', depositSol: 0.5, withdrawSol: 0, claimSol: 0, closed: false, pool: leg.lbPair, position: leg.position, nonSolMint: sym, nonSolSymbol: null });
       // re-read the stream to prove the publication
       const msgs = await bus.consume('copybot:cmd:sign', 'validate', 'v1', 'cmd:sign', hmacKey, 5, 2000).catch(() => []);
       logger.info({ consumed: msgs.length, ok: msgs[0]?.payload != null }, '--once: re-read from the bus');

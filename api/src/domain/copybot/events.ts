@@ -17,6 +17,10 @@ export interface DetectedEvent {
   withdrawSol: number;
   /** fees harvested (claim). */
   claimSol: number;
+  /** true iff the tx closed the leader position (a decoded leg of kind `close`, i.e. a PositionClose event).
+   *  Robust close signal INDEPENDENT of the log-derived `instruction` (logs truncate at 10KB → the DLMM
+   *  program / close-instruction name can be dropped), so ROUTING keys a close off this, not the label. */
+  closed: boolean;
   /** the `lbPair` (pool). */
   pool: string;
   /** pubkey of the DLMM position — the tracker's aggregation key; `''` if the tx carries no decodable leg. */

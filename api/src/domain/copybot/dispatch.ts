@@ -25,7 +25,10 @@ export function classifyEventAction(e: DetectedEvent, tracked: boolean, cfg: Rou
   // AddLiquidity (depositSol>0 on the same, now-untracked, position) would route to 'open' and re-enter the rug.
   if (e.depositSol > 0 && !tracked) return rugExited ? 'ignore' : 'open'; // first capital event on an untracked position → open
   if (!tracked) return 'ignore'; // event on a position we don't mirror → ignore (reconcile/orphan handles it)
-  if (kind === 'close') return 'close'; // full close — checked BEFORE withdraw (a close also withdraws)
+  // full close — checked BEFORE withdraw (a close also withdraws). `e.closed` (a decoded PositionClose leg) is
+  // the robust signal: under log truncation `instruction` degrades to '(DLMM)' → `kind` is null, so a close
+  // would mis-route to resync (Remove+Close) or ignore (standalone close) if we relied on the label alone.
+  if (kind === 'close' || e.closed) return 'close';
   if (e.withdrawSol > 0) return 'resync'; // ANY withdrawal → re-sync (shrink): always followed (no-dormant safety)
   // A pure leader ADD (deposit, no withdrawal): grow with the leader only when infinite-add is on; else ignore it
   // (Valhalla "first deposit only"). Removes/closes above are unaffected, so the safety net is never gated.

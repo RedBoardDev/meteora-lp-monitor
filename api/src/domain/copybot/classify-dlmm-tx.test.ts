@@ -57,6 +57,75 @@ function tx(instr: string, datas: string[], blockTime: number | null = 1_700_000
   } as unknown as ParsedTransactionWithMeta;
 }
 
+// Same shape as `tx()` but with logs that DO NOT mention the DLMM program — simulates Solana's 10KB
+// logMessages truncation (a DLMM ix after a big Jupiter bundle): the inner CPI events are intact, the log
+// string is gone. The OLD log-gated classifier returned null here → a PERMANENT miss of the leader event.
+function txLogsTruncated(datas: string[], blockTime: number | null = 1_700_000_000): ParsedTransactionWithMeta {
+  return {
+    blockTime,
+    transaction: { signatures: ['SIG1'] },
+    meta: {
+      logMessages: ['Program JUP... invoke [1]', 'Program log: truncated'], // NO DLMM program id, NO Instruction: line
+      innerInstructions: [{ index: 0, instructions: datas.map((d) => ({ programId: DLMM_PROGRAM_ID, data: d })) }],
+    },
+  } as unknown as ParsedTransactionWithMeta;
+}
+
+describe('buildDetectedEvent — no-miss gate keys off DLMM EVENTS, not logs (10KB truncation)', () => {
+  // NO-MISS PILLAR: gating DLMM-ness on logMessages loses any DLMM ix whose program string was truncated
+  // past 10KB. The gate now reads the inner Event-CPI (`hasDlmmEvents`) → the event is STILL detected.
+  it('DLMM events present but logs truncated (no program id) → event is DETECTED (was null before)', () => {
+    const e = buildDetectedEvent('sigTrunc', txLogsTruncated([addLiquidity(0n, 1_500_000_000n, 0)]), lookupSolY);
+    expect(e).not.toBeNull(); // the whole point: no-miss even under log truncation
+    expect(e?.depositSol).toBeCloseTo(1.5, 9);
+    expect(e?.instruction).toBe('(DLMM)'); // no Instruction: line in the truncated logs → best-effort label
+    expect(e?.position).toBe(POSITION);
+  });
+
+  it('a close whose logs are truncated → closed === true and withdrawSol intact (routing key survives)', () => {
+    const e = buildDetectedEvent('sigTruncClose', txLogsTruncated([removeLiquidity(0n, 2_000_000_000n, 0), closePosition()]), lookupSolY);
+    expect(e).not.toBeNull();
+    expect(e?.closed).toBe(true); // the robust close signal — independent of the (truncated) log label
+    expect(e?.withdrawSol).toBeCloseTo(2, 9);
+  });
+
+  it('a NON-DLMM tx (no inner DLMM events) → still null (gate is not looser than before)', () => {
+    const nonDlmm = {
+      blockTime: 1,
+      transaction: { signatures: ['SIG1'] },
+      meta: { logMessages: ['Program 11111111111111111111111111111111 invoke [1]'], innerInstructions: [] },
+    } as unknown as ParsedTransactionWithMeta;
+    expect(buildDetectedEvent('sigOther', nonDlmm, lookupSolY)).toBeNull();
+  });
+});
+
+describe('buildDetectedEvent — `closed` flag (robust close signal for routing)', () => {
+  it('STANDALONE close (only PositionClose) → closed === true, all amounts 0', () => {
+    const e = buildDetectedEvent('sigStandalone', tx('ClosePosition2', [closePosition()]), lookupSolY);
+    expect(e?.closed).toBe(true);
+    expect(e?.depositSol).toBe(0);
+    expect(e?.withdrawSol).toBe(0);
+    expect(e?.claimSol).toBe(0);
+  });
+
+  it('NORMAL close (Remove + PositionClose) → closed === true AND withdrawSol > 0', () => {
+    const e = buildDetectedEvent('sigNormal', tx('ClosePosition2', [removeLiquidity(0n, 2_000_000_000n, 0), closePosition()]), lookupSolY);
+    expect(e?.closed).toBe(true);
+    expect(e?.withdrawSol).toBeCloseTo(2, 9);
+  });
+
+  it('a plain OPEN (no PositionClose) → closed === false', () => {
+    const e = buildDetectedEvent('sigOpen', tx('InitializePositionPda', [addLiquidity(0n, 1_500_000_000n, 0)]), lookupSolY);
+    expect(e?.closed).toBe(false);
+  });
+
+  it('a partial REMOVE (no PositionClose) → closed === false (not a full close)', () => {
+    const e = buildDetectedEvent('sigPartial', tx('RemoveLiquidityByRange2', [removeLiquidity(0n, 500_000_000n, 0)]), lookupSolY);
+    expect(e?.closed).toBe(false);
+    expect(e?.withdrawSol).toBeCloseTo(0.5, 9);
+  });
+});
+
 describe('buildDetectedEvent — routing DLMM legs into SOL (golden: open/close/claim/partial withdrawal)', () => {
   it('OPEN (AddLiquidity) → all the capital in depositSol, nothing elsewhere', () => {
     const e = buildDetectedEvent('sigOpen', tx('InitializePositionPda', [addLiquidity(0n, 1_500_000_000n, 0)]), lookupSolY);

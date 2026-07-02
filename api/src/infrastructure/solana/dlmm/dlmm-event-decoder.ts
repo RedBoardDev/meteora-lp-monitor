@@ -75,6 +75,16 @@ function rawEvents(tx: ParsedTransactionWithMeta): RawEvent[] {
 }
 
 /**
+ * True iff the tx emitted ANY DLMM Event-CPI (read from `innerInstructions`). This is the ROBUST
+ * DLMM-detection signal: unlike `logMessages` — which Solana truncates at 10KB, so the DLMM program string
+ * can be dropped from a large bundle (e.g. a Jupiter zap) and a leader open/close would be silently missed —
+ * the inner CPI events are always present when the DLMM program actually executed.
+ */
+export function hasDlmmEvents(tx: ParsedTransactionWithMeta): boolean {
+  return rawEvents(tx).length > 0;
+}
+
+/**
  * Normalize a transaction's DLMM events into deposit/withdraw/claim legs.
  *
  * - AddLiquidity → one deposit leg (amounts[0]=X, amounts[1]=Y).

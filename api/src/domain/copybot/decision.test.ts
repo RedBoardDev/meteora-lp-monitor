@@ -22,6 +22,7 @@ function openEvent(over: Partial<DetectedEvent> = {}): DetectedEvent {
     depositSol: 2,
     withdrawSol: 0,
     claimSol: 0,
+    closed: false,
     pool: 'POOL',
     position: 'POS',
     nonSolMint: 'MINT', // SOL-paired (non-SOL side known)
