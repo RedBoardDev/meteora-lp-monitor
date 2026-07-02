@@ -123,6 +123,34 @@ describe('planTwoSidedReshape — proportional removes (both legs) + per-leg tok
     expect(r.tokenAddOps.length).toBe(0);
   });
 
+  // FIX #119: when the SOL cap binds, BOTH legs must scale by the SAME factor (mirror the OPEN's sizeTwoSided).
+  // The old code capped only the SOL leg and left the token leg at `ratio × leaderToken` → the copy bought token
+  // toward an UNCAPPED target and ratcheted past maxTradeSizeSol, re-detecting a deficit every event.
+  it('capped: SOL cap binds → token leg scaled by the SAME shared factor, NOT the uncapped ratio', () => {
+    // ratio 1, leaderSol total 1.0, cap 0.5 → shared factor = min(1, 0.5/1.0) = 0.5.
+    const leaderSol: BinSol[] = [{ offset: 0, sol: 1.0 }];
+    const ourSol: BinSol[] = [{ offset: 0, sol: 0 }];
+    const leaderToken: BinSol[] = [{ offset: 0, sol: 100 }];
+    const ourToken: BinSol[] = [{ offset: 0, sol: 0 }];
+    const CAP = 0.5;
+    const r = planTwoSidedReshape(leaderSol, ourSol, leaderToken, ourToken, 1, CAP, DEAD, DEAD);
+    const solAdd = r.ops.find((o) => o.offset === 0 && o.action === 'add');
+    expect(solAdd?.action === 'add' && solAdd.addSol).toBeCloseTo(0.5, 6); // SOL leg capped at factor × 1.0
+    // Token target = factor × 100 = 50 (SAME factor). The old POSITIVE_INFINITY/ratio code targeted ratio × 100 = 100.
+    expect(r.tokenAddOps[0]?.addSol).toBeCloseTo(50, 6);
+  });
+
+  it('uncapped: cap does not bind → shared factor == ratio (token leg unchanged)', () => {
+    const leaderSol: BinSol[] = [{ offset: 0, sol: 1.0 }];
+    const ourSol: BinSol[] = [{ offset: 0, sol: 0 }];
+    const leaderToken: BinSol[] = [{ offset: 0, sol: 100 }];
+    const ourToken: BinSol[] = [{ offset: 0, sol: 0 }];
+    const r = planTwoSidedReshape(leaderSol, ourSol, leaderToken, ourToken, 0.5, NO_CAP, DEAD, DEAD);
+    const solAdd = r.ops.find((o) => o.offset === 0 && o.action === 'add');
+    expect(solAdd?.action === 'add' && solAdd.addSol).toBeCloseTo(0.5, 6); // factor == ratio 0.5
+    expect(r.tokenAddOps[0]?.addSol).toBeCloseTo(50, 6); // 0.5 × 100 — identical to the capped-off path
+  });
+
   // The fidelity bug the on-chain SHRINK test caught: a PURE-TOKEN bin (above the active bin, no SOL leg) is
   // invisible to the SOL-leg remove plan, so on a leader shrink it was never trimmed → the copy drifted
   // token-heavy. The fix emits a token-leg remove on such bins (but NOT on mixed bins already covered by a SOL

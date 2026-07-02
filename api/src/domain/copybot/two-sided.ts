@@ -72,9 +72,14 @@ export function planTwoSidedReshape(
   solDeadband: number,
   tokenDeadband: number,
 ): { ops: ReshapeOp[]; tokenAddOps: Extract<ReshapeOp, { action: 'add' }>[] } {
-  const solOps = planReshape(leaderSol, ourSol, ratio, maxSol, solDeadband);
-  // Token leg: no SOL cap (the SOL cap bounds the SOL leg only).
-  const tokenOps = planReshape(leaderToken, ourToken, ratio, Number.POSITIVE_INFINITY, tokenDeadband);
+  // ONE shared cap factor for BOTH legs (mirrors sizeTwoSided's same-factor semantics): when the SOL cap
+  // binds, the token leg must scale by the SAME factor — else the copy buys token toward an UNCAPPED
+  // `ratio × leaderToken`, ratchets past maxTradeSizeSol, and re-detects a deficit on every event. The cap is
+  // folded into `factor` here, so both planReshape calls take `factor` as ratio with maxSol = ∞.
+  const leaderSolTotal = leaderSol.reduce((s, b) => s + b.sol, 0);
+  const factor = leaderSolTotal > 0 ? Math.min(ratio, maxSol / leaderSolTotal) : ratio;
+  const solOps = planReshape(leaderSol, ourSol, factor, Number.POSITIVE_INFINITY, solDeadband);
+  const tokenOps = planReshape(leaderToken, ourToken, factor, Number.POSITIVE_INFINITY, tokenDeadband);
   const tokenAddOps = tokenOps.filter((o): o is Extract<ReshapeOp, { action: 'add' }> => o.action === 'add');
   // Token REMOVE ops only on bins a SOL-leg remove doesn't already trim (pure-token bins) — else we'd double-trim.
   const solRemoveOffsets = new Set(solOps.filter((o) => o.action === 'remove').map((o) => o.offset));
