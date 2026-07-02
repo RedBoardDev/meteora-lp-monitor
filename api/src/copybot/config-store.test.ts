@@ -56,11 +56,37 @@ describe('ConfigStore (integration)', () => {
     await expect(store.save(bad)).rejects.toThrow();
   });
 
-  it('load on a corrupt stored blob → defaults AND logs an error (corruption never silent)', async () => {
+  it('load on a corrupt blob (no last-good yet) → FAIL-CLOSED with kill switch ON, NOT permissive defaults', async () => {
     const errLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
     await db.insert(settings).values({ key: CONFIG_KEY, value: '{not valid json' });
     const store = new ConfigStore(db, errLog);
-    expect(await store.load()).toEqual(CONFIG_DEFAULTS);
+    const cfg = await store.load();
+    // Fail-closed: corruption must never revert to the trading-enabled defaults (would fail OPEN).
+    expect(cfg.user.caps.killSwitchGlobal).toBe(true);
+    // Proves the fix vs the OLD behavior (old: corrupt → CONFIG_DEFAULTS with killSwitchGlobal:false).
+    expect(CONFIG_DEFAULTS.user.caps.killSwitchGlobal).toBe(false);
+    expect(cfg).not.toEqual(CONFIG_DEFAULTS);
+    expect(errLog.error).toHaveBeenCalledTimes(1);
+  });
+
+  it('load caches the last-good config, then a corrupt blob → last-good preserved but kill switch forced ON', async () => {
+    const errLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as unknown as Logger;
+    const store = new ConfigStore(db, errLog);
+    // 1) a valid custom config loads cleanly and is cached as last-good (kill switch OFF, custom fields set).
+    const custom: CopybotConfig = {
+      user: { ...CONFIG_DEFAULTS.user, twoSidedMode: 'shadow', caps: { ...CONFIG_DEFAULTS.user.caps, killSwitchGlobal: false, maxOpenPositions: 7 } },
+      leaders: [{ address: 'AnotherLeaderPubkey222222222222222222222222', enabled: true, overrides: {} }],
+    };
+    await store.save(custom);
+    expect(await store.load()).toEqual(custom);
+    // 2) the blob then becomes corrupt → fail closed to last-good with ONLY the kill switch flipped ON.
+    await db.update(settings).set({ value: '{corrupt' }).where(eq(settings.key, CONFIG_KEY));
+    const cfg = await store.load();
+    expect(cfg.user.caps.killSwitchGlobal).toBe(true);
+    expect(cfg.user.twoSidedMode).toBe('shadow'); // other last-good fields preserved
+    expect(cfg.user.caps.maxOpenPositions).toBe(7);
+    expect(cfg.leaders).toEqual(custom.leaders);
+    expect(cfg).toEqual({ ...custom, user: { ...custom.user, caps: { ...custom.user.caps, killSwitchGlobal: true } } });
     expect(errLog.error).toHaveBeenCalledTimes(1);
   });
 });
