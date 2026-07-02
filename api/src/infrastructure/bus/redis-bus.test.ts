@@ -1,5 +1,5 @@
 import Redis from 'ioredis';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RedisBus } from './redis-bus';
 
 // Integration test: requires the local Redis container (docker compose up -d redis → :6385).
@@ -39,6 +39,28 @@ describe('RedisBus — Redis Streams + HMAC (integration)', () => {
     expect(msgs[0]?.payload).toBeNull();
     const id = msgs[0]?.id;
     if (id) await bus.ack(STREAM, GROUP, id);
+  });
+
+  it('consume exposes the EXACT raw fields → deadLetter(raw) quarantines a poison message verbatim (no silent drop)', async () => {
+    // WHY: a rejected/poison cmd:sign must be preserved for forensics, not ACKed-and-forgotten. The consumer now
+    // carries the raw body/hmac so the coffre can dead-letter it verbatim (the durable trace FIX A adds).
+    await bus.publish(STREAM, 'cmd:sign', KEY, { commandId: 'poison1', kind: 'open' });
+    const msgs = await bus.consume(STREAM, GROUP, 'consumer-dlq', 'cmd:sign', KEY, 10, 2000);
+    expect(msgs).toHaveLength(1);
+    const msg = msgs[0];
+    expect(msg?.raw).toHaveProperty('body'); // raw fields surfaced
+    expect(msg?.raw).toHaveProperty('hmac');
+    if (msg) await bus.deadLetter(STREAM, GROUP, msg.id, msg.raw);
+    // The exact raw fields landed on the DLQ stream, byte-for-byte.
+    const raw = new Redis(URL, { maxRetriesPerRequest: null, lazyConnect: false });
+    const dlq = await raw.xrange(`${STREAM}.DLQ`, '-', '+');
+    expect(dlq).toHaveLength(1);
+    const fields = dlq[0]?.[1] ?? [];
+    expect(fields).toEqual(['body', msg?.raw.body, 'hmac', msg?.raw.hmac]);
+    // ...and it is no longer pending in the main group (ACKed by deadLetter → never redelivered).
+    const pending = await bus.consumePending(STREAM, GROUP, 'consumer-dlq', 'cmd:sign', KEY);
+    expect(pending).toHaveLength(0);
+    await raw.quit();
   });
 
   it('consumePending recovers a delivered-but-unACKed cmd:sign (crash recovery — NEVER strands an in-flight close)', async () => {
@@ -181,5 +203,51 @@ describe('RedisBus — stream-loss resilience (integration)', () => {
     await bus2.del(stream);
     await raw.quit();
     await bus2.quit();
+  });
+});
+
+// Singleton lease (integration, :6385). The boot guard that stops a 2nd coffre from double-signing the shared PEL.
+// Each `it` starts from a clean key. The double-acquire test is the fail-against-old proof: WITHOUT the lease a 2nd
+// instance would boot and re-sign in-flight commands.
+describe('RedisBus — singleton lease (integration)', () => {
+  const LEASE = 'test:copybot:coffre:lease';
+
+  beforeEach(async () => {
+    await bus.del(LEASE);
+  });
+  afterAll(async () => {
+    await bus.del(LEASE);
+  });
+
+  it('first acquire succeeds; a second instance while held is REFUSED (prevents a double-sign on boot)', async () => {
+    expect(await bus.acquireLease(LEASE, 'inst-A', 5000)).toBe(true);
+    // FAIL-AGAINST-OLD: with no lease, inst-B would have booted and re-signed in-flight cmd:sign → double execution.
+    expect(await bus.acquireLease(LEASE, 'inst-B', 5000)).toBe(false);
+    await bus.releaseLease(LEASE, 'inst-A');
+  });
+
+  it('after release the lease is re-acquirable (a clean restart takes over)', async () => {
+    expect(await bus.acquireLease(LEASE, 'inst-A', 5000)).toBe(true);
+    await bus.releaseLease(LEASE, 'inst-A');
+    expect(await bus.acquireLease(LEASE, 'inst-B', 5000)).toBe(true);
+    await bus.releaseLease(LEASE, 'inst-B');
+  });
+
+  it("after TTL expiry a crashed holder's lease is re-acquirable (no manual cleanup)", async () => {
+    expect(await bus.acquireLease(LEASE, 'inst-crashed', 200)).toBe(true);
+    await new Promise((r) => setTimeout(r, 350)); // let the short TTL lapse (simulates a crashed holder)
+    expect(await bus.acquireLease(LEASE, 'inst-restart', 5000)).toBe(true);
+    await bus.releaseLease(LEASE, 'inst-restart');
+  });
+
+  it('renew extends OUR lease; a non-holder can neither renew nor release it (CAS-guarded)', async () => {
+    expect(await bus.acquireLease(LEASE, 'inst-A', 400)).toBe(true);
+    expect(await bus.renewLease(LEASE, 'inst-B', 5000)).toBe(false); // not the holder → cannot renew
+    expect(await bus.renewLease(LEASE, 'inst-A', 5000)).toBe(true); // holder → TTL extended to 5s
+    await new Promise((r) => setTimeout(r, 450)); // past the ORIGINAL 400ms ttl — only the renew keeps it alive
+    expect(await bus.acquireLease(LEASE, 'inst-B', 5000)).toBe(false); // still held → renew genuinely extended it
+    await bus.releaseLease(LEASE, 'inst-B'); // non-holder release is a no-op (must not free A's lease)
+    expect(await bus.acquireLease(LEASE, 'inst-B', 5000)).toBe(false); // A still holds it
+    await bus.releaseLease(LEASE, 'inst-A');
   });
 });

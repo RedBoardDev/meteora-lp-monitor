@@ -11,6 +11,8 @@ export interface ConsumedMessage {
   id: string;
   /** authenticated payload, or `null` if the MAC/hop does not match (→ caller DLQ + ACK). */
   payload: unknown | null;
+  /** the EXACT raw stream fields (`body`/`hmac`) as read — needed to dead-letter a rejected/poison message verbatim. */
+  raw: Record<string, string>;
 }
 
 const fieldsToRecord = (fields: string[]): Record<string, string> => {
@@ -98,7 +100,7 @@ export class RedisBus {
     return entries.map(([id, fields]) => {
       const f = fieldsToRecord(fields);
       const payload = f.body !== undefined && f.hmac !== undefined ? verifyEnvelope(hop, key, { body: f.body, hmac: f.hmac }) : null;
-      return { id, payload };
+      return { id, payload, raw: f };
     });
   }
 
@@ -111,6 +113,42 @@ export class RedisBus {
     const flat = Object.entries(raw).flat();
     await this.redis.xadd(`${stream}.DLQ`, '*', ...flat);
     await this.redis.xack(stream, group, id);
+  }
+
+  // ── Singleton lease (ops mutual-exclusion, NOT a signing primitive) ─────────────────────────────────────────
+  // A boot guard so only ONE coffre instance ever owns the shared consumer/PEL. A 2nd instance booting with the same
+  // consumer would re-claim/re-sign in-flight `cmd:sign` from the PEL and DOUBLE-execute — the lease makes it refuse.
+
+  /** `SET key=instanceId NX PX ttlMs`. Returns true iff THIS instance acquired the lease (no live holder). */
+  async acquireLease(key: string, instanceId: string, ttlMs: number): Promise<boolean> {
+    const res = await this.redis.set(key, instanceId, 'PX', ttlMs, 'NX');
+    return res === 'OK';
+  }
+
+  /**
+   * Renew OUR lease (compare-and-set: extend the TTL only if the stored value is still our instanceId — NEVER steal a
+   * lease that expired and was re-acquired by another instance). Returns true iff the TTL was extended. Runs on a
+   * ttl/2 timer; a false return means we lost exclusivity and the caller must stop (split-brain guard).
+   */
+  async renewLease(key: string, instanceId: string, ttlMs: number): Promise<boolean> {
+    const res = (await this.redis.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+      1,
+      key,
+      instanceId,
+      String(ttlMs),
+    )) as number;
+    return res === 1;
+  }
+
+  /** Release OUR lease on graceful shutdown (compare-and-set delete: never delete another instance's lease). */
+  async releaseLease(key: string, instanceId: string): Promise<void> {
+    await this.redis.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+      1,
+      key,
+      instanceId,
+    );
   }
 
   async del(...streams: string[]): Promise<void> {

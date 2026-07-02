@@ -7,6 +7,7 @@
  *  signature. Does NOT import the DLMM SDK (firewall F3) → runs under tsx.
  *   node --import tsx --env-file=../.env src/copybot/coffre/coffre-main.ts
  */
+import { randomUUID } from 'node:crypto';
 import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
@@ -15,6 +16,7 @@ import { assertBusKey } from '@/copybot/bus-key-guard';
 import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
 import { EventStore } from '@/copybot/observability/event-store';
+import type { CopyCode } from '@/domain/copybot/observability/codes';
 import { HeartbeatStore } from '@/copybot/heartbeat-store';
 import { HEARTBEAT_INTERVAL_MS } from '@/domain/copybot/status';
 import { loadCopierKeypair } from '@/copybot/coffre/keypair';
@@ -30,6 +32,40 @@ const GROUP = 'coffre';
 const CONSUMER = 'coffre-1';
 const HOP = 'cmd:sign';
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (the maxTradeSol re-clamp ceiling) so web edits apply live
+
+// Singleton lease: only ONE coffre may own the shared consumer/PEL. A 2nd instance booting would re-claim/re-sign
+// in-flight cmd:sign from the PEL and DOUBLE-execute → it must refuse to boot while a live instance holds the lease.
+const LEASE_KEY = 'copybot:coffre:lease'; // the exclusive Redis key guarding the coffre singleton
+const LEASE_TTL_MS = 30_000; // a crashed holder's lease auto-expires within this window so a restart can re-acquire
+const LEASE_RENEW_MS = LEASE_TTL_MS / 2; // renew well before expiry so a live holder never spuriously loses the lease
+
+// Dead-letter routing for a REJECTED cmd:sign verdict. Pinning is code-driven (CODE_REGISTRY), so forgery/tamper/
+// malformed rejects — "someone/something is wrong" — map to a PINNED code (operator paged out-of-band), while the
+// expected rejects (duplicate/stale, and caps that already self-emit) map to a non-pinned internal quarantine trace.
+// NOTE: DLQ_POISON_CODE reuses `system.fatal` as the closest EXISTING pinned SYSTEM code (its out-of-band webhook
+// alert is code+reason-driven — truthful); a dedicated pinned `system.command_quarantined` code should replace it
+// once the observability registry (codes.ts) is editable — see the change report.
+const DLQ_POISON_CODE: CopyCode = 'system.fatal';
+const DLQ_TRACE_CODE: CopyCode = 'system.loop_errored';
+const POISON_REJECT_REASONS = new Set(['bad_hmac_or_hop', 'bad_schema', 'commandId_mismatch', 'owner_mismatch', 'undecodable_tx']); // forged / tampered / malformed
+
+/** PURE: map a rejected verdict's reason to its dead-letter system code (pinned for forgery/tamper/malformed). */
+export function deadLetterCode(reason: string | undefined): CopyCode {
+  return reason !== undefined && POISON_REJECT_REASONS.has(reason) ? DLQ_POISON_CODE : DLQ_TRACE_CODE;
+}
+
+/** What the vault loop does with a processed message given its verdict. */
+export type VerdictRoute =
+  | { action: 'ack' } // terminal-OK (landed / skipped / dry-run) — clear from the group
+  | { action: 'retain' } // #7 recovery in-flight (retryLater) — leave UNACKED for a later recovery pass
+  | { action: 'deadLetter'; code: CopyCode }; // rejected/poison — durable quarantine + a system-event trace
+
+/** PURE: decide the routing for a verdict; the caller performs the I/O (ack / dead-letter / leave pending). */
+export function routeVerdict(verdict: { ok: boolean; reason?: string; retryLater?: boolean }): VerdictRoute {
+  if (verdict.retryLater) return { action: 'retain' }; // must stay in the PEL (a prior broadcast may still land)
+  if (verdict.ok) return { action: 'ack' };
+  return { action: 'deadLetter', code: deadLetterCode(verdict.reason) };
+}
 
 const cfg = {
   httpUrl: process.env.SOLANA_HTTP_URL ?? '',
@@ -84,6 +120,28 @@ async function main(): Promise<void> {
   const heartbeat = new HeartbeatStore(db, log, 'coffre'); // process status the web reads (vault online + signing state)
   const bus = RedisBus.connect(cfg.redisUrl);
   await bus.ensureGroup(STREAM, GROUP);
+  // SINGLETON GUARD (before ANY processing/recovery): acquire the exclusive coffre lease. A 2nd instance booting with
+  // the same consumer would re-claim/re-sign this consumer's in-flight PEL and DOUBLE-execute — so if the lease is
+  // already held by a live instance, refuse to boot. The lease auto-expires (TTL) if the holder crashes.
+  const instanceId = `${CONSUMER}:${process.pid}:${randomUUID()}`;
+  if (!(await bus.acquireLease(LEASE_KEY, instanceId, LEASE_TTL_MS))) {
+    log.error({ key: LEASE_KEY, instanceId }, '🔒 another vault instance holds the singleton lease — refusing to boot (would double-sign in-flight commands)');
+    process.exit(1);
+  }
+  // Renew on a ttl/2 timer so a live holder never loses the lease. If a renew ever fails (our lease expired and was
+  // taken by another instance, e.g. after a long Redis outage), we lost exclusivity → exit to avoid a split-brain
+  // double-sign. A transient renew error is logged and retried on the next tick (ioredis retries the connection).
+  const leaseTimer = setInterval(() => {
+    void bus
+      .renewLease(LEASE_KEY, instanceId, LEASE_TTL_MS)
+      .then((ok) => {
+        if (!ok) {
+          log.error({ key: LEASE_KEY, instanceId }, '🔒 lost the singleton lease (expired/taken) — exiting to avoid a split-brain double-sign');
+          process.exit(1);
+        }
+      })
+      .catch((e) => log.error({ err: (e as Error).message }, 'lease renew failed (will retry next tick)'));
+  }, LEASE_RENEW_MS);
   const blockhashCache = new BlockhashCache(async () => {
     const b = await conn.getLatestBlockhash();
     return { blockhash: b.blockhash, lastValidBlockHeight: b.lastValidBlockHeight };
@@ -105,10 +163,25 @@ async function main(): Promise<void> {
         const ctx: Ctx = { ...ctxBase, maxTradeSol: maxTradeSol(), jitoBundleUrl: jitoBundleUrl() };
         const verdict = await process1(msg.payload, ctx, recovering);
         log.info({ id: msg.id, recovering, ...verdict }, verdict.ok ? '✅ processed' : '⛔ rejected');
-        // retryLater (#7 recovery in-flight): a prior broadcast's tx may still land under a live blockhash → leave
-        // the message UNACKED so a later recovery pass re-checks the chain; ACKing now would strand it (never
-        // re-signed nor finalized). Every other verdict is terminal → ACK (idempotence guarded by executions).
-        if (!verdict.retryLater) await bus.ack(STREAM, GROUP, msg.id);
+        // Route by verdict (pure decision, I/O here):
+        //  - retain (#7 recovery in-flight): leave UNACKED so a later pass re-checks the chain — ACKing would strand it;
+        //  - deadLetter (rejected/poison): move the raw message to the DLQ + emit a system-event trace (PINNED for a
+        //    forged/malformed command — "something is wrong"; internal for the expected duplicate/stale), instead of a
+        //    SILENT ack that would let a poison/forged message vanish without a durable trace;
+        //  - ack (terminal-OK): clear it as before (idempotence guarded by the executions table).
+        const route = routeVerdict(verdict);
+        if (route.action === 'retain') continue;
+        if (route.action === 'deadLetter') {
+          events.system(route.code, undefined, {
+            stage: 'sign',
+            outcome: 'rejected',
+            reason: `dead_letter:${verdict.reason ?? 'unknown'}`,
+            adminDetail: { id: msg.id, reason: verdict.reason, kind: verdict.kind, recovering },
+          });
+          await bus.deadLetter(STREAM, GROUP, msg.id, msg.raw);
+        } else {
+          await bus.ack(STREAM, GROUP, msg.id);
+        }
       } catch (e) {
         // process1 threw (transient I/O before the idempotency claim) → the message is left UNACKED for retry. An
         // internal loop self-failure (NEVER user-notified — loop guard, SPEC §6); the row carries the cause.
@@ -139,7 +212,9 @@ async function main(): Promise<void> {
     stopped = true;
     clearInterval(configTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(leaseTimer);
     blockhashCache.stop();
+    await bus.releaseLease(LEASE_KEY, instanceId).catch(() => {}); // best-effort; the TTL reclaims it anyway
     await Promise.all([bus.quit(), control.quit()]);
     process.exit(0);
   };
@@ -168,7 +243,12 @@ async function main(): Promise<void> {
   if (drain) await stop();
 }
 
-main().catch((e) => {
-  log.error({ err: (e as Error).message }, 'vault fatal');
-  process.exit(1);
-});
+// Auto-run as the process entrypoint. Guarded so importing this module in a unit test (vitest sets process.env.VITEST;
+// production never does) does NOT boot the vault — the pure helpers above (routeVerdict/deadLetterCode) stay testable
+// without triggering env reads / Redis connections / process.exit.
+if (!process.env.VITEST) {
+  main().catch((e) => {
+    log.error({ err: (e as Error).message }, 'vault fatal');
+    process.exit(1);
+  });
+}
