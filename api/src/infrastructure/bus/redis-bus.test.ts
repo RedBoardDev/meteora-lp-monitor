@@ -1,3 +1,4 @@
+import Redis from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { RedisBus } from './redis-bus';
 
@@ -86,5 +87,99 @@ describe('RedisBus — ensureGroup idempotency + deadLetter (fake redis)', () =>
     await bus.deadLetter('cmd:sign', 'coffre', '42-0', { body: 'RAW_BODY', hmac: 'RAW_HMAC' });
     expect(xadd).toHaveBeenCalledWith('cmd:sign.DLQ', '*', 'body', 'RAW_BODY', 'hmac', 'RAW_HMAC');
     expect(xack).toHaveBeenCalledWith('cmd:sign', 'coffre', '42-0'); // original ACKed → never redelivered
+  });
+});
+
+// Stream-loss / NOGROUP resilience (deterministic, fake ioredis — no container). The group must anchor at '0'
+// (no-miss: catch pre-group + post-flush messages) and a read that throws NOGROUP (Redis dropped the group) must
+// re-create it and retry ONCE instead of wedging the consumer's outer backoff loop forever. Replay is safe because
+// consumers dedup (executions table / idempotent ev:executed handlers). A NON-NOGROUP error must still surface so
+// the caller's connection-backoff keeps working — we don't turn every read failure into a group re-create.
+describe('RedisBus — NOGROUP self-heal + \'0\' anchor (fake redis)', () => {
+  const KEY = 'k_sign_test';
+
+  it("ensureGroup anchors the group at '0' (replay-safe no-miss), NOT '$'", async () => {
+    const xgroup = vi.fn(async () => 'OK');
+    const bus = new RedisBus({ xgroup } as never);
+    await bus.ensureGroup('cmd:sign', 'coffre');
+    expect(xgroup).toHaveBeenCalledWith('CREATE', 'cmd:sign', 'coffre', '0', 'MKSTREAM');
+  });
+
+  it('consume re-creates the group and retries ONCE on NOGROUP (self-heal, not wedged)', async () => {
+    let calls = 0;
+    const xreadgroup = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('NOGROUP No such key or consumer group in XREADGROUP');
+      return null; // retry after the heal → empty read, no throw
+    });
+    const xgroup = vi.fn(async () => 'OK');
+    const bus = new RedisBus({ xreadgroup, xgroup } as never);
+    const msgs = await bus.consume('cmd:sign', 'coffre', 'c1', 'cmd:sign', KEY, 10, 100);
+    expect(msgs).toEqual([]); // recovered (old code would REJECT here → the consumer loop wedges)
+    expect(xgroup).toHaveBeenCalledWith('CREATE', 'cmd:sign', 'coffre', '0', 'MKSTREAM'); // group re-created
+    expect(xreadgroup).toHaveBeenCalledTimes(2); // original throw + one retry
+  });
+
+  it('consumePending ALSO self-heals on NOGROUP (a stranded in-flight close must never wedge)', async () => {
+    let calls = 0;
+    const xreadgroup = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('NOGROUP the consumer group was dropped');
+      return null;
+    });
+    const xgroup = vi.fn(async () => 'OK');
+    const bus = new RedisBus({ xreadgroup, xgroup } as never);
+    const msgs = await bus.consumePending('cmd:sign', 'coffre', 'c1', 'cmd:sign', KEY);
+    expect(msgs).toEqual([]);
+    expect(xgroup).toHaveBeenCalledTimes(1); // re-created exactly once
+    expect(xreadgroup).toHaveBeenCalledTimes(2);
+  });
+
+  it('a NON-NOGROUP read error rethrows WITHOUT re-creating the group (keeps the connection-backoff intact)', async () => {
+    const xreadgroup = vi.fn(async () => {
+      throw new Error('ECONNRESET socket hang up');
+    });
+    const xgroup = vi.fn(async () => 'OK');
+    const bus = new RedisBus({ xreadgroup, xgroup } as never);
+    await expect(bus.consume('cmd:sign', 'coffre', 'c1', 'cmd:sign', KEY, 10, 100)).rejects.toThrow('ECONNRESET');
+    expect(xgroup).not.toHaveBeenCalled(); // a genuine connection error is NOT a group loss → no re-create
+    expect(xreadgroup).toHaveBeenCalledTimes(1); // and NO retry
+  });
+});
+
+// End-to-end resilience against a live Redis (:6385). Proves the two no-miss guarantees on the real server:
+// (1) '0' catches a message published BEFORE the group existed; (2) after the group is DESTROYED (Redis eviction /
+// restart-empty), consume self-heals and still delivers the backlog instead of throwing NOGROUP forever.
+describe('RedisBus — stream-loss resilience (integration)', () => {
+  it("'0' anchor: a group created AFTER a publish still sees the pre-existing message ('$' would miss it)", async () => {
+    const stream = 'test:copybot:zero-anchor';
+    const group = 'late-group';
+    const admin = RedisBus.connect(URL);
+    await admin.del(stream);
+    await admin.publish(stream, 'cmd:sign', KEY, { commandId: 'pre1', kind: 'open' }); // BEFORE any group exists
+    await admin.ensureGroup(stream, group); // group created LATE → '0' replays from the stream head
+    const msgs = await admin.consume(stream, group, 'c1', 'cmd:sign', KEY, 10, 2000);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]?.payload).toEqual({ commandId: 'pre1', kind: 'open' });
+    await admin.del(stream);
+    await admin.quit();
+  });
+
+  it('consume self-heals after XGROUP DESTROY (Redis dropped the group → NOGROUP) and re-delivers the backlog', async () => {
+    const stream = 'test:copybot:nogroup';
+    const group = 'heal-group';
+    const raw = new Redis(URL, { maxRetriesPerRequest: null, lazyConnect: false });
+    const bus2 = RedisBus.connect(URL);
+    await bus2.del(stream);
+    await bus2.ensureGroup(stream, group);
+    await bus2.publish(stream, 'cmd:sign', KEY, { commandId: 'heal1', kind: 'close' });
+    await raw.xgroup('DESTROY', stream, group); // simulate the group being lost (eviction / restart-empty)
+    // old code: xreadgroup throws NOGROUP, the caller backs off forever. new code: ensureGroup re-runs + retry.
+    const msgs = await bus2.consume(stream, group, 'c1', 'cmd:sign', KEY, 10, 2000);
+    expect(msgs).toHaveLength(1); // re-created at '0' → the close is re-delivered, not lost
+    expect(msgs[0]?.payload).toEqual({ commandId: 'heal1', kind: 'close' });
+    await bus2.del(stream);
+    await raw.quit();
+    await bus2.quit();
   });
 });
