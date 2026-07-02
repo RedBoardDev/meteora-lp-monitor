@@ -12,29 +12,10 @@
  */
 import type { JournalKind, JournalOutcome, JournalStage } from '../journal';
 import type { CopyCode } from './codes';
+import type { CopyAudience, CopyCategory, CopySeverity } from './kinds';
 
-/** Severity for admin log level + UI coloring + alerting. Unchanged 3-value enum (mirrors `JournalSeverity`). */
-export type CopySeverity = 'info' | 'warn' | 'error';
-
-/** The 14 event namespaces (SPEC §1). One category per registry namespace. */
-export type CopyCategory =
-  | 'LIFECYCLE'
-  | 'DETECT'
-  | 'FILTER'
-  | 'CAP'
-  | 'SIZING'
-  | 'BALANCE'
-  | 'ELIGIBILITY'
-  | 'RESHAPE'
-  | 'SWAP'
-  | 'SIGN'
-  | 'WALLB'
-  | 'FAILSAFE'
-  | 'SWEEP'
-  | 'SYSTEM';
-
-/** Who sees the event. `'feed'` = visible to the user (the persisted `audience='feed'` rows ARE the feed). */
-export type CopyAudience = 'internal' | 'feed';
+// Re-exported from the leaf `./kinds` module so existing importers keep the stable `./event` path.
+export type { CopyAudience, CopyCategory, CopySeverity } from './kinds';
 
 /**
  * Bound ONCE per emitter instance (like the `process` binding on the journal store today). Carries tenancy so

@@ -7,6 +7,13 @@
 module.exports = {
   forbidden: [
     {
+      name: 'no-circular',
+      comment: 'No circular imports anywhere reachable from the copy-bot graph.',
+      severity: 'error',
+      from: {},
+      to: { circular: true },
+    },
+    {
       name: 'F1-only-coffre-imports-keypair',
       comment: 'The private key is only loaded inside the coffre.',
       severity: 'error',

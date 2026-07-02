@@ -9,7 +9,7 @@
  * the clean canonical name where it differs, and `LEGACY_REASON_ALIASES` bridges the old reason → the clean
  * code (SPEC §2, §2.3). "Never translate an identifier" (project standard).
  */
-import type { CopyAudience, CopyCategory, CopySeverity } from './event';
+import type { CopyAudience, CopyCategory, CopySeverity } from './kinds';
 
 // ── Windows owned by the PURE layer ────────────────────────────────────────────────────────────────────────
 // (The I/O-bound windows — durable-persist timeouts, outbox sweep cadence — arrive with the emitter in P1.)
