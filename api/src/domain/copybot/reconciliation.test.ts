@@ -196,6 +196,60 @@ describe('planReconcile — open-grace (anti false-close of a fresh open: the do
   });
 });
 
+describe('planReconcile — rug-exit-pending re-close (a failed rug-SL close must be retried until gone)', () => {
+  const tracked = [{ ourPosition: 'oRug', leaderPosition: 'lRug' }];
+
+  it('MONEY-CRITICAL: rug-SL-closed mirror, ours STILL on-chain, leader NOT closed → reClose (retry the failed close)', () => {
+    // WHY: rug-SL is OUR independent crash exit — the leader keeps holding, so `leaderClosed` never fires. Without
+    // rugExitPending the mirror falls into "active" and a failed rug-SL close stays dormant in the rugging pool.
+    // This test FAILS against the old signature/logic (no rugExitPending → reClose empty).
+    const plan = planReconcile({
+      ourOnChain: new Set(['oRug']),
+      ourClosed: new Set(),
+      tracked,
+      leaderClosed: new Set(),
+      rugExitPending: new Set(['oRug']),
+    });
+    expect(plan.reClose).toEqual([{ ourPosition: 'oRug', leaderPosition: 'lRug' }]);
+    expect(plan.markClosed).toEqual([]);
+  });
+
+  it('same rug-exit-pending mirror once ours is CONFIRMED gone → markClosed, NOT reClose (gone wins over pending)', () => {
+    const plan = planReconcile({
+      ourOnChain: new Set(),
+      ourClosed: new Set(['oRug']), // direct getAccountInfo null → close landed
+      tracked,
+      leaderClosed: new Set(),
+      rugExitPending: new Set(['oRug']),
+    });
+    expect(plan.markClosed).toEqual(['oRug']);
+    expect(plan.reClose).toEqual([]);
+  });
+
+  it('NOT rug-exit-pending, leader open, ours on-chain → neither (unchanged active-mirror behavior)', () => {
+    const plan = planReconcile({
+      ourOnChain: new Set(['oRug']),
+      ourClosed: new Set(),
+      tracked,
+      leaderClosed: new Set(),
+      rugExitPending: new Set(),
+    });
+    expect(plan).toEqual({ markClosed: [], reClose: [], orphans: [] });
+  });
+
+  it('rug-exit-pending but within open-grace → NO action (open-grace still wins, anti false-close of a fresh open)', () => {
+    const plan = planReconcile({
+      ourOnChain: new Set(['oRug']),
+      ourClosed: new Set(),
+      tracked,
+      leaderClosed: new Set(),
+      rugExitPending: new Set(['oRug']),
+      recentlyOpened: new Set(['oRug']),
+    });
+    expect(plan).toEqual({ markClosed: [], reClose: [], orphans: [] });
+  });
+});
+
 describe('failsafeRow — shadow-log row of a failsafe close', () => {
   it('idempotent synthetic signature + outcome failsafe_close + mirror size', () => {
     const m = mirror({ leaderPosition: 'XYZ', sizeSol: 0.7 });

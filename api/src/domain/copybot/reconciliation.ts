@@ -56,6 +56,14 @@ export interface ReconcileInput {
    * → markClosed → the mirror is forgotten → DORMANT (the #1-pillar regression we observed live).
    */
   recentlyOpened?: ReadonlySet<string>;
+  /**
+   * ourPositions we RUG-SL-closed (our INDEPENDENT crash exit) whose close is NOT yet confirmed gone on-chain.
+   * Rug-SL fires while the LEADER still holds the position, so `leaderClosed` never triggers a retry — a failed
+   * rug-SL close (congestion, the exact rug scenario) would otherwise stay dormant until the leader eventually
+   * closes. A pending mirror still on-chain (NOT in `ourClosed`) → reClose, independent of `leaderClosed`. Once
+   * `ourClosed` confirms it gone, the markClosed branch wins (gone > pending) and the I/O layer clears it.
+   */
+  rugExitPending?: ReadonlySet<string>;
 }
 
 export interface ReconcilePlan {
@@ -71,15 +79,17 @@ export function planReconcile(input: ReconcileInput): ReconcilePlan {
   const plan: ReconcilePlan = { markClosed: [], reClose: [], orphans: [] };
   const trackedOurs = new Set(input.tracked.map((t) => t.ourPosition));
   const recentlyOpened = input.recentlyOpened ?? new Set<string>();
+  const rugExitPending = input.rugExitPending ?? new Set<string>();
 
   for (const t of input.tracked) {
     if (recentlyOpened.has(t.ourPosition)) continue; // open-grace: a fresh open's on-chain state isn't reliable yet
     if (input.ourClosed.has(t.ourPosition)) {
-      plan.markClosed.push(t.ourPosition); // DIRECTLY confirmed gone → close confirmed
-    } else if (input.leaderClosed.has(t.leaderPosition)) {
-      plan.reClose.push(t); // ours still present but leader closed → re-close (retry the failed close)
+      plan.markClosed.push(t.ourPosition); // DIRECTLY confirmed gone → close confirmed (gone wins over rug-exit-pending)
+    } else if (input.leaderClosed.has(t.leaderPosition) || rugExitPending.has(t.ourPosition)) {
+      // ours still present AND (leader closed OR our rug-SL close hasn't landed) → re-close (retry the failed close).
+      plan.reClose.push(t);
     }
-    // otherwise: ours present + leader open → active mirror, we don't touch.
+    // otherwise: ours present + leader open + not rug-exit-pending → active mirror, we don't touch.
   }
   // Orphans use the ENUMERATOR vs ALL tracked (incl. recentlyOpened) so a fresh open is never an orphan.
   for (const ours of input.ourOnChain) {

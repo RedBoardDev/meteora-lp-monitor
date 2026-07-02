@@ -261,6 +261,7 @@ async function main(): Promise<void> {
   const rugSlTracker = new RugSlTracker(RUG_SL_RETAIN_MS); // per-position price windows for the rug-SL crash check
   const rugExitStore = new RugExitStore(db, log); // durable set of LEADER positions we rug-exited (suppress re-open)
   const rugExited = await rugExitStore.load(); // seed across restart so a leader add can't re-enter a rug-exited position
+  const rugExitPending = await rugExitStore.loadPending(); // seed across restart so a failed rug-SL close keeps being re-closed until confirmed gone
   const control = ControlChannel.connect(cfg.redisUrl); // instant config-reload pings (kill-switch applies in <100ms)
   const heartbeat = new HeartbeatStore(db, log, 'brain'); // process status the web reads (online + positions/exposure/latency)
   let lastActionAt: number | null = null; // ms of the last build+publish (status snapshot)
@@ -1003,6 +1004,7 @@ async function main(): Promise<void> {
       tracked: tracked.map((m) => ({ ourPosition: m.ourPosition, leaderPosition: m.leaderPosition })),
       leaderClosed,
       recentlyOpened,
+      rugExitPending, // re-close a rug-SL-closed mirror (leader still open) until confirmed gone — never-miss-close
     });
 
     for (const our of plan.markClosed) {
@@ -1012,6 +1014,8 @@ async function main(): Promise<void> {
       registry.close(m.leaderPosition);
       recentlyPublishedClose.delete(our);
       rugSlTracker.forget(our);
+      if (rugExitPending.delete(our)) void rugExitStore.savePending(rugExitPending); // rug-SL close CONFIRMED gone → stop retrying
+
       events.closed({ stage: 'close', outcome: 'confirmed', leader: cfg.leader, pool: m.pool, leaderPosition: m.leaderPosition, ourPosition: our, ourSizeSol: m.sizeSol, eventKey: closeConfirmedKey(m.pool, our), adminDetail: { nonSolSymbol: m.nonSolSymbol, via: 'reconcile' } });
     }
     for (const rc of plan.reClose) {
@@ -1071,8 +1075,13 @@ async function main(): Promise<void> {
         if (now - (recentlyPublishedClose.get(m.ourPosition) ?? 0) < RECLOSE_GRACE_MS) continue; // a close is already in flight
         if (!rugSlTracker.check(m.ourPosition, rugCfg, now)) continue;
         await publishSafetyClose(m, 'rugsl', 'rug_sl');
-        registry.close(m.leaderPosition); // in-memory; DB markClosed by the reconcile once the close lands
-        rugSlTracker.forget(m.ourPosition);
+        // Keep the mirror TRACKED (do NOT registry.close here): a failed rug-SL close (congestion — the rug case)
+        // must be re-published by the reconcile until the position is confirmed gone on-chain. Marking it
+        // rug-exit-pending drives that retry independent of `leaderClosed` (the leader still holds it — rug-SL is OUR
+        // exit). The reconcile clears the pending flag + registry.close + DB markClosed once the close lands.
+        rugExitPending.add(m.ourPosition);
+        void rugExitStore.savePending(rugExitPending); // persist so the retry survives a brain restart
+        rugSlTracker.forget(m.ourPosition); // stop price re-triggering (recentlyPublishedClose + reconcile now own the retry)
         rugExited.add(m.leaderPosition); // suppress re-opening this leader position on its next add (we rug-exited it)
         void rugExitStore.save(rugExited); // persist so the suppression survives a brain restart
       }
