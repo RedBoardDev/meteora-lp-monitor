@@ -14,11 +14,10 @@ import { openDatabase } from '@/infrastructure/persistence/database';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_COIN_SOL, POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
+import { sleep } from './util';
 
 const DB_URL = process.env.DATABASE_URL ?? 'postgres://meteora:meteora@localhost:5435/meteora';
 const db = openDatabase(DB_URL);
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** Poll the live journal until a feed row with `code` and a non-null correlation_id appears (after `sinceTs`). */
 async function waitForFeedRow(code: string, sinceTs: number, timeoutMs: number, stepMs = 2500): Promise<Record<string, unknown> | null> {

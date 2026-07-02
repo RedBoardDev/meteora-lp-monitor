@@ -2,8 +2,8 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_VOLATILE, connection } from './env';
 import { Harness } from './harness';
+import { sleep } from './util';
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const STRANDED_TOKEN_RAW = 100_000n; // a copier balance ≥ this in a NEW mint = a stranded buy (vs pre-existing dust)
 
 // REAL Token-2022 + SAFE no-partial coverage. POOL_VOLATILE is SOL / an illiquid Token-2022 "pump" token. A leader

@@ -5,16 +5,7 @@ import { executions } from '@/infrastructure/persistence/schema';
 import { ensureBotStarted, killBrain, restartBrain } from './bot-controller';
 import { LEADER_TEST, POOL_COIN_SOL, POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const pollUntil = async (pred: () => Promise<boolean>, timeoutMs: number, stepMs = 4000): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await pred()) return true;
-    await sleep(stepMs);
-  }
-  return false;
-};
+import { pollUntil } from './util';
 
 // ★ REGRESSION for the stuck-phantom bug (fix: forceReclaim on failsafe/orphan closes). The 500-position mega-soak
 // NEVER hit it: each scenario opens a FRESH position → a UNIQUE failsafe-close commandId, closed on the FIRST attempt
@@ -76,7 +67,7 @@ describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · fail-safe — 
 
     // 4) ★ The reconcile must FORCE-CLOSE every phantom despite the stale 'landed' row (forceReclaim). No dormant.
     for (const o of opened) {
-      const gone = await pollUntil(() => h.accountExists(o.copy).then((e) => !e), PHANTOM_CLOSE_TIMEOUT_MS);
+      const gone = await pollUntil(() => h.accountExists(o.copy).then((e) => !e), PHANTOM_CLOSE_TIMEOUT_MS, 4000);
       expect(gone, `phantom NOT closed for ${o.label} (copy ${o.copy}) — stuck behind the stale 'landed' row`).toBe(true);
       console.error(`[failsafe] ${o.label}: phantom closed ✓`);
     }

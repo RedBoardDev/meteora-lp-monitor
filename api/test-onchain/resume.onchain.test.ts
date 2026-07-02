@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted, killBrain, restartBrain } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 // REAL chaos test for the #1 robustness guarantee (copybot-restart-semantics): the bot must NEVER leave a dormant
 // position after a crash/disconnect. We kill the brain mid-position, close the LEADER while the brain is down (no

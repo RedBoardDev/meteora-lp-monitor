@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted, killCoffre, restartCoffre } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 // REAL chaos (FEATURE 6.6): the VAULT (coffre) crashes with an in-flight cmd:sign — it had READ the message
 // (delivered, pending) but died before ACKing. Without recovery, XREADGROUP '>' never re-delivers it → the open is

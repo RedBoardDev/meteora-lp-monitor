@@ -2,8 +2,8 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted, restartBrain, restartBrainWithEnv } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
+import { sleep } from './util';
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const NO_COPY_WINDOW_MS = 30_000; // far past the ~2s copy latency — if no copy by now, the entry was blocked
 
 // REAL kill-switch + caps safety (P2.6 / P5.3: "plafonds + kill-switch PROUVÉS capables d'arrêter les copies").

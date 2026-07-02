@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_STABLE, POOL_VOLATILE, connection } from './env';
 import { Harness } from './harness';
+import { sleep } from './util';
 
 // REAL multi-position coverage (TEST-PLAN FEATURE 4). The bot must track MORE than one position at a time — both
 // several positions on the SAME pool and one position on TWO different pools — without confusing them: copy ALL of
@@ -18,8 +19,6 @@ import { Harness } from './harness';
 // few seconds, so every count assertion polls it via `waitForCopierCount` until the expected count appears.
 describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · multiple positions — structure (counts + existence)', () => {
   let h: Harness;
-
-  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   const COUNT_TIMEOUT_MS = 90_000; // stable pool: time for the copy to land AND the SDK enumerator to catch up
   const COUNT_POLL_MS = 3_000; // enumerator re-read cadence while waiting for a count to settle

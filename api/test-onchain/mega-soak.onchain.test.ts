@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted, killBrain, restartBrain } from './bot-controller';
 import { POOL_COIN_SOL, POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
+import { pollUntil, sleep } from './util';
 
 /**
  * ★ MEGA-SOAK — the exhaustive, AUTO, infinitely-relaunchable copy-bot validation. The operational bar: ZERO issues
@@ -19,16 +20,6 @@ import { Harness } from './harness';
  * The loop is RESILIENT: one bad position is recorded and the loop continues, so a batch surfaces EVERY issue, not
  * just the first.
  */
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const pollUntil = async (pred: () => Promise<boolean>, timeoutMs: number, stepMs = 2500): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await pred()) return true;
-    await sleep(stepMs);
-  }
-  return false;
-};
-
 const ITERATIONS = Number(process.env.SOAK_ITERATIONS ?? '12'); // per-run batch (sized to the run wall-clock + fees)
 const TALLY = '/tmp/copybot-mega-soak.jsonl'; // one line per position, accumulated across runs
 const FAIL_LOG_TAIL_LINES = 600; // brain/coffre log lines archived per FAILED scenario (enough to span its full reshape/close activity)

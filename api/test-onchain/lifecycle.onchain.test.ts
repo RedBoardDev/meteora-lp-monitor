@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 type LeaderShape = Awaited<ReturnType<Harness['leaderShape']>>;
 

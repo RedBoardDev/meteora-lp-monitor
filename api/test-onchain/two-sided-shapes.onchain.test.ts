@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 // FEATURE 2 (TEST-PLAN.md) — two-sided opens on NON-spot shapes (bidask / curve) + a two-sided close → sweep.
 // The DISCRIMINATING assertion is `tokenLegRatio` (copy token / leader token, raw units): ≈ COPY_RATIO (0.5) when

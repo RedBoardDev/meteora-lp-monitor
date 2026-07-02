@@ -2,16 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_COIN_SOL, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const pollUntil = async (pred: () => Promise<boolean>, timeoutMs: number, stepMs = 2500): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await pred()) return true;
-    await sleep(stepMs);
-  }
-  return false;
-};
+import { pollUntil } from './util';
 
 // Coverage BEYOND the stable SOL/USDC pool (user-requested): a volatile COIN(pump.fun)/SOL pool — wide binStep
 // (100 = 1%), low liquidity, fast-moving active bin. SOL-paired, so the bot copies it. We assert the SOL-leg

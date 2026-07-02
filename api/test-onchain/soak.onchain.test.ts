@@ -3,16 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_COIN_SOL, POOL_STABLE, POOL_VOLATILE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-const pollUntil = async (pred: () => Promise<boolean>, timeoutMs: number, stepMs = 2500): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await pred()) return true;
-    await sleep(stepMs);
-  }
-  return false;
-};
+import { pollUntil, sleep } from './util';
 
 // ★ VOLUME SOAK — the operational bar: ZERO issues across 500+ DIFFERENT positions. The slightest anomaly (a failed
 // open/close, a dormant position, an off-band fidelity, a latency-SLA breach, a NEW unswept token, a thrown error)

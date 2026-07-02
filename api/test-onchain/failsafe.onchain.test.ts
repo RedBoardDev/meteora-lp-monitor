@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted, killBrain, restartBrain } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 // FEATURE 6 — fail-safe / no-miss / chaos: the #1 robustness pillar (copybot-restart-semantics). A crash, a lost
 // WS signal, a mid-flight open, a restart with many positions, a rapid open→close — NONE may leave a dormant copy

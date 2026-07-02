@@ -2,8 +2,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { ensureBotStarted } from './bot-controller';
 import { POOL_STABLE, connection } from './env';
 import { Harness } from './harness';
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { sleep } from './util';
 
 // REAL robustness tests — verify the bot's no-miss guarantees, not just the happy path.
 describe.runIf(process.env.ONCHAIN_READY === 'true')('on-chain · robustness — no dormant non-SOL token', () => {

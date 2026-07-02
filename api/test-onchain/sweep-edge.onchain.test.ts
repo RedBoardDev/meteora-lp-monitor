@@ -4,6 +4,7 @@ import type { UserPosition } from '@/infrastructure/solana/dlmm/leader-position-
 import { ensureBotStarted } from './bot-controller';
 import { COPIER_TEST, POOL_STABLE, connection, solBalance } from './env';
 import { Harness } from './harness';
+import { sleep } from './util';
 
 /**
  * REAL on-chain edge tests — FEATURE 7.4 (sweep keeps the SOL reserve) + FEATURE 9.1/9.2/9.4 (dust no-churn,
@@ -16,7 +17,6 @@ import { Harness } from './harness';
  * CHURNED; a `"in sync — no adjustment"` line means it saw the leader event and correctly left the copy untouched.
  * The brain logs these at `info` (pino default), the same level the harness already parses for the open pubkey.
  */
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // Brain stdout tee written by bot-controller's spawnUntil (same file the harness reads for the published copy).
 const BRAIN_LOG = '/tmp/bench-brain.log';
