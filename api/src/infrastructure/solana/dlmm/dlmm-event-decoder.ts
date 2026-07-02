@@ -90,7 +90,8 @@ export function hasDlmmEvents(tx: ParsedTransactionWithMeta): boolean {
  * - AddLiquidity → one deposit leg (amounts[0]=X, amounts[1]=Y).
  * - RemoveLiquidity → one withdraw leg.
  * - Rebalancing → a withdraw leg (x/y_withdrawn) + a deposit leg (x/y_added) — it pulls liquidity
- *   from old bins and re-adds to new bins; Meteora counts both, so we do too.
+ *   from old bins and re-adds to new bins; Meteora counts both, so we do too. It may ALSO harvest
+ *   fees (x/y_fee_amount) → an extra claim leg (the modern compound flow).
  * - ClaimFee2 → one claim leg (fee_x, fee_y) at its own active bin.
  * - ClaimFee (v1) → claim leg, but the event carries NO bin id; we borrow the bin id from a sibling
  *   event in the SAME tx (a v1 claim is always alongside a Remove/Claim2 that has one).
@@ -157,6 +158,13 @@ export function decodeDlmmLegs(tx: ParsedTransactionWithMeta): DlmmLeg[] {
           legs.push({ ...base, kind: 'withdraw', activeBinId: bin, amountX: xWd, amountY: yWd });
         if (xAdd > 0n || yAdd > 0n)
           legs.push({ ...base, kind: 'deposit', activeBinId: bin, amountX: xAdd, amountY: yAdd });
+        // A rebalance can ALSO harvest fees (the modern Meteora compound flow); those are carried in
+        // x/y_fee_amount and must surface as a claim leg — else the leader's claim-via-rebalance is not
+        // mirrored and the tracker under-counts claimed fees.
+        const xFee = num(d.x_fee_amount),
+          yFee = num(d.y_fee_amount);
+        if (xFee > 0n || yFee > 0n)
+          legs.push({ ...base, kind: 'claim', activeBinId: bin, amountX: xFee, amountY: yFee });
         break;
       }
       case 'ClaimFee2':
