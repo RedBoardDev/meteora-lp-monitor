@@ -93,17 +93,30 @@ describe('makeDetectionDeps.classify — null-tx refetch (WS outruns RPC availab
     });
     const conn = { getParsedTransactions } as unknown as Connection;
     const deps = makeDetectionDeps({ conn, pk: PK, poolReader: {} as never, tokenMeta: { resolve: async () => new Map() } as never, onEvent: () => undefined });
-    const map = await deps.classify(['s1', 's2']);
-    expect(map.size).toBe(0); // non-DLMM txs → no events (we're testing the refetch mechanics, not event building)
+    const { events, unresolved } = await deps.classify(['s1', 's2']);
+    expect(events.size).toBe(0); // non-DLMM txs → no events (we're testing the refetch mechanics, not event building)
+    expect(unresolved.size).toBe(0); // both slots resolved on the refetch → nothing left unresolved
     expect(getParsedTransactions).toHaveBeenCalledTimes(2); // 1 initial + 1 refetch (then no nulls → stop)
     expect(getParsedTransactions.mock.calls[1]?.[0]).toEqual(['s1', 's2']); // refetched the previously-null slots
+  });
+
+  it('a slot STILL null after every retry is reported UNRESOLVED (never mislabeled as a resolved non-DLMM tx)', async () => {
+    // WHY: unresolved ≠ non-DLMM. If a permanently-null tx (RPC not caught up) were dropped as "resolved non-DLMM",
+    // the detector would commit the cursor past it and MISS the event forever. It MUST come back in `unresolved`.
+    const getParsedTransactions = vi.fn(async (sigs: string[]) => sigs.map(() => null));
+    const conn = { getParsedTransactions } as unknown as Connection;
+    const deps = makeDetectionDeps({ conn, pk: PK, poolReader: {} as never, tokenMeta: { resolve: async () => new Map() } as never, onEvent: () => undefined });
+    const { events, unresolved } = await deps.classify(['s1']);
+    expect(events.size).toBe(0);
+    expect([...unresolved]).toEqual(['s1']); // the null-forever sig surfaces as unresolved → detector holds the cursor
   });
 
   it('no refetch when the first fetch already resolves every slot', async () => {
     const getParsedTransactions = vi.fn(async (sigs: string[]) => sigs.map(() => ({ blockTime: 1, meta: { innerInstructions: [] }, transaction: { signatures: ['x'], message: { instructions: [] } } })));
     const conn = { getParsedTransactions } as unknown as Connection;
     const deps = makeDetectionDeps({ conn, pk: PK, poolReader: {} as never, tokenMeta: { resolve: async () => new Map() } as never, onEvent: () => undefined });
-    await deps.classify(['s1']);
+    const { unresolved } = await deps.classify(['s1']);
+    expect(unresolved.size).toBe(0); // resolved on the first fetch → nothing unresolved
     expect(getParsedTransactions).toHaveBeenCalledTimes(1); // nothing null → no refetch
   });
 });

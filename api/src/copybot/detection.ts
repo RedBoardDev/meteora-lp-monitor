@@ -7,7 +7,7 @@ import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import type { Connection, PublicKey } from '@solana/web3.js';
 import { type PoolMetaLookup, buildDetectedEvent, poolsOf } from '../domain/copybot/classify-dlmm-tx';
 import type { DetectedEvent } from '../domain/copybot/events';
-import type { DetectorDeps, SigInfo } from '../domain/copybot/leader-detector';
+import type { ClassifyResult, DetectorDeps, SigInfo } from '../domain/copybot/leader-detector';
 import type { LoadedPoolMeta } from '../domain/dlmm';
 import type { OnchainPoolMetaReader } from '../infrastructure/solana/dlmm/pool-meta';
 import type { HeliusTokenMetadataGateway } from '../infrastructure/solana/token-metadata-gateway';
@@ -26,8 +26,9 @@ export function makeDetectionDeps(args: {
   tokenMeta: HeliusTokenMetadataGateway;
   onEvent: DetectorDeps['onEvent'];
   persist?: DetectorDeps['persist'];
+  onGap?: DetectorDeps['onGap'];
 }): DetectorDeps {
-  const { conn, pk, poolReader, tokenMeta, onEvent, persist } = args;
+  const { conn, pk, poolReader, tokenMeta, onEvent, persist, onGap } = args;
   const poolMetaCache = new Map<string, LoadedPoolMeta | null>();
   const getPoolMeta = async (lbPair: string): Promise<LoadedPoolMeta | null> => {
     const cached = poolMetaCache.get(lbPair);
@@ -60,17 +61,24 @@ export function makeDetectionDeps(args: {
       return out;
     },
 
-    async classify(signatures: string[]): Promise<Map<string, DetectedEvent>> {
+    async classify(signatures: string[]): Promise<ClassifyResult> {
       const opts = { maxSupportedTransactionVersion: 0 as const, commitment: 'confirmed' as const };
       let txs = await conn.getParsedTransactions(signatures, opts);
       // Refetch ONLY the still-null slots (WS outran RPC availability). Keeps the poll cheap; makes the live
-      // WS close/open path resolve in ~1s instead of waiting for the next cursor poll. No null left behind.
+      // WS close/open path resolve in ~1s instead of waiting for the next cursor poll.
       for (let attempt = 0; attempt < TX_FETCH_RETRIES && txs.some((t) => t === null); attempt++) {
         await sleep(TX_FETCH_RETRY_MS);
         const missing = signatures.filter((_, i) => txs[i] === null);
         const refetched = await conn.getParsedTransactions(missing, opts);
         let m = 0;
         txs = txs.map((t) => (t === null ? (refetched[m++] ?? null) : t));
+      }
+      // Any slot STILL null after the retry loop is UNRESOLVED (not "resolved non-DLMM"): the detector must
+      // NOT advance the cursor past it — it re-lists and retries until it resolves or a LOUD gap is accepted.
+      const unresolved = new Set<string>();
+      for (let i = 0; i < signatures.length; i++) {
+        const sig = signatures[i];
+        if (sig && txs[i] === null) unresolved.add(sig);
       }
       const pools = new Set<string>();
       for (const tx of txs) for (const pl of poolsOf(tx)) pools.add(pl);
@@ -91,11 +99,12 @@ export function makeDetectionDeps(args: {
           if (e.nonSolMint) e.nonSolSymbol = metas.get(e.nonSolMint)?.symbol ?? null;
         }
       }
-      return map;
+      return { events: map, unresolved };
     },
 
     onEvent,
     persist,
+    onGap,
   };
 }
 

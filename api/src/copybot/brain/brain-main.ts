@@ -1266,7 +1266,12 @@ async function main(): Promise<void> {
     }
   };
 
-  const detector = new LeaderDetector(makeDetectionDeps({ conn, pk: leaderPk, poolReader, tokenMeta, onEvent }));
+  // A signature the detector could NOT resolve after the bounded retry → force-past to avoid stalling the
+  // cursor, but emit a LOUD gap: a leader event may have been missed (the reconcile backstop still covers closes).
+  const onGap = (signature: string, attempts: number): void => {
+    events.emit('detect.gap', { stage: 'detect', outcome: 'failed', leader: cfg.leader, signature, eventKey: `gap:${signature}`, adminDetail: { attempts } });
+  };
+  const detector = new LeaderDetector(makeDetectionDeps({ conn, pk: leaderPk, poolReader, tokenMeta, onEvent, onGap }));
   await blockhashCache.start(); // prime + background-refresh so serializeUnsigned never pays a getLatestBlockhash RTT
   if (oracleOn()) {
     await priorityFeeOracle.start(); // prime + background-refresh the live fee estimate (opt-in)

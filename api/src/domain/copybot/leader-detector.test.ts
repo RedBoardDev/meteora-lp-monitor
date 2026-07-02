@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type ClassifyResult,
   type DetectedEvent,
   type DetectorDeps,
   LeaderDetector,
@@ -37,10 +38,10 @@ function makeDeps(chronological: string[], dlmm: Set<string>, blockTimes: Record
         .reverse() // newest-first, like the RPC
         .map((signature) => ({ signature }));
     },
-    async classify(signatures: string[]): Promise<Map<string, DetectedEvent>> {
+    async classify(signatures: string[]): Promise<ClassifyResult> {
       const m = new Map<string, DetectedEvent>();
       for (const s of signatures) if (dlmm.has(s)) m.set(s, fakeEvent(s, blockTimes[s] ?? null));
-      return m;
+      return { events: m, unresolved: new Set() }; // non-DLMM sigs are RESOLVED (committed), never unresolved
     },
     onEvent(event, source) {
       emitted.push({ signature: event.signature, source });
@@ -111,10 +112,11 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
       async listSignaturesSince(): Promise<SigInfo[]> {
         return [{ signature: 'x' }];
       },
-      async classify(sigs: string[]): Promise<Map<string, DetectedEvent>> {
+      async classify(sigs: string[]): Promise<ClassifyResult> {
         const m = new Map<string, DetectedEvent>();
         if (txReady) for (const s of sigs) m.set(s, fakeEvent(s, 1));
-        return m; // before txReady: empty (the WS-raced-RPC case), NOT a throw
+        // before txReady: the tx is not yet queryable → UNRESOLVED (null), NOT a resolved non-DLMM tx.
+        return { events: m, unresolved: txReady ? new Set() : new Set(sigs) };
       },
       onEvent(e) {
         emitted.push(e.signature);
@@ -149,7 +151,7 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
           .map((signature) => ({ signature }));
       },
       async classify(sigs) {
-        return new Map(sigs.map((s) => [s, fakeEvent(s)]));
+        return { events: new Map(sigs.map((s) => [s, fakeEvent(s)])), unresolved: new Set<string>() };
       },
       onEvent(e) {
         emitted.push(e.signature);
@@ -180,7 +182,7 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
         return until === undefined ? [{ signature: 'a' }] : [];
       },
       async classify(sigs) {
-        return new Map(sigs.map((s) => [s, fakeEvent(s)]));
+        return { events: new Map(sigs.map((s) => [s, fakeEvent(s)])), unresolved: new Set<string>() };
       },
       onEvent() {},
       async persist(events) {
@@ -215,7 +217,7 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
         return [{ signature: 'a' }];
       },
       async classify(sigs) {
-        return new Map(sigs.map((s) => [s, fakeEvent(s)]));
+        return { events: new Map(sigs.map((s) => [s, fakeEvent(s)])), unresolved: new Set<string>() };
       },
       onEvent() {},
     };
@@ -257,7 +259,7 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
         return available.slice(start).reverse().map((signature) => ({ signature }));
       },
       async classify(sigs) {
-        return new Map(sigs.map((s) => [s, fakeEvent(s)]));
+        return { events: new Map(sigs.map((s) => [s, fakeEvent(s)])), unresolved: new Set<string>() };
       },
       onEvent(e) {
         emitted.push(e.signature);
@@ -287,5 +289,147 @@ describe('LeaderDetector — "we never miss an event" robustness', () => {
 
     await det.poll();
     expect(det.cursorSignature).toBe('c');
+  });
+});
+
+/**
+ * The detector cursor race (the #1 no-miss pillar). Before the fix, a sig that came back with no event was
+ * un-reserved from `seen` while the cursor still advanced past it — so the contiguous poll never re-listed it
+ * (a PERMANENT miss). These interleavings lock the fix: the cursor NEVER advances past an unresolved or in-flight
+ * sig, and the poll is single-flight.
+ */
+describe('LeaderDetector — cursor race (never advance past an unresolved / in-flight sig)', () => {
+  // Mirrors the detector's internal constant (Option A: bounded retry, then a LOUD gap). If the source constant
+  // changes, this test must change WITH it — the retry-cap behavior is the contract being locked here.
+  const UNRESOLVED_MAX_RETRIES = 8;
+
+  it('C1 (poll): an unresolved close sig HOLDS the cursor; a later poll that resolves it emits it (never lost)', async () => {
+    // The proven miss: a poll lists a close sig S whose tx cannot be fetched (null after retries) → classify returns
+    // it as UNRESOLVED (no throw). The buggy code advanced the cursor to S anyway → the next poll skipped S forever.
+    const emitted: string[] = [];
+    let resolved = false; // the close tx becomes queryable only on the 2nd poll
+    const deps: DetectorDeps = {
+      async listSignaturesSince(until) {
+        return until === undefined ? [{ signature: 'S' }] : []; // S is the newest; nothing is newer than it
+      },
+      async classify(sigs) {
+        if (!resolved) return { events: new Map(), unresolved: new Set(sigs) }; // null tx → unresolved, no throw
+        return { events: new Map(sigs.map((s) => [s, fakeEvent(s, 1)])), unresolved: new Set<string>() };
+      },
+      onEvent(e) {
+        emitted.push(e.signature);
+      },
+    };
+    const det = new LeaderDetector(deps);
+
+    await det.poll(); // classify can't fetch the close tx → unresolved
+    expect(det.cursorSignature).toBeUndefined(); // MUST hold (the bug advanced to 'S' → 'S' lost forever)
+    expect(emitted).toEqual([]); // not committed, not emitted
+
+    resolved = true;
+    await det.poll(); // the window is re-listed (the cursor never moved) → S now resolves
+    expect(emitted).toEqual(['S']); // the close is recovered, exactly once
+    expect(det.cursorSignature).toBe('S'); // only now may the cursor advance
+  });
+
+  it('C2 (WS/poll race): a poll cannot advance the cursor past a sig held IN-FLIGHT by a pending WS classify', async () => {
+    // The WS reserves S and SUSPENDS in classify (RPC lag). The 15s poll fires, sees S already in `seen`, fresh is
+    // empty → the buggy empty-branch advanced the cursor to S. Then the WS classify resolves empty → S un-reserved
+    // → a hole the next poll skips. The fix: the empty-branch may advance ONLY if nothing is still in-flight.
+    const emitted: string[] = [];
+    let resolveWs!: () => void;
+    let wsResolved = false;
+    const deps: DetectorDeps = {
+      async listSignaturesSince(until) {
+        return until === undefined ? [{ signature: 'S' }] : [];
+      },
+      classify(sigs) {
+        if (!wsResolved) {
+          return new Promise<ClassifyResult>((res) => {
+            resolveWs = () => res({ events: new Map(), unresolved: new Set(sigs) }); // WS resolves as unresolved
+          });
+        }
+        return Promise.resolve({ events: new Map(sigs.map((s) => [s, fakeEvent(s, 1)])), unresolved: new Set<string>() });
+      },
+      onEvent(e) {
+        emitted.push(e.signature);
+      },
+    };
+    const det = new LeaderDetector(deps);
+
+    const wsPromise = det.onWsSignature('S'); // reserves S (seen + inFlight), SUSPENDS in classify
+    await det.poll(); // lists [S]; S is in-flight → fresh empty → MUST NOT advance the cursor
+    expect(det.cursorSignature).toBeUndefined(); // the bug advanced to 'S' here
+
+    resolveWs(); // the WS classify resolves as unresolved → S un-reserved (the hole)
+    await wsPromise;
+    expect(det.cursorSignature).toBeUndefined(); // still behind (the WS never advances the cursor)
+    expect(emitted).toEqual([]);
+
+    wsResolved = true;
+    await det.poll(); // the cursor never moved → the poll re-covers S and now resolves it
+    expect(emitted).toEqual(['S']); // recovered, exactly once
+    expect(det.cursorSignature).toBe('S');
+  });
+
+  it('retry cap: an unresolved sig force-passes after UNRESOLVED_MAX_RETRIES polls (onGap ONCE), then is never re-listed', async () => {
+    // A null-forever tx must not stall the cursor indefinitely: after the bounded retry we accept a LOUD gap
+    // (onGap → the caller emits a pinned observability event; the reconcile backstop still covers closes).
+    const gaps: Array<{ signature: string; attempts: number }> = [];
+    let classifyCalls = 0;
+    const deps: DetectorDeps = {
+      async listSignaturesSince(until) {
+        return until === undefined ? [{ signature: 'S' }] : []; // once the cursor reaches 'S', nothing is newer
+      },
+      async classify(sigs) {
+        classifyCalls++;
+        return { events: new Map(), unresolved: new Set(sigs) }; // null tx FOREVER
+      },
+      onEvent() {},
+      onGap(signature, attempts) {
+        gaps.push({ signature, attempts });
+      },
+    };
+    const det = new LeaderDetector(deps);
+
+    for (let i = 0; i < UNRESOLVED_MAX_RETRIES + 3; i++) await det.poll(); // poll well past the cap
+
+    expect(gaps).toEqual([{ signature: 'S', attempts: UNRESOLVED_MAX_RETRIES }]); // fired ONCE, exactly at the cap
+    expect(det.cursorSignature).toBe('S'); // force-past → the cursor may finally advance (no permanent stall)
+    expect(classifyCalls).toBe(UNRESOLVED_MAX_RETRIES); // re-listed up to the cap, NEVER after the force-past
+  });
+
+  it('single-flight: a second poll while the first is mid-classify returns immediately (no duplicate list/classify)', async () => {
+    const emitted: string[] = [];
+    let listCalls = 0;
+    let classifyCalls = 0;
+    let resolve1!: () => void;
+    const deps: DetectorDeps = {
+      async listSignaturesSince() {
+        listCalls++;
+        return [{ signature: 'a' }];
+      },
+      classify(sigs) {
+        classifyCalls++;
+        return new Promise<ClassifyResult>((res) => {
+          resolve1 = () => res({ events: new Map(sigs.map((s) => [s, fakeEvent(s, 1)])), unresolved: new Set<string>() });
+        });
+      },
+      onEvent(e) {
+        emitted.push(e.signature);
+      },
+    };
+    const det = new LeaderDetector(deps);
+
+    const p1 = det.poll(); // starts: lists, then SUSPENDS in classify
+    const p2 = det.poll(); // a poll is already running → must return immediately (skip the tick)
+    await p2;
+    expect(listCalls).toBe(1); // the second poll did NOT list again (self-serializing)
+
+    resolve1();
+    await p1;
+    expect(emitted).toEqual(['a']);
+    expect(listCalls).toBe(1); // still one list total
+    expect(classifyCalls).toBe(1); // and one classify total (no stacked sweep)
   });
 });

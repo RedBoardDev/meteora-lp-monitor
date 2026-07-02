@@ -80,6 +80,9 @@ const RAW_CODE_REGISTRY = {
   'detect.observed': { category: 'DETECT', severity: 'info', audience: 'internal' },
   'detect.routed': { category: 'DETECT', severity: 'info', audience: 'internal' },
   'detect.snapshot_failed': { category: 'DETECT', severity: 'warn', audience: 'internal' },
+  // A leader signature was never resolved after the bounded retry (null tx forever) → force-past + LOUD gap.
+  // Admin-only (the reconcile backstop still covers closes); severity:'error' so it surfaces in the admin log.
+  'detect.gap': { category: 'DETECT', severity: 'error', audience: 'internal' },
   'detect.leader_position_not_found': { category: 'DETECT', severity: 'warn', audience: 'internal' },
   'detect.not_on_chain_yet': { category: 'DETECT', severity: 'info', audience: 'internal' },
 
