@@ -29,9 +29,13 @@ describe('coffre deadLetterCode — pinned differentiation of the dead-letter tr
   const POISON = ['bad_hmac_or_hop', 'bad_schema', 'commandId_mismatch', 'owner_mismatch', 'undecodable_tx'];
   const BENIGN = ['duplicate', 'stale'];
 
-  it('forged / tampered / malformed → a PINNED code (operator paged out-of-band — "something is wrong")', () => {
+  it('forged / tampered / malformed → the dedicated pinned `system.command_quarantined` (NOT system.fatal — the process is alive)', () => {
     for (const reason of POISON) {
       const code = deadLetterCode(reason);
+      // The truthful code: pinned (operator paged out-of-band) but NOT the "Bot Stopped" fatal — a single message
+      // was quarantined while the vault keeps running. Fail-against-old: the prior `system.fatal` mapping is wrong.
+      expect(code, reason).toBe('system.command_quarantined');
+      expect(code, reason).not.toBe('system.fatal');
       expect(CODE_REGISTRY[code].pinned).toBe(true);
     }
   });
@@ -39,6 +43,7 @@ describe('coffre deadLetterCode — pinned differentiation of the dead-letter tr
   it('benign / expected (duplicate, stale) → a NON-pinned internal trace (no false operator page under retries)', () => {
     for (const reason of BENIGN) {
       const code = deadLetterCode(reason);
+      expect(code, reason).toBe('system.loop_errored');
       expect(CODE_REGISTRY[code].pinned ?? false).toBe(false);
       expect(CODE_REGISTRY[code].audience).toBe('internal');
     }

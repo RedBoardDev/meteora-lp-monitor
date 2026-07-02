@@ -194,6 +194,10 @@ const RAW_CODE_REGISTRY = {
   // may be BLIND to leader events (including closes) while the heartbeat still reads online. Pinned so the operator
   // is alerted out-of-band ("check RPC/key"); reuses the system-fatal render (🚨 + the registry title).
   'system.detection_stale': { category: 'SYSTEM', severity: 'error', audience: 'feed', pinned: true, coalesceMs: PINNED_COALESCE_MS, title: 'Detection Stale — bot may be blind (check RPC/key)', render: 'system-fatal' },
+  // A forged/malformed `cmd:sign` was rejected by the vault critical section and dead-lettered. The PROCESS IS ALIVE
+  // (unlike system.fatal's "Bot Stopped"): a single quarantined message must not read as a crash. Pinned so the
+  // operator is paged out-of-band ("something tampered/malformed a command"); reuses the system-fatal render (🚨 + title).
+  'system.command_quarantined': { category: 'SYSTEM', severity: 'error', audience: 'feed', pinned: true, coalesceMs: PINNED_COALESCE_MS, title: 'Command Quarantined — a forged/malformed cmd:sign was dead-lettered', render: 'system-fatal' },
   // Observability self-failures (D-7): audience:'internal' so they NEVER user-notify through the broken path.
   'system.journal_write_failed': { category: 'SYSTEM', severity: 'warn', audience: 'internal' },
   'system.notify_delivery_failed': { category: 'SYSTEM', severity: 'warn', audience: 'internal' },

@@ -42,10 +42,9 @@ const LEASE_RENEW_MS = LEASE_TTL_MS / 2; // renew well before expiry so a live h
 // Dead-letter routing for a REJECTED cmd:sign verdict. Pinning is code-driven (CODE_REGISTRY), so forgery/tamper/
 // malformed rejects — "someone/something is wrong" — map to a PINNED code (operator paged out-of-band), while the
 // expected rejects (duplicate/stale, and caps that already self-emit) map to a non-pinned internal quarantine trace.
-// NOTE: DLQ_POISON_CODE reuses `system.fatal` as the closest EXISTING pinned SYSTEM code (its out-of-band webhook
-// alert is code+reason-driven — truthful); a dedicated pinned `system.command_quarantined` code should replace it
-// once the observability registry (codes.ts) is editable — see the change report.
-const DLQ_POISON_CODE: CopyCode = 'system.fatal';
+// DLQ_POISON_CODE is the dedicated pinned `system.command_quarantined` — TRUTHFUL: the process is ALIVE and a single
+// forged/malformed message was quarantined (NOT the "Bot Stopped" of system.fatal).
+const DLQ_POISON_CODE: CopyCode = 'system.command_quarantined';
 const DLQ_TRACE_CODE: CopyCode = 'system.loop_errored';
 const POISON_REJECT_REASONS = new Set(['bad_hmac_or_hop', 'bad_schema', 'commandId_mismatch', 'owner_mismatch', 'undecodable_tx']); // forged / tampered / malformed
 
