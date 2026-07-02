@@ -3,7 +3,10 @@ import { PGlite } from '@electric-sql/pglite';
 import { drizzle } from 'drizzle-orm/pglite';
 import { migrate } from 'drizzle-orm/pglite/migrator';
 import { describe, expect, it, vi } from 'vitest';
+import { repairClosedEconomicsFromLegs } from '@/application/repair-closed-economics';
+import type { DlmmLeg } from '@/domain/dlmm';
 import type { Database } from './database';
+import { DlmmLegRepository } from './dlmm-leg-repository';
 import { PostgresPositionRepository } from './position-repository';
 import * as schema from './schema';
 
@@ -45,10 +48,13 @@ const openBase: Omit<OpenPosition, 'positionAddress'> = {
 };
 
 // Fresh in-memory Postgres (PGlite) per test, with the real Drizzle migrations applied.
-async function newRepo(): Promise<PostgresPositionRepository> {
+async function newDb(): Promise<Database> {
   const db = drizzle(new PGlite(), { schema });
   await migrate(db, { migrationsFolder: './drizzle' });
-  return new PostgresPositionRepository(db as unknown as Database);
+  return db as unknown as Database;
+}
+async function newRepo(): Promise<PostgresPositionRepository> {
+  return new PostgresPositionRepository(await newDb());
 }
 
 const read = async (repo: PostgresPositionRepository) =>
@@ -331,5 +337,74 @@ describe('PostgresPositionRepository — profitBuckets (SQL GROUP BY)', () => {
       { t: DAY, realized: 5 },
       { t: 3 * DAY, realized: -1 },
     ]);
+  });
+});
+
+const SOL = 1_000_000_000; // lamports per SOL
+const dlmmLeg = (over: Partial<DlmmLeg> & Pick<DlmmLeg, 'position' | 'kind'>): DlmmLeg => ({
+  signature: 'sig',
+  blockTime: 1,
+  lbPair: 'POOL',
+  activeBinId: 0, // binStep 10, binId 0 → price 1 → a SOL-Y leg values at its Y (SOL) amount
+  amountX: 0n,
+  amountY: 0n,
+  ...over,
+});
+
+describe('PostgresPositionRepository — legs-recompute backfill (#113)', () => {
+  it('repairClosedEconomicsMany rewrites the four columns even AFTER the settle-freeze, closed rows only', async () => {
+    const repo = await newRepo();
+    const closedAt = Date.now() - 300_000; // well past SETTLE_MS → upsertClosed would refuse to re-mark
+    await repo.upsertClosed([
+      { ...base, positionAddress: 'FZ', closedAt, depositSol: 0, withdrawSol: 0, pnlSol: 5, pnlSource: 'pool' },
+    ]);
+    await repo.setAuthoritativePnl('FZ', -0.42); // a market reprice that must be preserved
+    await repo.replaceOpenForWallet('w', [{ ...openBase, positionAddress: 'OPEN', pnlSol: 7 }]);
+
+    await repo.repairClosedEconomicsMany(
+      new Map([
+        ['FZ', { depositSol: 3, withdrawSol: 2, claimedFeesSol: 0.5, pnlSol: -0.5 }],
+        ['OPEN', { depositSol: 9, withdrawSol: 9, claimedFeesSol: 9, pnlSol: 9 }], // must be ignored (open)
+      ]),
+    );
+
+    const econ = await repo.closedEconomicsForWallet('w');
+    expect(econ.get('FZ')).toEqual({ depositSol: 3, withdrawSol: 2, claimedFeesSol: 0.5, pnlSol: -0.5 });
+    expect(econ.has('OPEN')).toBe(false); // open positions are not closed economics
+    const closed = await repo.getClosedByAddress('FZ');
+    expect(closed?.pnlSol).toBeCloseTo(-0.42); // market_pnl_sol (effective PnL) untouched by the repair
+    // The open row's raw pnl must be unchanged by the map entry that targeted it.
+    expect((await repo.getOpen('w')).find((p) => p.positionAddress === 'OPEN')?.pnlSol).toBeCloseTo(7);
+  });
+
+  it('end-to-end: a stale deposit_sol=0 closed row is corrected from its legs; a correct row is idempotent', async () => {
+    const db = await newDb();
+    const repo = new PostgresPositionRepository(db);
+    const legRepo = new DlmmLegRepository(db);
+    await legRepo.putPoolMeta('POOL', { binStep: 10, solSide: 'Y', mintX: 'MEME', mintY: 'So1' });
+
+    // Frozen closed row written before the fix: deposit dropped to 0, pnl bogus-positive.
+    const closedAt = Date.now() - 300_000;
+    await repo.upsertClosed([
+      { ...base, positionAddress: 'P', poolAddress: 'POOL', closedAt, depositSol: 0, withdrawSol: 0, pnlSol: 4, pnlSource: 'pool' },
+    ]);
+    // Its real on-chain SOL legs: deposit 3 SOL, withdraw 2 SOL, claim 0.5 SOL → pnl −0.5.
+    await legRepo.replaceForSignatures('w', ['sig'], [
+      dlmmLeg({ position: 'P', kind: 'deposit', amountY: BigInt(3 * SOL) }),
+      dlmmLeg({ position: 'P', kind: 'withdraw', amountY: BigInt(2 * SOL) }),
+      dlmmLeg({ position: 'P', kind: 'claim', amountY: BigInt(0.5 * SOL) }),
+    ]);
+
+    const r1 = await repairClosedEconomicsFromLegs('w', { legRepo, positionRepo: repo });
+    expect(r1).toMatchObject({ scanned: 1, corrected: 1, skippedNoPoolMeta: 0, skippedNonSol: 0 });
+    const econ = (await repo.closedEconomicsForWallet('w')).get('P')!;
+    expect(econ.depositSol).toBeCloseTo(3);
+    expect(econ.withdrawSol).toBeCloseTo(2);
+    expect(econ.claimedFeesSol).toBeCloseTo(0.5);
+    expect(econ.pnlSol).toBeCloseTo(-0.5);
+
+    // Second pass: everything already exact → nothing rewritten (idempotent).
+    const r2 = await repairClosedEconomicsFromLegs('w', { legRepo, positionRepo: repo });
+    expect(r2.corrected).toBe(0);
   });
 });

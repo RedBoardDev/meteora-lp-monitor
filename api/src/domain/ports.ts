@@ -18,6 +18,7 @@ import type {
   IngestCursor,
   LoadedPoolMeta,
   OnchainWalletSnapshot,
+  PositionEconomics,
   ResidualSell,
   SnapshotPlan,
   StoredLeg,
@@ -124,6 +125,15 @@ export interface PositionRepository {
   /** The wallet that owns a position (open OR closed), by address. Null if unknown — used to scope the
    *  per-position routes (bins/history) to the caller's watchlist. */
   walletOfPosition(positionAddress: string): Promise<string | null>;
+  /** RAW legs-derived economics (deposit/withdraw/claimed-fees/pnl in SOL, as stored — NOT the
+   *  market-repriced effective PnL) for EVERY closed position of a wallet, keyed by address. Feeds the
+   *  legs-recompute backfill's "only write what actually changed" diff. */
+  closedEconomicsForWallet(wallet: string): Promise<Map<string, PositionEconomics>>;
+  /** Overwrite the four legs-derived economics columns (deposit/withdraw/claimed-fees/pnl) for many
+   *  CLOSED positions in ONE atomic UPDATE, bypassing the SETTLE_MS settle-freeze — a deliberate
+   *  ground-truth backfill from the on-chain legs, NOT a pool-price resync. Never touches
+   *  market_pnl_sol, status, timestamps, or open positions. Idempotent (caller sends only changed rows). */
+  repairClosedEconomicsMany(byPosition: Map<string, PositionEconomics>): Promise<void>;
   /** Persist a position's strategy family (decoded once from its on-chain open tx; immutable). */
   setStrategy(positionAddress: string, family: StrategyFamily): Promise<void>;
   /** Positions with a known strategy → family. Scoped to `wallet` when given (the hot per-sync path);
