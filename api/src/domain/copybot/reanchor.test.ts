@@ -78,6 +78,22 @@ describe('reanchorShape — exact re-anchoring of the bin shape', () => {
     expect(r.weights).toEqual([{ binId: 1, bps: 10_000 }]);
   });
 
+  // FIX #122: a lowest/highest bin whose amount rounds to <1 bp must NOT be dropped, or our created
+  // lowerBinId shifts +1 and every subsequent reshape misaligns (position-adjust aligns leader.lower ↔ our.lower).
+  it('a tiny EDGE sliver (<1 bp) is kept as a 0-weight bin so lower/upper match the leader exactly', () => {
+    // bin 100 = a sliver that rounds to 0 bps; 101 & 102 hold the bulk. Old filter-then-min dropped bin 100.
+    const r = reanchorShape(102, 102, [
+      { binId: 100, amount: 1n },
+      { binId: 101, amount: 10_000n },
+      { binId: 102, amount: 10_000n },
+    ]);
+    expect(r.lowerBinId).toBe(100); // was 101 (leaderLower + 1) with the old code
+    expect(r.upperBinId).toBe(102);
+    expect(r.upperBinId - r.lowerBinId).toBe(2); // range width equals the leader's
+    expect(sumBps(r.weights)).toBe(10_000);
+    expect(r.weights.find((w) => w.binId === 100)?.bps).toBe(0); // sliver kept as a 0-weight EDGE entry
+  });
+
   it('no SOL-side liquidity → throw (fail loud)', () => {
     expect(() => reanchorShape(0, 0, [{ binId: 0, amount: 0n }])).toThrow();
     expect(() => reanchorShape(0, 0, [])).toThrow();

@@ -59,7 +59,14 @@ export function reanchorShape(
     deficit -= 1;
   }
 
-  const weights = entries.filter((e) => e.bps > 0).map((e) => ({ binId: e.binId, bps: e.bps }));
-  const binIds = weights.map((w) => w.binId);
-  return { weights, lowerBinId: Math.min(...binIds), upperBinId: Math.max(...binIds) };
+  // The RANGE spans EVERY bin carrying liquidity, even a lowest/highest sliver that rounds to 0 bps. Dropping
+  // such an EDGE bin would shift our lower/upper by one and permanently misalign every reshape (position-adjust
+  // aligns leader.lower ↔ our.lower). Keep the edge bins as 0-weight entries so our range equals the leader's;
+  // INTERIOR 0-bps bins are re-filled by fillContiguousWeights, so we still drop them here.
+  const lowerBinId = Math.min(...entries.map((e) => e.binId));
+  const upperBinId = Math.max(...entries.map((e) => e.binId));
+  const weights = entries
+    .filter((e) => e.bps > 0 || e.binId === lowerBinId || e.binId === upperBinId)
+    .map((e) => ({ binId: e.binId, bps: e.bps }));
+  return { weights, lowerBinId, upperBinId };
 }
