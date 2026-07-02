@@ -6,9 +6,37 @@ import type { OnchainValued } from '@/domain/dlmm';
 import type { RpcSubscriber } from '@/domain/ports';
 import type { WalletRuntime } from './runtime';
 
+/**
+ * Stable change signature of a health frame for the emit-on-change dedup. Projects ONLY the fields a
+ * client renders as state; every field that advances without a client-visible state change is dropped so
+ * it can't defeat the dedup and re-introduce the O(users × wallets) per-second churn:
+ *   - `uptimeSeconds` — monotonic, ticks every second.
+ *   - `sources[].lastOkAt` / `lastErrorAt` — raw `Date.now()` timestamps; emitHealth calls
+ *     `health.set('ws','ok')` on every tick, which bumps `lastOkAt` each call → they'd change every tick.
+ * `sources[].status` / `detail` / `consecutiveErrors` (real service transitions) and every wallet field
+ * (`lastPollAt` only moves on an actual poll) ARE client-meaningful and stay in the signature.
+ */
+function healthChangeSignature(payload: Health): string {
+  return JSON.stringify({
+    ok: payload.ok,
+    wsConnected: payload.wsConnected,
+    meteoraOk: payload.meteoraOk,
+    effectiveRps: payload.effectiveRps,
+    chainTipSlot: payload.chainTipSlot,
+    sources: payload.sources.map((s) => ({
+      name: s.name,
+      status: s.status,
+      detail: s.detail,
+      consecutiveErrors: s.consecutiveErrors,
+    })),
+    wallets: payload.wallets,
+  });
+}
+
 export class StateEmitter {
   private seq = 0;
-  // Change signature of the last health frame we broadcast (excludes the monotonic uptime). The engine
+  // Change signature of the last health frame we broadcast (see healthChangeSignature: it projects only
+  // client-rendered state, dropping volatile fields like uptime and source timestamps). The engine
   // computes health every 1s tick; the WS layer re-sorts/filters/stringifies it per distinct watched-set
   // on EVERY emit → O(users × wallets) work. Skipping the emit when nothing a client renders changed
   // removes that idle-per-second churn while still emitting the instant a real field changes.
@@ -80,11 +108,10 @@ export class StateEmitter {
     const wsOk = this.subscriber.isConnected();
     this.health.set('ws', wsOk ? 'ok' : 'down', wsOk ? undefined : 'disconnected');
     const payload = this.snapshotHealth(effectiveRps);
-    // Emit-on-change: uptimeSeconds ticks every second and would defeat the dedup, so it's excluded from
-    // the change signature (it refreshes on the next real change). Any status / rps / chain-tip / wallet
-    // change still emits immediately — freshness is preserved, only the idle re-broadcast is dropped.
-    const { uptimeSeconds: _uptimeSeconds, ...changing } = payload;
-    const sig = JSON.stringify(changing);
+    // Emit-on-change: the signature is a stable projection (healthChangeSignature) that excludes volatile
+    // fields (uptime + source timestamps) which advance every tick and would defeat the dedup. Any real
+    // status / rps / chain-tip / wallet change still emits immediately — the full payload is unchanged.
+    const sig = healthChangeSignature(payload);
     if (sig === this.lastHealthSig) return;
     this.lastHealthSig = sig;
     this.bus.emit('health', payload);

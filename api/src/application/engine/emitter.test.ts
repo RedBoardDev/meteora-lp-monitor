@@ -44,12 +44,30 @@ describe('StateEmitter.emitHealth — emit-on-change', () => {
 
   it('does NOT re-emit when only uptime advances (monotonic field excluded from the signature)', () => {
     // WHY: uptimeSeconds ticks every second; if it counted toward the change signature it would defeat
-    // the dedup and the O(users × wallets) churn would come straight back.
+    // the dedup and the O(users × wallets) churn would come straight back. Deterministic: the clock is
+    // pinned so the ONLY difference between the two frames is the mocked uptime.
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000);
     const uptime = vi.spyOn(process, 'uptime');
     const { emitter, emits } = setup();
     uptime.mockReturnValue(10);
     emitter.emitHealth(0);
     uptime.mockReturnValue(45);
+    emitter.emitHealth(0);
+    expect(now).toHaveBeenCalled();
+    expect(emits).toHaveLength(1);
+  });
+
+  it('does NOT re-emit when only source timestamps advance (the prod defect)', () => {
+    // WHY: emitHealth calls health.set('ws','ok') every tick, which bumps sources[].lastOkAt to the
+    // current clock. If those raw timestamps counted toward the signature the dedup would NEVER fire in
+    // production and the O(users × wallets) WS churn would run every second. Here the clock advances
+    // between two otherwise-identical ticks; with lastOkAt excluded from the signature it must dedup.
+    // (This test FAILS against a "whole payload minus uptime" signature — lastOkAt would differ.)
+    const now = vi.spyOn(Date, 'now');
+    const { emitter, emits } = setup();
+    now.mockReturnValue(1_000); // first tick sets ws lastOkAt = 1000
+    emitter.emitHealth(0);
+    now.mockReturnValue(9_999); // second tick bumps ws lastOkAt = 9999, nothing else changed
     emitter.emitHealth(0);
     expect(emits).toHaveLength(1);
   });
