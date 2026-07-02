@@ -126,6 +126,14 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
   }
   // Retry config (fresh blockhash on each attempt), then ALERT "verify/close manually" (Valhalla-style).
   let lastErr: Error | undefined;
+  // Once confirmLanded returns true the on-chain action is IRREVERSIBLE and TERMINAL. We record the confirmed
+  // signature here and break out of the retry scope: the post-confirm side effects (publish/emit/finalize) run
+  // BELOW, OUTSIDE the try, so a Redis/DB blip there can never re-enter sign/land (which would DOUBLE-execute — a
+  // 2nd add/buy/sell/remove has no on-chain idempotency). `landedAttempt`/`landedTSign` preserve the confirmed
+  // attempt's values for the unchanged confirmed-land log payload.
+  let landedSig: string | undefined;
+  let landedAttempt = 0;
+  let landedTSign = 0;
   for (let attempt = 0; attempt <= ctx.retryMax; attempt++) {
     try {
       const tSign = Date.now();
@@ -153,16 +161,33 @@ export async function process1(payload: unknown | null, ctx: Ctx, recovering = f
         lastErr = new Error(`landed_unconfirmed (sig ${sig})`);
         break;
       }
-      // ev:executed carries the pool/position/owner so the brain can trigger the residual sell on a close.
-      await bus.publish('copybot:ev:executed', 'ev:executed', ctx.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
-      events.emit('sign.landed', { stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: sig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, adminDetail: recovering ? { recovering: true } : undefined });
-      log.info({ kind: sr.kind, sig, attempt, busMs, signLandMs: Date.now() - tSign, totalMs: Date.now() - sr.issuedAtMs }, '🚀 signed + landed (confirmed)');
-      return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
+      // Confirmed → TERMINAL. Record it and LEAVE the retry scope; the post-confirm work runs below where a failure
+      // can no longer re-sign/re-land. Nothing that can throw (publish/finalize) runs inside the try after this.
+      landedSig = sig;
+      landedAttempt = attempt;
+      landedTSign = tSign;
+      break;
     } catch (e) {
       lastErr = e as Error;
       log.warn({ kind: sr.kind, attempt, error: lastErr.message }, 'sign/land failed — retry');
       if (attempt < ctx.retryMax) await sleep(ctx.retryDelayMs);
     }
+  }
+
+  if (landedSig) {
+    // TERMINAL success — the on-chain action already applied. Everything here runs OUTSIDE the retry scope so no
+    // failure can trigger a re-sign/re-land (double execution). ev:executed carries the pool/position/owner so the
+    // brain can trigger the residual sell on a close.
+    try {
+      await bus.publish('copybot:ev:executed', 'ev:executed', ctx.hmacKey, { commandId: sr.commandId, kind: sr.kind, sig: landedSig, pool: sr.pool, positionPubkey: sr.positionPubkey, owner: sr.owner });
+    } catch (e) {
+      // A lost ev:executed AFTER a confirmed land is a degraded (reconcile/PEL-backstopped) outcome — strictly better
+      // than re-signing, which would DOUBLE-land. ioredis already retries connection blips; do NOT rethrow.
+      log.error({ kind: sr.kind, sig: landedSig, error: (e as Error).message }, 'ev:executed publish failed after a confirmed land — brain will backstop via reconcile/PEL');
+    }
+    events.emit('sign.landed', { stage: 'sign', outcome: 'landed', kind: sr.kind, pool: sr.pool, ourPosition: sr.positionPubkey, commandId: sr.commandId, signature: landedSig, ourSizeSol: sr.sizeSol, latencyMs: Date.now() - sr.issuedAtMs, adminDetail: recovering ? { recovering: true } : undefined });
+    log.info({ kind: sr.kind, sig: landedSig, attempt: landedAttempt, busMs, signLandMs: Date.now() - landedTSign, totalMs: Date.now() - sr.issuedAtMs }, '🚀 signed + landed (confirmed)');
+    return finalize(db, sr.commandId, 'landed', { ok: true, kind: sr.kind });
   }
   // Definitive failure (land threw after retries, OR landed-but-unconfirmed) → emergency. Two rows: the INTERNAL
   // sign trace (`sign.land_failed`) and the FEED-VISIBLE pinned lifecycle/failsafe alert the user must act on

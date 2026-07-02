@@ -138,6 +138,36 @@ describe('process1 — a returned signature is NOT execution (no dormant-positio
   });
 });
 
+describe('process1 — #3: a confirmed land is TERMINAL (a post-confirm failure never re-signs/re-lands)', () => {
+  it('a post-confirm bus.publish failure does NOT re-sign/re-land (no double execution)', async () => {
+    // WHY (the money-path bug): once confirmLanded returns true the on-chain action already applied and is
+    // IRREVERSIBLE. If a post-confirm publish (a Redis blip) threw INSIDE the retry scope, the loop would re-sign
+    // the SAME tx with a fresh blockhash and RE-LAND it — a real-money double add/buy/sell/remove (no on-chain
+    // idempotency). retryMax=1 is required to expose the regression: the old code re-lands on the throw (land×2),
+    // the fixed code records the confirmed sig, breaks, and publishes ONCE outside the loop (land×1).
+    const bus = { publish: vi.fn(async () => { throw new Error('redis blip'); }) } as unknown as RedisBus;
+    const land = vi.fn(async () => `SIG_${Math.floor(Math.random() * 1e9)}`); // one land == one sendRawTransaction
+    const conn = {
+      getSlot: async () => 200,
+      getLatestBlockhash: async () => ({ blockhash: Keypair.generate().publicKey.toBase58() }),
+      sendRawTransaction: land,
+      getSignatureStatus: async () => ({ value: { confirmationStatus: 'confirmed' } }), // confirms on the 1st attempt
+    } as unknown as Connection;
+    const sr = closeReq();
+    const verdict = await process1(sr, { ...ctxFor(conn, bus), retryMax: 1 });
+    expect(land).toHaveBeenCalledTimes(1); // no double-land — FAILS on the old code (re-lands → 2)
+    expect(verdict).toEqual({ ok: true, kind: 'close' }); // the on-chain action is terminal → still 'landed'
+    expect(bus.publish).toHaveBeenCalledTimes(1); // attempted once; the failure is swallowed, never re-published
+    const row = await db.select().from(executions).where(eq(executions.commandId, sr.commandId as string));
+    expect(row[0]?.state).toBe('landed');
+  });
+
+  // NOTE: a `finalize` throw after a confirmed land can't be exercised cleanly — `finalize` is a module-level import
+  // (not injected) and shares the same `db` that `claimExecution` needs to SUCCEED first, so a db that throws only on
+  // the terminal update would be brittle. The fix already runs finalize OUTSIDE the retry scope (its throw can only
+  // propagate, never re-sign): the publish-throw test above covers the terminal-scope guarantee.
+});
+
 // --- OPEN with a WSOL wrap: exercises the position-signer path + the #3 Wall-B SOL-spend cap, END-TO-END in process1.
 const ATA_PROGRAM = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
