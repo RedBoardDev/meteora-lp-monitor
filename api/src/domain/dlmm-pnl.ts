@@ -47,7 +47,9 @@ export function positionEconomics(legs: DlmmLeg[], meta: PoolMeta): PositionEcon
     const v = legValueSol(leg, meta);
     if (leg.kind === 'deposit') depositSol += v;
     else if (leg.kind === 'withdraw') withdrawSol += v;
-    else claimedFeesSol += v; // 'claim'
+    else if (leg.kind === 'claim') claimedFeesSol += v;
+    // A 'close' marker (and any future kind) carries 0 amounts and no economics — it only marks the
+    // close time; it must contribute to NONE of the three totals (never mis-counted as a claim).
   }
   return {
     depositSol,

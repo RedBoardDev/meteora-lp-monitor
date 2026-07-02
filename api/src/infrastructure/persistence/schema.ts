@@ -77,7 +77,7 @@ export const dlmmLegs = pgTable(
     wallet: text('wallet').notNull(),
     position: text('position').notNull(),
     lbPair: text('lb_pair').notNull(),
-    kind: text('kind').notNull(), // 'deposit' | 'withdraw' | 'claim'
+    kind: text('kind').notNull(), // 'deposit' | 'withdraw' | 'claim' | 'close' (zero-amount close marker)
     activeBinId: integer('active_bin_id').notNull(),
     // raw u64 token lamports as decimal strings (can exceed JS/​int64 safe range for big memecoins).
     amountX: text('amount_x').notNull(),

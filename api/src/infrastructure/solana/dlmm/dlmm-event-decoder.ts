@@ -7,6 +7,10 @@ export { DLMM_PROGRAM_ID } from './dlmm-coder';
 
 const bs58 = utils.bytes.bs58;
 
+// A close marker carries no capital, so its `activeBinId` is never used to value anything; use this
+// neutral placeholder when the tx has no price anchor at all (a standalone 100%-removed-then-close).
+const CLOSE_MARKER_BIN = 0;
+
 /**
  * Decodes Meteora DLMM liquidity events from a transaction PURELY from the on-chain Anchor events,
  * driven by the OFFICIAL program IDL (no hand-rolled byte offsets, no Meteora off-chain API).
@@ -100,6 +104,15 @@ export function decodeDlmmLegs(tx: ParsedTransactionWithMeta): DlmmLeg[] {
       lbPair: String(d.lb_pair ?? ''),
     };
     const bin = binOf(d) ?? txBin;
+    // A standalone PositionClose (leader removed 100% earlier, then closes the account) emits ONLY
+    // this event: no capital legs, no bin/price anchor. Emit a zero-amount 'close' marker BEFORE the
+    // bin guard below (which would otherwise drop it) so the fast path still sees the position key —
+    // the mirror is looked up BY position, not by pool/bin. PositionClose carries only
+    // { position, owner } (no lb_pair), so this leg's `lbPair` may be empty; that is acceptable.
+    if (e.name === 'PositionClose') {
+      legs.push({ ...base, kind: 'close', activeBinId: bin ?? CLOSE_MARKER_BIN, amountX: 0n, amountY: 0n });
+      continue;
+    }
     if (bin == null) continue; // no price anchor anywhere in the tx → cannot value; skip
 
     switch (e.name) {
@@ -148,7 +161,7 @@ export function decodeDlmmLegs(tx: ParsedTransactionWithMeta): DlmmLeg[] {
         break;
       }
       default:
-        break; // PositionCreate/Close, CompositionFee, rewards, swaps — not capital legs
+        break; // PositionCreate, CompositionFee, rewards, swaps — not capital legs (PositionClose handled above)
     }
   }
   return legs;

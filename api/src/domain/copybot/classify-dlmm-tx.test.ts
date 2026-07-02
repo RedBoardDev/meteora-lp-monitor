@@ -3,6 +3,7 @@ import { DLMM_PROGRAM_ID } from '@binsight/shared';
 import type { ParsedTransactionWithMeta } from '@solana/web3.js';
 import { describe, expect, it } from 'vitest';
 import type { LoadedPoolMeta } from '../dlmm';
+import { classifyInstruction } from '../dlmm';
 import { type PoolMetaLookup, buildDetectedEvent, poolsOf } from './classify-dlmm-tx';
 
 // --- Event-CPI event builders at the REAL byte layout (same technique as dlmm-event-decoder.test.ts:
@@ -27,6 +28,9 @@ const removeLiquidity = (x: bigint, y: bigint, bin: number): string =>
   cpi([116, 244, 97, 232, 103, 31, 152, 58], Buffer.concat([PK(1), PK(2), PK(3), amounts(x, y), binBuf(bin)]));
 const claimFee2 = (fx: bigint, fy: bigint, bin: number): string =>
   cpi([232, 171, 242, 97, 58, 77, 35, 45], Buffer.concat([PK(1), PK(3), PK(9), amounts(fx, fy), binBuf(bin)]));
+// PositionClose: position, owner (NO lb_pair, NO bin id) — a standalone close emits only this event.
+const closePosition = (): string =>
+  cpi([255, 196, 16, 107, 28, 202, 53, 128], Buffer.concat([PK(3), PK(9)]));
 
 const LB_PAIR = utils.bytes.bs58.encode(PK(1)); // the lb_pair carried by the events above
 const POSITION = utils.bytes.bs58.encode(PK(3)); // the position pubkey (3rd pubkey field of the events above)
@@ -93,6 +97,31 @@ describe('buildDetectedEvent — routing DLMM legs into SOL (golden: open/close/
     expect(e?.withdrawSol).toBeCloseTo(2, 9);
     expect(e?.claimSol).toBeCloseTo(0.125, 9); // the close fees do NOT mix with the withdrawn capital
     expect(e?.position).toBe(POSITION); // remove + claim of the same position → consistent key
+  });
+
+  // NO-MISS-CLOSE PILLAR: a leader that removed 100% earlier then sends a standalone close emits ONLY a
+  // PositionClose event. Before the fix the DetectedEvent's `position` stayed '' (legs were empty), so the
+  // brain's tracker could not match the mirror and the fast-path close never routed (only the 30s reconcile
+  // caught it). The close marker now surfaces the position, and parseInstruction classifies it 'close' → routes.
+  it('STANDALONE close (only PositionClose) → position surfaced + instruction classifies as close', () => {
+    const e = buildDetectedEvent('sigStandaloneClose', tx('ClosePosition2', [closePosition()]), lookupSolY);
+    expect(e).not.toBeNull();
+    expect(e?.position).toBe(POSITION); // THE BUG: was '' → tracker could not key the mirror → close missed on fast path
+    expect(classifyInstruction(e!.instruction)).toBe('close'); // dispatch routes 'close' off this
+    expect(e?.depositSol).toBe(0);
+    expect(e?.withdrawSol).toBe(0);
+    expect(e?.claimSol).toBe(0);
+    expect(e?.pool).toBe(''); // PositionClose carries no lb_pair; empty pool is fine (mirror keyed by position)
+  });
+
+  // REGRESSION: a NORMAL close (Remove + PositionClose) must keep the REAL pool from the withdraw leg — the
+  // zero-amount close marker (empty lbPair) appended after it must NOT clobber `pool`, and amounts are intact.
+  it('NORMAL close (Remove + PositionClose) → real pool preserved, withdraw amount intact, position kept', () => {
+    const e = buildDetectedEvent('sigNormalClose', tx('ClosePosition2', [removeLiquidity(0n, 2_000_000_000n, 0), closePosition()]), lookupSolY);
+    expect(e?.pool).toBe(LB_PAIR); // NOT clobbered to '' by the trailing close marker
+    expect(e?.position).toBe(POSITION);
+    expect(e?.withdrawSol).toBeCloseTo(2, 9); // capital-out unchanged
+    expect(e?.depositSol).toBe(0);
   });
 
   it('CLAIM alone (ClaimFee2) → only claimSol', () => {

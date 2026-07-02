@@ -87,6 +87,28 @@ describe('positionPnlSol — orientation + direction', () => {
     expect(positionEconomics(legs, meta).pnlSol).toBeCloseTo(0.6, 9);
   });
 
+  it('IGNORES a close marker leg entirely — it is never counted as a claim (or any total)', () => {
+    // WHY: the shared decoder now emits a zero-amount 'close' marker for a standalone PositionClose. In the
+    // MONITOR projection a close carries NO economics — it only marks the close time. The old `else` catch-all
+    // would have mis-counted it as a claim. To prove the exclusion is by KIND (not merely because amounts are
+    // 0), the marker below carries a non-zero amount that MUST be ignored: with the old `else` it would inflate
+    // claimedFeesSol by 0.5 SOL; the explicit `claim` branch leaves all three totals untouched.
+    const meta: PoolMeta = { binStep: 100, solSide: 'Y' };
+    const base = [
+      leg('deposit', 0, 0n, 1_000_000_000n),
+      leg('withdraw', 0, 0n, 1_500_000_000n),
+      leg('claim', 0, 0n, 100_000_000n),
+    ];
+    const withClose = [...base, leg('close', 0, 0n, 500_000_000n)]; // amount here is a trap — must be ignored
+    const e = positionEconomics(withClose, meta);
+    const ref = positionEconomics(base, meta);
+    expect(e.depositSol).toBeCloseTo(ref.depositSol, 9);
+    expect(e.withdrawSol).toBeCloseTo(ref.withdrawSol, 9);
+    expect(e.claimedFeesSol).toBeCloseTo(ref.claimedFeesSol, 9); // == real claim only (0.1), NOT 0.6
+    expect(e.claimedFeesSol).toBeCloseTo(0.1, 9);
+    expect(e.pnlSol).toBeCloseTo(ref.pnlSol, 9); // 0.6 — the close contributes nothing
+  });
+
   it('values the non-SOL leg via price for a SOL-as-X pool (inverted)', () => {
     const meta: PoolMeta = { binStep: 100, solSide: 'X' };
     // bin 0 → price 1; X=SOL leg counts directly, Y leg divided by price.

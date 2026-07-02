@@ -49,8 +49,8 @@ export function buildDetectedEvent(
   let position = '';
   let nonSolMint: string | null = null;
   for (const leg of decodeDlmmLegs(tx)) {
-    pool = leg.lbPair;
-    position = leg.position; // P2 tracker key; legs of the same tx share the position
+    if (leg.lbPair) pool = leg.lbPair; // a zero-amount close marker carries no pool → don't clobber the real one
+    if (leg.position) position = leg.position; // P2 tracker key; legs of the same tx share the position
     const meta = poolMeta(leg.lbPair);
     if (!meta || !meta.solSide) continue; // pool not valuable in SOL → action kept, without amount
     nonSolMint = meta.mintX === SOL_MINT ? meta.mintY : meta.mintX;

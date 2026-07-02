@@ -12,8 +12,12 @@ export interface DlmmLeg {
   blockTime: number | null;
   position: string;
   lbPair: string;
-  /** deposit = capital in (cost); withdraw = capital out; claim = fees out (income). */
-  kind: 'deposit' | 'withdraw' | 'claim';
+  /**
+   * deposit = capital in (cost); withdraw = capital out; claim = fees out (income);
+   * close = a zero-amount marker for a standalone `PositionClose` (no capital legs) — it carries only
+   * the position key so the copy-bot fast path can route the close (the mirror is looked up BY position).
+   */
+  kind: 'deposit' | 'withdraw' | 'claim' | 'close';
   /** the pool's active bin at this tx → the historical price anchor. */
   activeBinId: number;
   /** raw token-X lamports moved in this leg. */
@@ -117,7 +121,7 @@ export interface StoredLeg {
   signature: string;
   position: string;
   lbPair: string;
-  kind: 'deposit' | 'withdraw' | 'claim';
+  kind: 'deposit' | 'withdraw' | 'claim' | 'close';
   activeBinId: number;
   amountX: bigint;
   amountY: bigint;

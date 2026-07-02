@@ -51,6 +51,11 @@ function claimFeeV1(fx: bigint, fy: bigint): string {
   fees.writeBigUInt64LE(fy, 8);
   return cpi([75, 122, 154, 48, 140, 74, 123, 163], Buffer.concat([PK(1), PK(3), PK(9), fees]));
 }
+// PositionClose: position, owner (NO lb_pair, NO bin id) — a standalone close emits only this event.
+function closePosition(): string {
+  return cpi([255, 196, 16, 107, 28, 202, 53, 128], Buffer.concat([PK(3), PK(9)]));
+}
+const POSITION = utils.bytes.bs58.encode(PK(3)); // the position pubkey (3rd/1st field of the events above)
 
 const tx = (datas: string[]): ParsedTransactionWithMeta =>
   ({
@@ -102,5 +107,34 @@ describe('decodeDlmmLegs (IDL-driven)', () => {
 
   it('ignores non-DLMM inner instructions and txs with no events', () => {
     expect(decodeDlmmLegs(tx([]))).toEqual([]);
+  });
+
+  // NO-MISS-CLOSE PILLAR: a leader that removed 100% earlier and then sends a standalone close emits
+  // ONLY a PositionClose event — no capital legs, no bin. Before the fix this decoded to [] (the close
+  // was dropped by the default branch AND the bin==null guard), so the fast path never saw the position
+  // and the close was only caught 30s later by the reconcile backstop. Now it yields a 'close' marker.
+  it('decodes a STANDALONE PositionClose → one zero-amount close marker leg carrying the position', () => {
+    const legs = decodeDlmmLegs(tx([closePosition()]));
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({
+      kind: 'close',
+      position: POSITION,
+      lbPair: '', // PositionClose carries no lb_pair → empty pool is acceptable (mirror looked up by position)
+      amountX: 0n,
+      amountY: 0n,
+      activeBinId: 0, // no price anchor in the tx → neutral placeholder (never used to value a marker)
+    });
+  });
+
+  // REGRESSION: a NORMAL close (RemoveLiquidity + PositionClose in one tx) must still decode its
+  // withdraw leg with EXACT amounts, and ALSO surface the close marker — with the bin borrowed from
+  // the sibling Remove event. Amounts of the real leg are unchanged.
+  it('decodes a NORMAL close (Remove + PositionClose) → withdraw leg intact + a close marker', () => {
+    const legs = decodeDlmmLegs(tx([removeLiquidity(156784710127n, 4039260423n, -429), closePosition()]));
+    const w = legs.find((l) => l.kind === 'withdraw')!;
+    const c = legs.find((l) => l.kind === 'close')!;
+    expect(w).toMatchObject({ amountX: 156784710127n, amountY: 4039260423n, activeBinId: -429 });
+    expect(c).toMatchObject({ kind: 'close', position: POSITION, amountX: 0n, amountY: 0n });
+    expect(c.activeBinId).toBe(-429); // bin borrowed from the sibling Remove event in the same tx
   });
 });
