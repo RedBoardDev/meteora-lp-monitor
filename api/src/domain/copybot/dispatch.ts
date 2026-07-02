@@ -36,3 +36,19 @@ export function classifyEventAction(e: DetectedEvent, tracked: boolean, cfg: Rou
   if (kind === 'claim' || e.claimSol > 0) return e.claimSol >= cfg.claimFloorSol ? 'claim' : 'ignore'; // skip a dust claim
   return 'ignore';
 }
+
+/** Dependencies for {@link routeWithPending}: the tracked test (already-open + pending-open) plus the routing config. */
+export interface RouteWithPendingDeps {
+  hasOpen: (pos: string) => boolean;
+  isPendingOpen: (pos: string) => boolean;
+  cfg: RoutingConfig;
+  rugExited: boolean;
+}
+
+/** Route an event treating a position as TRACKED if it is already open OR has an open in flight (pending reservation).
+ *  This is the exact tracked test the brain uses so a follow-up add during a multi-tx open window routes to resync/
+ *  ignore instead of a duplicate open. Pure (no I/O) → unit-testable against real {@link classifyEventAction}. */
+export function routeWithPending(e: DetectedEvent, deps: RouteWithPendingDeps): EventAction {
+  const tracked = deps.hasOpen(e.position) || deps.isPendingOpen(e.position);
+  return classifyEventAction(e, tracked, deps.cfg, deps.rugExited);
+}

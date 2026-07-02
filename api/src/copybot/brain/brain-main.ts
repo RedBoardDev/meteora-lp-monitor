@@ -12,7 +12,7 @@ import { pino } from 'pino';
 import { type CapsState, checkCaps } from '@/domain/copybot/caps';
 import { type SignRequest, SignRequestSchema } from '@/domain/copybot/contracts';
 import { decideEntry } from '@/domain/copybot/decision';
-import { classifyEventAction } from '@/domain/copybot/dispatch';
+import { routeWithPending } from '@/domain/copybot/dispatch';
 import type { DetectedEvent } from '@/domain/copybot/events';
 import { type JournalEntry, stageForKind } from '@/domain/copybot/journal';
 import { RugSlTracker } from '@/domain/copybot/rug-sl';
@@ -63,6 +63,8 @@ import { applyPriorityFee, withCuLimit } from './compute-budget';
 import { type Mirror, MirrorRegistry } from './mirror-registry';
 import { MirrorStore } from './mirror-store';
 import { type ExecutedBatchDeps, processExecutedBatch } from './dispatch-executed';
+import { createPositionQueue } from './position-queue';
+import { createPendingOpenReservations } from './pending-open-reservations';
 import { RugExitStore } from '@/copybot/rug-exit-store';
 
 const STREAM = 'copybot:cmd:sign';
@@ -102,6 +104,12 @@ const depositableToken = (raw: bigint): bigint => (raw > 10_000n ? (raw * 999n) 
 const CONFIG_POLL_MS = 5_000; // re-read the DB-backed runtime config (sizing/caps/two-sided) so web edits apply live
 const SNAPSHOT_TTL_MS = 30_000; // per-mint filter-snapshot cache TTL (short; pre-warm makes repeat opens free)
 const FILTER_TIMEOUT_MS = 800; // hard cap on the filter-data fetch so a slow Jupiter never blocks the open
+// A routed OPEN reserves its leader position until `registry.open` runs. For MULTI-TX opens (two-sided buy→open,
+// Token-2022 create→deposit, wide split) that happens in a later ev:executed continuation, seconds after the open
+// handler returned. This TTL must exceed the longest such window so a follow-up leader add during it routes to
+// resync (not a 2nd open); it matches TOKEN2022_DEPOSIT_GRACE_MS (the orphan-close grace for the same window). A
+// stale reservation self-heals (it only suppresses re-opening the SAME position for ≤TTL, never a double open).
+const OPEN_PENDING_TTL_MS = 90_000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -178,6 +186,15 @@ const pendingToken2022Mirrors = new Map<string, { leaderPosition: string; ourPos
 // ACTUAL balance). Stashed by the reshape buy's commandId; consumed in publishReshapeAddAfterBuy.
 const pendingReshapeAdds = new Map<string, { dist: WeightBin[]; addLamports: bigint; solSide: 'X' | 'Y'; tokenMint: string; lower: number; upper: number; totalAddSol: number; ourPosition: string; pool: string; leaderPosition: string; signature: string }>();
 const buildingToken2022Positions = new Map<string, number>(); // ourPosition → ms the create was published (orphan-close grace while the deposit lands)
+// DUPLICATE-OPEN GUARD (two mechanisms). (1) `positionQueue` serializes ALL handler work for ONE leader position:
+// event B's routing is computed only AFTER event A's handler settled (so a classic open's `registry.open` @511 has
+// run → B sees tracked=true → resync, not a 2nd open). (2) `pendingOpens` bridges the MULTI-TX open window (the
+// open handler returns before `registry.open`, which runs in a later ev:executed continuation): a routed open
+// reserves its leader position; the tracked test treats a pending reservation as tracked; each `registry.open`
+// site clears it; a stale entry self-heals after OPEN_PENDING_TTL_MS. Together they make a follow-up add during an
+// open-in-flight route to resync/ignore instead of a duplicate real-money open.
+const positionQueue = createPositionQueue();
+const pendingOpens = createPendingOpenReservations(OPEN_PENDING_TTL_MS);
 // A two-sided open's BOUGHT token sits on the wallet between the buy landing and the deposit landing. Since the
 // safety-sweep now sells ANY non-SOL residual (SELL_RESIDUAL_DUST_RAW=0), it must NOT sell that in-flight token
 // mid-open (it would empty the token leg). Track the mint while the open is in flight; the sweep skips it within a
@@ -509,6 +526,7 @@ async function main(): Promise<void> {
       deadlineSlot,
     };
     const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol: decision.sizeSol, lowerBin: lower, upperBin: upper, openedAt: Date.now() });
+    pendingOpens.clear(e.position); // now tracked → lift the duplicate-open reservation for this leader position
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
     await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
   }
@@ -695,6 +713,7 @@ async function main(): Promise<void> {
       deadlineSlot,
     };
     const mirror = registry.open({ leaderPosition: e.position, ourPosition: sr.positionPubkey, pool: e.pool, nonSolSymbol: e.nonSolSymbol, sizeSol, lowerBin: lower, upperBin: upper, openedAt: Date.now() });
+    pendingOpens.clear(e.position); // now tracked → lift the duplicate-open reservation for this leader position
     await store.saveOpen(mirror); // persist BEFORE publishing → never an untracked open
     await publish(sr, { leaderPosition: e.position, leaderSizeSol: e.depositSol });
     log.info({ our: sr.positionPubkey, bins: dist.length }, '🪙 two-sided OPEN published (after buy landed)');
@@ -764,6 +783,7 @@ async function main(): Promise<void> {
     if (!pend) return;
     pendingToken2022Mirrors.delete(depositCommandId);
     const mirror = registry.open({ leaderPosition: pend.leaderPosition, ourPosition: pend.ourPosition, pool: pend.pool, nonSolSymbol: pend.nonSolSymbol, sizeSol: pend.sizeSol, lowerBin: pend.lower, upperBin: pend.upper, openedAt: Date.now() });
+    pendingOpens.clear(pend.leaderPosition); // now tracked → lift the duplicate-open reservation for this leader position
     await store.saveOpen(mirror); // tracked only NOW — a funded, deposited position
     buildingToken2022Positions.delete(pend.ourPosition);
     // Token-2022 open is COMPLETE (deposit landed → mirror persisted) → emit the FEED `lifecycle.open_confirmed`,
@@ -1248,40 +1268,60 @@ async function main(): Promise<void> {
   }
 
   const onEvent = (e: DetectedEvent, source: EventSource): void => {
+    // Dedup / tracker / replay-skip stay SYNCHRONOUS at enqueue time (the cursor+tracker state must advance in the
+    // order events arrive, before any handler runs). `tracker.apply` returns null for a stale/duplicate leg.
     const pos = tracker.apply(e);
     log.debug({ source, position: e.position, instr: e.instruction, depositSol: e.depositSol, posNull: !pos }, '👁️ onEvent in');
     if (source === 'replay' || !pos) return; // mono-user: no copying of a past open (stale)
     const t0 = Date.now();
-    const kind = classifyInstruction(e.instruction);
-    const tracked = registry.hasOpen(e.position);
-    const ecRoute = eff();
-    const action = classifyEventAction(e, tracked, { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol }, rugExited.has(e.position)); // pure routing (unit-tested); rug-exited ⇒ no re-open
-    log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
-    if (action !== 'ignore') {
-      // `eventKey` = the per-leg detection correlation (sig:position) so the emit dedup keys uniquely PER routed
-      // leg — without it every routed event shares an empty correlation and the LRU would collapse them into one
-      // row (a lost-detect regression). WS + cursor-poll re-observations of the SAME leg correctly collapse to one.
-      void events.emit('detect.routed', { stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, eventKey: `${e.signature}:${e.position}`, adminDetail: { action, instruction: e.instruction } });
-    }
-    const act =
-      action === 'open'
-        ? handleOpen(e)
-        : action === 'resync'
-          ? handleResync(e)
-          : action === 'close'
-            ? handleClose(e)
-            : action === 'claim'
-              ? handleClaim(e)
-              : null;
-    if (act) {
-      act
-        .then(() => {
-          lastActionAt = Date.now();
-          lastLatencyMs = Date.now() - t0;
-          log.info({ kind, brainMs: lastLatencyMs }, '🧠 build+publish');
-        })
-        .catch((err) => log.error({ err: (err as Error).message }, 'mirror error'));
-    }
+    // SERIALIZE per leader position: all handler work for ONE position runs strictly in order (no concurrent
+    // handlers on the same position → no duplicate open). Route INSIDE the task (at dequeue time) so this event is
+    // classified AFTER the prior same-position handler settled — its `registry.open`/pending reservation is visible.
+    positionQueue.run(e.position, async () => {
+      const kind = classifyInstruction(e.instruction);
+      const ecRoute = eff();
+      // tracked = already-open OR open-in-flight (pending reservation bridges the multi-tx open window) → a
+      // follow-up add during an open routes to resync, never a 2nd open. `rugExited` ⇒ no re-open. Pure routing.
+      const tracked = registry.hasOpen(e.position) || pendingOpens.isPending(e.position);
+      const action = routeWithPending(e, {
+        hasOpen: (p) => registry.hasOpen(p),
+        isPendingOpen: (p) => pendingOpens.isPending(p),
+        cfg: { infiniteAdd: ecRoute.infiniteAdd, claimFloorSol: ecRoute.claimFloorSol },
+        rugExited: rugExited.has(e.position),
+      });
+      log.info({ source, position: e.position, kind, action, depositSol: e.depositSol, withdrawSol: e.withdrawSol, claimSol: e.claimSol, eventCount: pos.eventCount, tracked }, '👁️ event routed');
+      if (action !== 'ignore') {
+        // `eventKey` = the per-leg detection correlation (sig:position) so the emit dedup keys uniquely PER routed
+        // leg — without it every routed event shares an empty correlation and the LRU would collapse them into one
+        // row (a lost-detect regression). WS + cursor-poll re-observations of the SAME leg correctly collapse to one.
+        void events.emit('detect.routed', { stage: 'detect', outcome: 'detected', kind: kind ?? undefined, leader: cfg.leader, pool: e.pool, leaderPosition: e.position, signature: e.signature, leaderSizeSol: e.depositSol || e.withdrawSol || e.claimSol, eventKey: `${e.signature}:${e.position}`, adminDetail: { action, instruction: e.instruction } });
+      }
+      // Reserve BEFORE handleOpen: a multi-tx open returns before `registry.open`, so without this a follow-up add
+      // (a later serialized task) would see tracked=false and route to a 2nd open. Cleared at each registry.open site.
+      if (action === 'open') pendingOpens.reserve(e.position);
+      const act =
+        action === 'open'
+          ? handleOpen(e)
+          : action === 'resync'
+            ? handleResync(e)
+            : action === 'close'
+              ? handleClose(e)
+              : action === 'claim'
+                ? handleClaim(e)
+                : null;
+      if (act) {
+        // AWAIT here so the queue holds the next same-position task until this handler SETTLES; preserve the
+        // existing build+publish / mirror-error logging. The .catch keeps the task from rejecting → the queue
+        // continues (a throwing task never blocks the position's next event).
+        await act
+          .then(() => {
+            lastActionAt = Date.now();
+            lastLatencyMs = Date.now() - t0;
+            log.info({ kind, brainMs: lastLatencyMs }, '🧠 build+publish');
+          })
+          .catch((err) => log.error({ err: (err as Error).message }, 'mirror error'));
+      }
+    });
   };
 
   // A signature the detector could NOT resolve after the bounded retry → force-past to avoid stalling the

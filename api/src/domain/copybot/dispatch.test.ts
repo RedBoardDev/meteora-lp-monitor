@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type EventAction, classifyEventAction } from './dispatch';
+import { type EventAction, classifyEventAction, routeWithPending } from './dispatch';
 import type { DetectedEvent } from './events';
 
 const ev = (over: Partial<DetectedEvent>): DetectedEvent => ({
@@ -155,5 +155,42 @@ describe('classifyEventAction — rug-SL exit must NOT auto-reopen (the leader p
     // The flag only gates the untracked-open path; a still-tracked mirror routes normally regardless.
     expect(classifyEventAction(ev({ instruction: 'ClosePosition', withdrawSol: 0.1 }), true, cfg, true)).toBe('close');
     expect(classifyEventAction(ev({ instruction: 'RemoveLiquidity', withdrawSol: 0.05 }), true, cfg, true)).toBe('resync');
+  });
+});
+
+describe('routeWithPending — a follow-up add during a MULTI-TX open routes to resync/ignore, NEVER a 2nd open', () => {
+  const cfg = { infiniteAdd: true, claimFloorSol: 0 };
+  const deposit = { instruction: 'AddLiquidityByStrategy2', depositSol: 0.1 };
+
+  it('an open is routed on an untracked, not-pending position (and the brain then reserves it)', () => {
+    const action = routeWithPending(ev(deposit), { hasOpen: () => false, isPendingOpen: () => false, cfg, rugExited: false });
+    expect(action).toBe('open');
+  });
+
+  it('★ a follow-up deposit while the open is PENDING (registry.open not yet run) → resync, not a duplicate open', () => {
+    // This is the duplicate-open bug: without the pending reservation, hasOpen is still false during a multi-tx
+    // open window and the follow-up deposit would route to a SECOND on-chain open (real-money double open).
+    const action = routeWithPending(ev(deposit), { hasOpen: () => false, isPendingOpen: () => true, cfg, rugExited: false });
+    expect(action).toBe('resync');
+  });
+
+  it('a follow-up deposit while pending with infiniteAdd OFF → ignore (matches a normal add), still not a 2nd open', () => {
+    const action = routeWithPending(ev(deposit), { hasOpen: () => false, isPendingOpen: () => true, cfg: { infiniteAdd: false, claimFloorSol: 0 }, rugExited: false });
+    expect(action).toBe('ignore');
+  });
+
+  it('once registry.open has run (hasOpen true, no longer pending) routing is normal → resync on a deposit', () => {
+    const action = routeWithPending(ev(deposit), { hasOpen: () => true, isPendingOpen: () => false, cfg, rugExited: false });
+    expect(action).toBe('resync');
+  });
+
+  it('a CLOSE during a pending open still routes to close (exit path never suppressed)', () => {
+    const action = routeWithPending(ev({ instruction: 'ClosePosition', withdrawSol: 0.1 }), { hasOpen: () => false, isPendingOpen: () => true, cfg, rugExited: false });
+    expect(action).toBe('close');
+  });
+
+  it('neither open nor pending, no deposit → ignore (no stale copying)', () => {
+    const action = routeWithPending(ev({ instruction: 'ClaimFee', claimSol: 0.01 }), { hasOpen: () => false, isPendingOpen: () => false, cfg, rugExited: false });
+    expect(action).toBe('ignore');
   });
 });
