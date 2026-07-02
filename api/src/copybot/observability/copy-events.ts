@@ -87,6 +87,12 @@ export class CopyEvents {
     private readonly store: EventStore,
     private readonly log: Logger,
     private readonly base: CopyEventContext,
+    /**
+     * OPTIONAL external alert sink (e.g. an `ALERT_WEBHOOK` POST) — fired fire-and-forget for operator-actionable
+     * (`pinned`) events only, so the durable/feed-visible set also reaches the out-of-band channel. Best-effort:
+     * the sink MUST never throw (its call is guarded by the `emit` loop guard) and is absent (no-op) without config.
+     */
+    private readonly alertSink?: (e: CopyEvent) => void,
   ) {}
 
   /** The bound tenant context (read-only) — the shims reuse it (e.g. to know the bound `process`). */
@@ -106,6 +112,9 @@ export class CopyEvents {
       this.log[level(e.severity)](toAdminJson(e), code); // structured admin mirror (sync)
       if (e.pinned) {
         void this.store.persistDurable(e); // critical: durable (awaited inside the store; never throws)
+        // Operator-actionable ("VERIFY/CLOSE MANUALLY"): also fan out to the external alert channel. Fire-and-forget,
+        // guarded by this try (a throwing sink must not break the hot path). No-op sink when ALERT_WEBHOOK is unset.
+        this.alertSink?.(e);
       } else {
         void this.store.persist(e); // fire-and-forget
       }

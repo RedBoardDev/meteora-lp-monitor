@@ -45,7 +45,7 @@ import { PriorityFeeOracle } from '@/infrastructure/solana/priority-fee-oracle';
 import { HeliusTxSubscriber } from '@/infrastructure/solana/helius-tx-subscriber';
 import { readAllOwnerTokenBalances, readOwnerTokenBalance } from '@/infrastructure/solana/token-balance-reader';
 import { HeliusTokenMetadataGateway } from '@/infrastructure/solana/token-metadata-gateway';
-import { bindAlertEvents } from '@/copybot/alert';
+import { createAlertWebhookSink } from '@/copybot/alert';
 import { assertBusKey } from '@/copybot/bus-key-guard';
 import { ConfigStore } from '@/copybot/config-store';
 import { SYSTEM_USER_ID } from '@/copybot/journal-store';
@@ -251,11 +251,11 @@ async function main(): Promise<void> {
   const db = openDatabase(cfg.dbUrl);
   const store = new MirrorStore(db); // no-dormant persistence (survives restarts)
   // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger. The
-  // brain's call sites now emit TYPED codes through it directly (P2); `bindAlertEvents` keeps the P1 `alert()` shim
-  // durable + feed-visible for any future/non-migrated caller. Every row back-fills user/wallet/correlation.
+  // brain's call sites emit TYPED codes through it directly; every row back-fills user/wallet/correlation. Operator-
+  // actionable (pinned) events also fan out to the external ALERT_WEBHOOK via the injected sink (no-op when unset).
   const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
-  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' });
-  bindAlertEvents(events); // the alert() shim (P1) still persists a pinned, feed-visible row for any non-migrated caller
+  const alertSink = createAlertWebhookSink(process.env.ALERT_WEBHOOK, tlog);
+  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.ownerPubkey, process: 'brain' }, alertSink);
   // P2: emit a TYPED event for a call site whose `reason` is RUNTIME-DYNAMIC (decision.reason, cap.reason, the
   // filter verdict, the generic publish marker). The leaf == the verbatim reason (SPEC §2.1 + resolveLegacyReason);
   // an unmapped/absent reason deterministically falls back to `system.unmapped` (never code-less). The pure

@@ -10,7 +10,7 @@
 import { Connection } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { pino } from 'pino';
-import { bindAlertEvents } from '@/copybot/alert';
+import { createAlertWebhookSink } from '@/copybot/alert';
 import { assertBusKey } from '@/copybot/bus-key-guard';
 import { SYSTEM_USER_ID } from '@/copybot/journal-store';
 import { CopyEvents } from '@/copybot/observability/copy-events';
@@ -66,11 +66,12 @@ async function main(): Promise<void> {
   const conn = new Connection(cfg.httpUrl, 'confirmed');
   const db = openDatabase(cfg.dbUrl);
   // ONE observability emitter bound to this tenant (mono-user PoC): a tenant-scoped pino child is its logger. The
-  // vault's call sites (process1 + the loop) now emit TYPED codes through it directly (P2); `bindAlertEvents` keeps
-  // the un-migrated `alert()` shim durable + feed-visible. Every row back-fills user/wallet/correlation.
+  // vault's call sites (process1 + the loop) emit TYPED codes through it directly; every row back-fills
+  // user/wallet/correlation. Operator-actionable (pinned) events also fan out to the external ALERT_WEBHOOK via the
+  // injected sink (no-op when unset).
   const tlog = log.child({ userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
-  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' });
-  bindAlertEvents(events); // the alert() shim (P1) still persists a pinned, feed-visible row for any non-migrated caller
+  const alertSink = createAlertWebhookSink(process.env.ALERT_WEBHOOK, tlog);
+  const events = new CopyEvents(new EventStore(db, tlog), tlog, { userId: SYSTEM_USER_ID, wallet: cfg.owner, process: 'coffre' }, alertSink);
   const configStore = new ConfigStore(db, log);
   let runtimeConfig = await configStore.seedIfAbsent(); // DB-backed config; the maxTradeSol re-clamp ceiling is read live (env wins when set)
   const maxTradeSol = (): number => cfg.maxTradeSolEnv ?? runtimeConfig.user.sizing.maxTradeSizeSol;

@@ -78,6 +78,39 @@ describe('CopyEvents.emit · routing + mirror', () => {
   });
 });
 
+describe('CopyEvents.emit · external alert sink (operator-actionable fan-out)', () => {
+  it('fires the injected sink for a pinned event (the operator-actionable set reaches the external channel)', () => {
+    const { store } = fakeStore();
+    const sink = vi.fn();
+    const events = new CopyEvents(store, fakeLog(), BASE, sink);
+    events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', commandId: 'PIN' });
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(sink.mock.calls[0]![0]!.code).toBe('lifecycle.open_failed');
+    expect(sink.mock.calls[0]![0]!.pinned).toBe(true);
+  });
+
+  it('does NOT fire the sink for a non-pinned event (only the durable/feed-visible set pages the operator)', () => {
+    const { store } = fakeStore();
+    const sink = vi.fn();
+    const events = new CopyEvents(store, fakeLog(), BASE, sink);
+    events.emit('detect.observed', { stage: 'detect', outcome: 'detected', commandId: 'NP' });
+    expect(sink).not.toHaveBeenCalled();
+  });
+
+  it('never lets a THROWING sink break emit (the sink is best-effort, guarded by the loop guard)', () => {
+    const { store, durable } = fakeStore();
+    const log = fakeLog();
+    const sink = vi.fn(() => {
+      throw new Error('webhook boom');
+    });
+    const events = new CopyEvents(store, log, BASE, sink);
+    expect(() => events.emit('lifecycle.open_failed', { stage: 'open', outcome: 'failed', commandId: 'BOOM' })).not.toThrow();
+    expect(durable).toHaveLength(1); // the durable persist still happened before the sink threw
+    // Swallowed loud by the loop guard (in addition to the severity=error admin mirror this pinned event emits).
+    expect(log.error).toHaveBeenCalledWith(expect.objectContaining({ code: 'lifecycle.open_failed' }), 'copy-events: emit failed (non-fatal)');
+  });
+});
+
 describe('CopyEvents.emit · dedup (SPEC §6)', () => {
   it('collapses a repeat of the same (correlationId, code) to ONE row (WS + cursor-poll double-detect)', () => {
     const { store, persisted } = fakeStore();
